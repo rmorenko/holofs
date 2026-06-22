@@ -1,0 +1,22 @@
+[package]
+name = "holofs-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Holofs node storage: persistent shard store, Ed25519 identity, signed admin whitelist."
+
+[dependencies]
+holofs-core.workspace = true
+holofs-wire.workspace = true
+tokio.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+# Stage 6 — wire-protocol TLS scaffold (server side of node↔gateway link).
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rcgen = { workspace = true }
+
+[lints]
+workspace = true

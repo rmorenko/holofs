@@ -1,0 +1,17 @@
+[package]
+name = "holofs-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Holofs media codecs: image (PNG/JPEG/WebP/GIF/BMP/TIFF), audio (symphonia), text (UTF-8 chunking)."
+
+[dependencies]
+holofs-core.workspace = true
+image.workspace = true
+png.workspace = true
+symphonia.workspace = true
+
+[lints]
+workspace = true

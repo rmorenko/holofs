@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Per-arch tarballs of every CLI binary + the `holofs-web` SSR binary +
+  # its WASM site bundle. The website tarball is uploaded once (it's the
+  # same artifact on every arch), but bin tarballs are arch-specific.
+  # ---------------------------------------------------------------------------
+  build-binaries:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  leptos: true  }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl, leptos: false }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, leptos: false }
+          - { os: macos-latest,   target: x86_64-apple-darwin,       leptos: false }
+          - { os: macos-latest,   target: aarch64-apple-darwin,      leptos: false }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    leptos: false }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}${{ matrix.leptos && ', wasm32-unknown-unknown' || '' }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install binaryen (Linux GNU only — for cargo-leptos)
+        if: matrix.leptos
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends binaryen
+
+      - name: Install cargo-leptos (Linux GNU only)
+        if: matrix.leptos
+        run: cargo install --locked cargo-leptos
+
+      - name: Install cross (non-native Linux targets)
+        if: contains(matrix.target, 'linux') && matrix.target != 'x86_64-unknown-linux-gnu'
+        run: cargo install cross --locked
+
+      # CLI binaries — every target builds these.
+      - name: Build CLI binaries
+        shell: bash
+        run: |
+          if [[ "${{ matrix.target }}" == *"linux"* && "${{ matrix.target }}" != "x86_64-unknown-linux-gnu" ]]; then
+            cross build --release --target ${{ matrix.target }} -p holofs-cli
+          else
+            cargo build --release --target ${{ matrix.target }} -p holofs-cli
+          fi
+
+      # holofs-web + WASM bundle — only on the canonical Linux target.
+      # `cargo-leptos` does not cross-compile cleanly to every host yet.
+      - name: Build holofs-web SSR + WASM bundle
+        if: matrix.leptos
+        run: cargo leptos build --project holofs-web --release
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cd target/${{ matrix.target }}/release
+          for bin in holofs holofs-node holofs-admin holofs-bench \
+                     holofs-inspect holofs-cluster holofs-fs; do
+            if [ -f "$bin" ]; then cp "$bin" "../../../dist/" || true; fi
+            if [ -f "$bin.exe" ]; then cp "$bin.exe" "../../../dist/" || true; fi
+          done
+          cd ../../..
+          if [ "${{ matrix.leptos }}" = "true" ] && [ -f target/release/holofs-web ]; then
+            cp target/release/holofs-web dist/
+          fi
+          tar -czf holofs-${{ matrix.target }}.tar.gz -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: holofs-${{ matrix.target }}
+          path: holofs-${{ matrix.target }}.tar.gz
+
+      # WASM site bundle — independent of CPU arch.
+      - name: Package WASM bundle (Linux GNU only)
+        if: matrix.leptos
+        shell: bash
+        run: |
+          tar -czf holofs-site-bundle.tar.gz -C target/site .
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.leptos
+        with:
+          name: holofs-site-bundle
+          path: holofs-site-bundle.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # Publish the GH release with every per-arch tarball + the WASM bundle.
+  # ---------------------------------------------------------------------------
+  publish-release:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: holofs-*
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            holofs-*.tar.gz
+          generate_release_notes: true
+
+  # ---------------------------------------------------------------------------
+  # Multi-arch container image via buildx. The Dockerfile drives
+  # cargo-leptos itself; we don't need to pre-build the bundle here.
+  # ---------------------------------------------------------------------------
+  docker:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract semver tag
+        id: tag
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          # Multi-arch images get one immutable digest per arch + a manifest.
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.version }}
+            ghcr.io/${{ github.repository }}:latest
+          labels: |
+            org.opencontainers.image.version=${{ steps.tag.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,11 @@
+[package]
+name = "holofs-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Holofs core: GF(2^8) arithmetic, Haar DWT, RLNC, SHA-256, Merkle. Zero deps."
+
+[lints]
+workspace = true

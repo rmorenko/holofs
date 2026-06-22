@@ -1,0 +1,132 @@
+[package]
+name = "holofs-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Holofs Leptos web UI (SSR via axum + leptos_axum)."
+
+# Two compilation targets share src/lib.rs:
+# - `ssr`: server-side rendering, pulls in axum + tokio + leptos_axum.
+# - `hydrate`: WASM bundle that hydrates the SSR'd HTML in the browser.
+# Exactly one of these features must be active per build.
+[features]
+default = []
+ssr = [
+    "dep:axum",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:tokio",
+    "dep:http",
+    "dep:mime_guess",
+    "dep:leptos_axum",
+    "dep:holofs-core",
+    "dep:holofs-model",
+    "dep:holofs-codec",
+    "dep:holofs-client",
+    "dep:holofs-cluster",
+    "dep:holofs-storage",
+    "dep:holofs-gateway",
+    "dep:holofs-analytics",
+    "dep:png",
+    "dep:async-stream",
+    "dep:futures-util",
+    "dep:clap",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:rustls",
+    "dep:pulldown-cmark",
+    "leptos/ssr",
+    "leptos_router/ssr",
+    "leptos_meta/ssr",
+]
+# Leptos 0.7 dropped the per-sub-crate `hydrate` feature for `leptos_meta`
+# and `leptos_router` — only the umbrella `leptos/hydrate` flag remains.
+hydrate = [
+    "dep:console_error_panic_hook",
+    "dep:wasm-bindgen",
+    "leptos/hydrate",
+]
+
+[lib]
+path = "src/lib.rs"
+# crate-type cdylib enables the WASM build; rlib keeps it usable as a normal Rust lib.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "holofs-web"
+path = "src/main.rs"
+required-features = ["ssr"]
+
+[dependencies]
+leptos = { workspace = true }
+leptos_router = { workspace = true }
+leptos_meta = { workspace = true }
+# Server functions cross the wire as JSON; serde is needed in both SSR and
+# hydrate builds because the function signatures must serialize on both sides.
+serde = { version = "1", features = ["derive"] }
+
+# SSR-only deps. Gated by the `ssr` feature so the WASM build skips them.
+axum = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+mime_guess = { workspace = true, optional = true }
+leptos_axum = { workspace = true, optional = true }
+
+# Holofs internal crates — only needed on the server (cluster bootstrap +
+# server function bodies). They depend on tokio TCP and would not compile to
+# WASM, so they are strictly ssr-gated.
+holofs-core      = { workspace = true, optional = true }
+holofs-model     = { workspace = true, optional = true }
+holofs-codec     = { workspace = true, optional = true }
+holofs-client    = { workspace = true, optional = true }
+holofs-cluster   = { workspace = true, optional = true }
+holofs-storage   = { workspace = true, optional = true }
+holofs-gateway   = { workspace = true, optional = true }
+holofs-analytics = { workspace = true, optional = true }
+png              = { workspace = true, optional = true }
+async-stream     = { workspace = true, optional = true }
+futures-util     = { workspace = true, optional = true }
+clap             = { workspace = true, optional = true }
+tracing          = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+rustls           = { workspace = true, optional = true }
+# Stage 10: in-app /help section renders markdown server-side.
+pulldown-cmark   = { workspace = true, optional = true }
+# Needed in both ssr and hydrate: server side builds the SSE payload; client
+# side parses it inside the LiveClusterStats EventSource handler.
+serde_json       = { workspace = true }
+
+# WASM-only deps. Gated by the `hydrate` feature so SSR doesn't pull them in.
+console_error_panic_hook = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+
+# Stage 8: the explicit `server_fn` workspace pin was removed — Leptos 0.7
+# carries it transitively. Keep `web-sys`/`js-sys` direct so we can opt
+# into the EventSource/MessageEvent features the live `/health` SSE
+# consumer needs.
+web-sys = { workspace = true, features = ["EventSource", "MessageEvent", "Window"] }
+js-sys = { workspace = true }
+
+[lints]
+workspace = true
+
+# cargo-leptos configuration. Picked up when `cargo leptos build/watch/serve`
+# is invoked from the workspace root.
+[package.metadata.leptos]
+output-name = "holofs"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/main.css"
+assets-dir = "assets"
+site-addr = "127.0.0.1:8787"
+reload-port = 3001
+browserquery = "defaults"
+env = "DEV"
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false

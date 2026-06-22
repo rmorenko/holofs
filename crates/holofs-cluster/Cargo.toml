@@ -1,0 +1,19 @@
+[package]
+name = "holofs-cluster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Holofs cluster operations: health monitor, PoR auditor, reputation, rebalance."
+
+[dependencies]
+holofs-core.workspace = true
+holofs-model.workspace = true
+holofs-wire.workspace = true
+holofs-storage.workspace = true
+holofs-client.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

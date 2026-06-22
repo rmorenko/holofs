@@ -1,0 +1,136 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/holofs-core",
+    "crates/holofs-model",
+    "crates/holofs-wire",
+    "crates/holofs-codec",
+    "crates/holofs-storage",
+    "crates/holofs-client",
+    "crates/holofs-cluster",
+    "crates/holofs-analytics",
+    "crates/holofs-gateway",
+    "crates/holofs-cli",
+    "crates/holofs-web",
+]
+
+[workspace.package]
+# 0.1.0 → 0.2.0 — Stage 4 axum + Leptos SSR migration (gateway API rewrite).
+# 0.2.0 → 0.3.0 — Stage 8 Leptos 0.7 upgrade, MSRV bump 1.75 → 1.81, and
+# the rustls-pemfile → rustls-pki-types switchover that drops the
+# unmaintained-dep advisories.
+# 0.3.0 → 0.4.0 — Stage 10 in-app help viewer, UI i18n (5 locales) and
+# fully translated documentation set under docs/{ru,de,fr,es}/.
+version = "0.4.0"
+edition = "2021"
+# Leptos 0.7 itself only needs Rust 1.76, but several transitive deps
+# (tokio 1.41+, tracing-subscriber 0.3.19+, hyper 1.5+) have moved to
+# 1.80/1.81 baselines. 1.81 is the common upper bound across the tree.
+rust-version = "1.81"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/holofs/holofs"
+# None of the holofs-* crates are intended for crates.io at this stage —
+# the workspace ships as a single binary distribution. Individual crates
+# opt back in by setting `publish = true` once their public API
+# stabilises (planned for v0.3+).
+publish = false
+
+[workspace.dependencies]
+# Math/IO base
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
+png = "0.18"
+image = { version = "0.25", default-features = false, features = ["jpeg", "webp", "gif", "bmp", "tiff", "png"] }
+symphonia = { version = "0.5", default-features = false, features = ["wav", "mp3", "flac", "vorbis", "ogg", "aac", "isomp4", "aiff", "pcm"] }
+
+# Crypto
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+# Stage 6: rustls TLS on the wire protocol. tokio-rustls 0.26 lines up with
+# the rustls 0.23 line; rcgen self-signs the embedded-mode CA. Stage 8
+# dropped the unmaintained rustls-pemfile in favour of the PEM parser
+# shipped under `rustls::pki_types::pem` (rustls-pki-types 1.x).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+
+# Web stack: axum HTTP server + Leptos SSR. cargo-leptos drives the WASM build.
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "json", "matched-path", "tracing", "multipart"] }
+tower = { version = "0.4", default-features = false }
+tower-http = { version = "0.5", default-features = false, features = ["fs", "compression-gzip", "trace"] }
+http = "1"
+http-body-util = "0.1"
+mime_guess = "2"
+# Streamed Server-Sent Events. axum::response::sse takes any Stream — the
+# macro just keeps the SSE handler readable.
+async-stream = "0.3"
+futures-util = { version = "0.3", default-features = false }
+serde_json = "1"
+
+# Stage 5: operational concerns — CLI parser, structured logging.
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi", "tracing-log"] }
+
+# Stage 10: server-side markdown renderer for the in-app /help section.
+# `gfm` enables tables/strikethrough/tasklists; `math` enables `$…$` and
+# `$$…$$` capture (we render the actual math client-side via KaTeX).
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+
+# Leptos 0.7 stable. The 0.7 ecosystem drops the unmaintained
+# `proc-macro-error`/`paste` chain, lets us unpin `web-sys`/`js-sys`, and
+# replaces the broken `server_fn 0.6.15` browser code path with a clean
+# `server_fn 0.7+` build.
+leptos = { version = "0.7", default-features = false }
+leptos_axum = { version = "0.7" }
+leptos_router = { version = "0.7", default-features = false }
+leptos_meta = { version = "0.7", default-features = false }
+
+# WASM-side helpers (only pulled in by the `hydrate` feature of holofs-web).
+console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2"
+# Pin removed in Stage 8 — `server_fn 0.7` uses the modern `RequestInit`
+# chained API so web-sys 0.3.70+ works.
+web-sys = "0.3"
+js-sys = "0.3"
+
+# Internal crates (path-deps)
+holofs-core      = { path = "crates/holofs-core",      version = "0.4.0" }
+holofs-model     = { path = "crates/holofs-model",     version = "0.4.0" }
+holofs-wire      = { path = "crates/holofs-wire",      version = "0.4.0" }
+holofs-codec     = { path = "crates/holofs-codec",     version = "0.4.0" }
+holofs-storage   = { path = "crates/holofs-storage",   version = "0.4.0" }
+holofs-client    = { path = "crates/holofs-client",    version = "0.4.0" }
+holofs-cluster   = { path = "crates/holofs-cluster",   version = "0.4.0" }
+holofs-analytics = { path = "crates/holofs-analytics", version = "0.4.0" }
+holofs-gateway   = { path = "crates/holofs-gateway",   version = "0.4.0" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# === Workspace-wide lints (Rust 1.74+) ===================================
+# Every crate opts in via `[lints] workspace = true`.
+# Split into rust + clippy. pedantic with a list of reasonable allows; otherwise noisy.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Pedantic rules that are too noisy — turn them off:
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+doc_markdown = "allow"

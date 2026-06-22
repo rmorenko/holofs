@@ -1,0 +1,10 @@
+msrv = "1.75"
+
+# Heuristics for clippy::large-types-passed-by-value etc.
+avoid-breaking-exported-api = false
+
+# Лимиты для cognitive-complexity / function-size — поднимаем чтобы handler'ы
+# гейтвея и encode/decode не триггерили.
+cognitive-complexity-threshold = 30
+type-complexity-threshold = 350
+too-many-arguments-threshold = 8

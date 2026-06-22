@@ -1,0 +1,23 @@
+[package]
+name = "holofs-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Holofs distributed client: PUT/GET/REPAIR/AUDIT + per-kind paths (image/audio/text/opaque)."
+
+[dependencies]
+holofs-core.workspace = true
+holofs-model.workspace = true
+holofs-wire.workspace = true
+holofs-storage.workspace = true
+tokio.workspace = true
+holofs-codec.workspace = true
+holofs-analytics.workspace = true
+# Stage 6: wire-protocol TLS scaffold (client side).
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+
+[lints]
+workspace = true

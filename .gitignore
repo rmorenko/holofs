@@ -1,0 +1,33 @@
+# Build artifacts
+/target
+**/*.rs.bk
+
+# Runtime data
+/holofs-data/
+/.cluster-data/
+/.cluster-logs/
+/storage/
+/data/
+/out/
+
+# IDE
+/.vscode/
+/.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config
+.env
+.env.local
+
+# Generated docs
+/docs/_book/
+/docs/.cache/
+
+# Coverage
+*.profraw
+lcov.info

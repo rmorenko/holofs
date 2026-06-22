@@ -1,0 +1,16 @@
+apiVersion: v2
+name: holofs
+description: Holographic distributed filesystem
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/holofs/holofs
+sources:
+  - https://github.com/holofs/holofs
+keywords:
+  - storage
+  - distributed
+  - holographic
+  - erasure-coding
+maintainers:
+  - name: holofs maintainers

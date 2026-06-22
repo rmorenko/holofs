@@ -1,0 +1,77 @@
+# holofs Helm chart values.
+
+image:
+  repository: ghcr.io/holofs/holofs
+  pullPolicy: IfNotPresent
+  tag: ""  # defaults to .Chart.AppVersion
+
+imagePullSecrets: []
+
+# Number of node replicas (in distributed mode each replica is a separate node).
+# In embedded mode (single replica) the binary spawns N_NODES in-process nodes.
+nodeCount: 1
+
+# Gateway replica count.
+gatewayCount: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+persistence:
+  enabled: true
+  storageClass: ""
+  accessModes: [ReadWriteOnce]
+  size: 10Gi
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 8787
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: holofs.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Security context.
+podSecurityContext:
+  fsGroup: 10001
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+
+# Probes — гейтвей отвечает на GET /.
+livenessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 30
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# Env overrides.
+env:
+  HOLOFS_MONITOR_INTERVAL: "15"
+  HOLOFS_AUDIT_INTERVAL: "30"
