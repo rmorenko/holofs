@@ -63,16 +63,33 @@ pub struct CatalogEntry {
     prefix = "/api",
     endpoint = "get_catalog",
 )]
-pub async fn get_catalog() -> Result<Vec<CatalogEntry>, ServerFnError> {
+pub async fn get_catalog(
+    name_glob: String,
+    date_from: String,
+    date_to: String,
+) -> Result<Vec<CatalogEntry>, ServerFnError> {
     use std::sync::Arc;
 
     let gw = expect_context::<Arc<holofs_gateway::Gateway>>();
     let catalog = gw.catalog().lock().await;
-    let mut out: Vec<CatalogEntry> = catalog
+    let filter = CatalogFilter::parse(&name_glob, &date_from, &date_to)
+        .map_err(|e| ServerFnError::<server_fn::error::NoCustomError>::ServerError(e))?;
+    let raw: Vec<CatalogEntry> = catalog
         .entries
         .iter()
         .map(|(name, m)| CatalogEntry::from_manifest(name, m))
         .collect();
+    // Stage 11.17: apply server-side filter. Filter is matched against
+    // leaves (non-directory entries); ancestor directories of any
+    // matching leaf are kept automatically so the tree still has paths
+    // to render. Directories whose own name/date matches the filter
+    // also stay (so users can `q=Roman*` and find that folder
+    // directly).
+    let mut out: Vec<CatalogEntry> = if filter.is_empty() {
+        raw
+    } else {
+        apply_filter(raw, &filter)
+    };
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
@@ -86,7 +103,12 @@ pub async fn get_catalog() -> Result<Vec<CatalogEntry>, ServerFnError> {
     prefix = "/api",
     endpoint = "list_dir",
 )]
-pub async fn list_dir(prefix: String) -> Result<Vec<CatalogEntry>, ServerFnError> {
+pub async fn list_dir(
+    prefix: String,
+    name_glob: String,
+    date_from: String,
+    date_to: String,
+) -> Result<Vec<CatalogEntry>, ServerFnError> {
     use std::sync::Arc;
 
     let gw = expect_context::<Arc<holofs_gateway::Gateway>>();
@@ -94,9 +116,12 @@ pub async fn list_dir(prefix: String) -> Result<Vec<CatalogEntry>, ServerFnError
         .list_dir(&prefix)
         .await
         .map_err(|e| ServerFnError::<server_fn::error::NoCustomError>::ServerError(e.to_string()))?;
+    let filter = CatalogFilter::parse(&name_glob, &date_from, &date_to)
+        .map_err(|e| ServerFnError::<server_fn::error::NoCustomError>::ServerError(e))?;
     let mut out: Vec<CatalogEntry> = children
         .into_iter()
         .map(|(name, m)| CatalogEntry::from_manifest(&name, &m))
+        .filter(|e| filter.is_empty() || filter.matches(e))
         .collect();
     // Directories first, then objects — both alphabetical inside the bucket.
     out.sort_by(|a, b| {
@@ -105,6 +130,184 @@ pub async fn list_dir(prefix: String) -> Result<Vec<CatalogEntry>, ServerFnError
         b_dir.cmp(&a_dir).then_with(|| a.name.cmp(&b.name))
     });
     Ok(out)
+}
+
+/// Server-side filter shared by `get_catalog` + `list_dir`. Built from
+/// three URL params: `q` (name glob with `*`), `from` and `to` (date
+/// range, `YYYY-MM-DD`).
+#[cfg(feature = "ssr")]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CatalogFilter {
+    /// Compiled regex from the glob pattern. `None` means "no name
+    /// filter active".
+    name_re: Option<regex::Regex>,
+    /// Lower bound on `created_at_unix`. `0` = no lower bound.
+    from_unix: u64,
+    /// Upper bound (exclusive). `0` = no upper bound.
+    to_unix_exclusive: u64,
+}
+
+#[cfg(feature = "ssr")]
+impl CatalogFilter {
+    /// Parse raw query params; reject malformed dates / regexes with a
+    /// user-readable message.
+    fn parse(name_glob: &str, from: &str, to: &str) -> Result<Self, String> {
+        let name_re = if name_glob.trim().is_empty() {
+            None
+        } else {
+            Some(compile_glob(name_glob.trim()).map_err(|e| format!("bad name filter: {e}"))?)
+        };
+        let from_unix = parse_date_to_unix(from, false)
+            .map_err(|e| format!("bad `from` date: {e}"))?;
+        let to_unix_exclusive = parse_date_to_unix(to, true)
+            .map_err(|e| format!("bad `to` date: {e}"))?;
+        Ok(Self {
+            name_re,
+            from_unix,
+            to_unix_exclusive,
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.name_re.is_none() && self.from_unix == 0 && self.to_unix_exclusive == 0
+    }
+
+    /// True when `entry` clears every active sub-filter. Legacy
+    /// entries with `created_at_unix == 0` (HOLOFSM6/7) are kept
+    /// whenever a date filter is set — without a timestamp we'd have
+    /// to drop them, which is more confusing than including them.
+    fn matches(&self, entry: &CatalogEntry) -> bool {
+        if let Some(re) = &self.name_re {
+            // Glob runs against the **basename** so `q=*.png` doesn't
+            // need to know what folder the file is in. Users who want
+            // path-aware matches can prefix `*/`: `*/2026/*` for an
+            // explicit directory segment.
+            let leaf = entry.name.rsplit('/').next().unwrap_or(&entry.name);
+            if !re.is_match(leaf) {
+                return false;
+            }
+        }
+        let has_ts = entry.created_at_unix != 0;
+        if self.from_unix != 0 && has_ts && entry.created_at_unix < self.from_unix {
+            return false;
+        }
+        if self.to_unix_exclusive != 0 && has_ts && entry.created_at_unix >= self.to_unix_exclusive
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// Compile a simple glob (`*` = any sequence) into a full-string regex.
+/// Every other char is regex-escaped. Patterns are anchored on both
+/// sides (`^…$`) so `photo` matches exactly `photo`, not `photograph`.
+#[cfg(feature = "ssr")]
+fn compile_glob(pat: &str) -> Result<regex::Regex, regex::Error> {
+    let mut out = String::with_capacity(pat.len() * 2 + 4);
+    out.push('^');
+    for c in pat.chars() {
+        match c {
+            '*' => out.push_str(".*"),
+            // Regex metacharacters that must be escaped to keep their
+            // literal meaning inside the user's filter pattern.
+            '.' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\' | '^' | '$' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('$');
+    regex::RegexBuilder::new(&out).case_insensitive(true).build()
+}
+
+/// Parse `YYYY-MM-DD` to a Unix epoch second. Empty string is a
+/// no-op (`0`). `inclusive_end=true` flips the meaning to "end of day"
+/// so the upper bound covers the entire `to` day — the filter then
+/// stores the value as **exclusive** (start of next day).
+#[cfg(feature = "ssr")]
+fn parse_date_to_unix(s: &str, inclusive_end: bool) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(0);
+    }
+    // Expect strict YYYY-MM-DD; the HTML5 `<input type="date">` always
+    // emits this format.
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return Err(format!("expected YYYY-MM-DD, got {s:?}"));
+    }
+    let y: i64 = parts[0].parse().map_err(|_| format!("bad year in {s:?}"))?;
+    let m: u32 = parts[1].parse().map_err(|_| format!("bad month in {s:?}"))?;
+    let d: u32 = parts[2].parse().map_err(|_| format!("bad day in {s:?}"))?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || !(1970..=2999).contains(&y) {
+        return Err(format!("out-of-range date {s:?}"));
+    }
+    let mut secs = ymd_to_unix(y, m, d);
+    if inclusive_end {
+        // Advance by 86 400s so a `to=2026-06-23` filter covers
+        // anything created up to 2026-06-23 23:59:59 UTC.
+        secs = secs.saturating_add(86_400);
+    }
+    Ok(secs)
+}
+
+/// Civil-date → Unix-epoch seconds (UTC). Pure arithmetic, no chrono
+/// dependency — Howard Hinnant's `days_from_civil`. All intermediates
+/// stay signed so the `m_adj = m + 9` / `m - 3` flip can't wrap when
+/// `m <= 2`.
+#[cfg(feature = "ssr")]
+fn ymd_to_unix(y: i64, m: u32, d: u32) -> u64 {
+    let m = m as i64;
+    let d = d as i64;
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400; // 0..=399
+    let m_adj = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * m_adj + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days_since_epoch = era * 146_097 + doe - 719_468;
+    days_since_epoch.max(0) as u64 * 86_400
+}
+
+/// Tree-aware filter. Returns the input minus entries that don't match
+/// the filter, **plus** every ancestor-directory entry of any retained
+/// leaf so the path is still navigable. Folders that match the filter
+/// directly are included regardless of whether they have surviving
+/// children.
+#[cfg(feature = "ssr")]
+fn apply_filter(entries: Vec<CatalogEntry>, filter: &CatalogFilter) -> Vec<CatalogEntry> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut by_name: HashMap<String, CatalogEntry> = HashMap::with_capacity(entries.len());
+    for e in entries.into_iter() {
+        by_name.insert(e.name.clone(), e);
+    }
+
+    let mut keep: HashSet<String> = HashSet::new();
+    for (name, entry) in by_name.iter() {
+        if filter.matches(entry) {
+            keep.insert(name.clone());
+            // Pull every ancestor segment so the tree path survives.
+            let mut cur = name.as_str();
+            while let Some((parent, _)) = cur.rsplit_once('/') {
+                if parent.is_empty() {
+                    break;
+                }
+                if !keep.insert(parent.to_string()) {
+                    // Parent already retained — its ancestors are too.
+                    break;
+                }
+                cur = parent;
+            }
+        }
+    }
+
+    let mut out: Vec<CatalogEntry> =
+        keep.into_iter().filter_map(|k| by_name.remove(&k)).collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 #[cfg(feature = "ssr")]
@@ -249,17 +452,29 @@ fn CatalogPage() -> impl IntoView {
 /// happen.
 #[component]
 fn CatalogFocusView(prefix: String) -> impl IntoView {
+    let query = use_query_map();
+    let filter_signal = move || {
+        query.with(|q| {
+            (
+                q.get("q").unwrap_or_default(),
+                q.get("from").unwrap_or_default(),
+                q.get("to").unwrap_or_default(),
+            )
+        })
+    };
     let prefix_clone = prefix.clone();
     let entries = Resource::new(
-        move || prefix_clone.clone(),
-        |p| async move { list_dir(p).await },
+        move || (prefix_clone.clone(), filter_signal()),
+        |(p, (q, f, t))| async move { list_dir(p, q, f, t).await },
     );
     let prefix_for_show = prefix.clone();
+    let filter_prefix = prefix.clone();
 
     view! {
         <Breadcrumb prefix=prefix.clone()/>
         <UploadForm parent=prefix.clone()/>
         <MkdirForm parent=prefix.clone()/>
+        <FilterBar prefix=filter_prefix/>
         <p class="mut focus-tip">
             <a href="/">"← " {t!("catalog.back_to_tree")}</a>
         </p>
@@ -297,6 +512,88 @@ fn CatalogFocusView(prefix: String) -> impl IntoView {
                 })
             }}
         </Suspense>
+    }
+}
+
+/// Stage 11.17: server-side catalog filter bar. Renders a GET form that
+/// submits `?q=&from=&to=` (plus the current `?p=<prefix>` for focus
+/// mode) so the page reloads with a filtered listing. The submit target
+/// is the same path the user is on, which preserves the focus / tree
+/// mode toggle. Submitting an empty form clears every filter — that's
+/// the same as visiting `/` without any query string.
+#[component]
+fn FilterBar(prefix: String) -> impl IntoView {
+    let query = use_query_map();
+    let (q_init, from_init, to_init) = query.with(|q| {
+        (
+            q.get("q").unwrap_or_default(),
+            q.get("from").unwrap_or_default(),
+            q.get("to").unwrap_or_default(),
+        )
+    });
+    let has_filter = !q_init.is_empty() || !from_init.is_empty() || !to_init.is_empty();
+    let prefix_for_hidden = prefix.clone();
+    view! {
+        // Stage 11.18: progressive enhancement — flatpickr replaces the
+        // native date picker with a cross-browser one whose UI follows
+        // the page locale. We pull the lib + the 4 non-English locale
+        // bundles from jsdelivr (same CDN pattern as the help page's
+        // KaTeX/Mermaid). Without JS / on CDN failure, the native
+        // `<input type="date">` keeps working.
+        <link
+            rel="stylesheet"
+            href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css"
+        />
+        <script
+            defer="defer"
+            src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"
+        ></script>
+        <script defer="defer" src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ru.js"></script>
+        <script defer="defer" src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/de.js"></script>
+        <script defer="defer" src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/fr.js"></script>
+        <script defer="defer" src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/es.js"></script>
+        <script defer="defer" src="/assets/flatpickr-init.js"></script>
+        <form class="filter-bar" method="GET" action="/">
+            {(!prefix_for_hidden.is_empty()).then(|| view! {
+                <input type="hidden" name="p" value=prefix_for_hidden.clone()/>
+            })}
+            <input
+                type="text"
+                name="q"
+                class="filter-name"
+                placeholder={t!("filter.name_placeholder")}
+                value=q_init
+                aria-label={t!("filter.name_label")}
+            />
+            // Stage 11.17 follow-up: pin `lang` on the date inputs so the
+            // browser's native picker (calendar overlay, mm/dd order,
+            // weekday names) follows the page locale instead of the
+            // OS / browser language. `current_locale()` reads the live
+            // `?lang=` signal — same source the `t!` macro uses.
+            <label class="filter-date-label">
+                {t!("filter.from")} ":"
+                <input type="date" name="from" value=from_init lang={i18n::current_locale()}/>
+            </label>
+            <label class="filter-date-label">
+                {t!("filter.to")} ":"
+                <input type="date" name="to" value=to_init lang={i18n::current_locale()}/>
+            </label>
+            <button type="submit" class="tree-control-btn">{t!("filter.apply")}</button>
+            {has_filter.then(|| view! {
+                <a class="filter-clear" href=clear_filter_href(&prefix)>{t!("filter.clear")}</a>
+            })}
+        </form>
+    }
+}
+
+/// Build the "clear filter" link — the same path the user is on but
+/// without any of the `q` / `from` / `to` params. Used by the reset
+/// link inside the filter bar.
+fn clear_filter_href(prefix: &str) -> String {
+    if prefix.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/?p={}", url_encode(prefix))
     }
 }
 
@@ -346,10 +643,22 @@ fn CatalogTreeView() -> impl IntoView {
     let sort_signal = move || {
         query.with(|q| TreeSort::from_param(&q.get("sort").unwrap_or_default()))
     };
-    let all = Resource::new(|| (), |()| async move { get_catalog().await });
+    let filter_signal = move || {
+        query.with(|q| {
+            (
+                q.get("q").unwrap_or_default(),
+                q.get("from").unwrap_or_default(),
+                q.get("to").unwrap_or_default(),
+            )
+        })
+    };
+    let all = Resource::new(filter_signal, |(q, f, t)| async move {
+        get_catalog(q, f, t).await
+    });
 
     view! {
         <p class="mut tree-intro">{t!("catalog.tree_intro")}</p>
+        <FilterBar prefix=String::new()/>
         <Suspense fallback=move || view! { <p class="mut">{t!("catalog.loading")}</p> }>
             {move || {
                 let sort = sort_signal();
@@ -606,6 +915,13 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
             "text" => "📝",
             _ => "📦",
         };
+        // Stage 11.17: confirm dialog before the form POSTs. The
+        // translated string is interpolated raw so we double single
+        // quotes to keep it inside the JS string literal.
+        let file_confirm_js = format!(
+            "return confirm('{}');",
+            t!("file.delete_confirm").replace('\'', "\\'")
+        );
         view! {
             <li class={format!("tree-leaf kind-{kind}")}>
                 <span class="tree-icon">{icon}</span>
@@ -625,6 +941,23 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                     <a href={format!("/similar/{}", enc_full.clone())}>{t!("card.action.similar")}</a>
                     <span class="tree-sep">"·"</span>
                     <a href={format!("/health/{}", enc_full.clone())}>{t!("card.action.health")}</a>
+                    <span class="tree-sep">"·"</span>
+                    <form
+                        method="POST"
+                        action="/api/rm"
+                        class="inline-form"
+                        onsubmit=file_confirm_js
+                    >
+                        <input type="hidden" name="path" value=entry.name.clone()/>
+                        <input type="hidden" name="return_to" value="/"/>
+                        <button
+                            type="submit"
+                            class="link-btn link-btn-danger"
+                            title={t!("file.delete")}
+                        >
+                            "✕"
+                        </button>
+                    </form>
                 </span>
             </li>
         }
@@ -868,6 +1201,15 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
         "audio" => format!("{audio_sample_rate} Hz · {channels} ch"),
         _ => content_type.clone(),
     };
+    let file_confirm_js = format!(
+        "return confirm('{}');",
+        t!("file.delete_confirm").replace('\'', "\\'")
+    );
+    let return_to = if parent.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/?p={}", url_encode(&parent))
+    };
 
     view! {
         <article class={format!("card kind-{kind}")}>
@@ -893,6 +1235,17 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
                 " · " <a href={format!("/inspect/{}", enc_full.clone())}>{t!("card.action.shards_link")}</a>
                 " · " <a href={format!("/similar/{}", enc_full.clone())}>{t!("card.action.similar")}</a>
                 " · " <a href={format!("/health/{}", enc_full.clone())}>{t!("card.action.health")}</a>
+                " · "
+                <form
+                    method="POST"
+                    action="/api/rm"
+                    class="inline-form"
+                    onsubmit=file_confirm_js
+                >
+                    <input type="hidden" name="path" value=name.clone()/>
+                    <input type="hidden" name="return_to" value=return_to.clone()/>
+                    <button type="submit" class="link-btn link-btn-danger">{t!("file.delete")}</button>
+                </form>
             </div>
         </article>
     }
@@ -984,4 +1337,114 @@ pub(crate) fn url_encode(s: &str) -> String {
 pub fn hydrate() {
     console_error_panic_hook::set_once();
     leptos::mount::hydrate_body(App);
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod filter_tests {
+    use super::*;
+
+    fn entry(name: &str, kind: &str, created: u64) -> CatalogEntry {
+        CatalogEntry {
+            name: name.into(),
+            kind: kind.into(),
+            content_type: String::new(),
+            width: 0,
+            height: 0,
+            n_shards: 0,
+            cid_short: String::new(),
+            audio_sample_rate: 0,
+            channels: 0,
+            created_at_unix: created,
+        }
+    }
+
+    #[test]
+    fn glob_compiles_to_anchored_regex() {
+        let re = compile_glob("*.png").unwrap();
+        assert!(re.is_match("photo.png"));
+        assert!(re.is_match("a.b.png"));
+        assert!(!re.is_match("photo.png.bak"));
+    }
+
+    #[test]
+    fn glob_is_case_insensitive() {
+        let re = compile_glob("*.PNG").unwrap();
+        assert!(re.is_match("photo.png"));
+        assert!(re.is_match("PHOTO.PNG"));
+    }
+
+    #[test]
+    fn glob_escapes_regex_metachars() {
+        let re = compile_glob("a.b").unwrap();
+        assert!(re.is_match("a.b"));
+        // The `.` is escaped, so it does NOT match any single char.
+        assert!(!re.is_match("axb"));
+    }
+
+    #[test]
+    fn date_parse_ymd_to_unix_round_trips() {
+        // 1970-01-01 = epoch 0.
+        assert_eq!(parse_date_to_unix("1970-01-01", false).unwrap(), 0);
+        // Inclusive-end flag adds one day (86 400 s).
+        assert_eq!(parse_date_to_unix("1970-01-01", true).unwrap(), 86_400);
+        // 2026-01-01 — sanity check against the JS Date equivalent
+        // (Date.UTC(2026,0,1)/1000 = 1767225600).
+        assert_eq!(parse_date_to_unix("2026-01-01", false).unwrap(), 1_767_225_600);
+    }
+
+    #[test]
+    fn date_parse_rejects_malformed() {
+        assert!(parse_date_to_unix("not-a-date", false).is_err());
+        assert!(parse_date_to_unix("2026-13-01", false).is_err());
+        assert!(parse_date_to_unix("2026-01-32", false).is_err());
+        // Empty string is the "no bound" sentinel, not an error.
+        assert_eq!(parse_date_to_unix("", false).unwrap(), 0);
+    }
+
+    #[test]
+    fn filter_matches_combines_name_and_date() {
+        let f = CatalogFilter::parse("*.png", "2026-01-01", "2026-12-31").unwrap();
+        // Inside both bounds.
+        assert!(f.matches(&entry("photo.png", "image", 1_770_000_000)));
+        // Wrong extension.
+        assert!(!f.matches(&entry("notes.txt", "text", 1_770_000_000)));
+        // Before from.
+        assert!(!f.matches(&entry("photo.png", "image", 1_000_000_000)));
+    }
+
+    #[test]
+    fn filter_keeps_legacy_zero_timestamps() {
+        // Legacy entries (HOLOFSM6/7) have created_at_unix = 0. They
+        // pass any date filter — better to show them than hide them
+        // silently.
+        let f = CatalogFilter::parse("", "2026-01-01", "2026-12-31").unwrap();
+        assert!(f.matches(&entry("anything.txt", "text", 0)));
+    }
+
+    #[test]
+    fn glob_matches_basename_not_full_path() {
+        let f = CatalogFilter::parse("photo*", "", "").unwrap();
+        // Glob looks at the leaf, so `Roman/photo.png` should match.
+        assert!(f.matches(&entry("Roman/photo.png", "image", 0)));
+        assert!(f.matches(&entry("photo_gray.png", "image", 0)));
+        assert!(!f.matches(&entry("Roman/notes.txt", "text", 0)));
+    }
+
+    #[test]
+    fn apply_filter_keeps_ancestor_directories() {
+        let mut entries = vec![
+            entry("Roman", "directory", 0),
+            entry("Roman/sub", "directory", 0),
+            entry("Roman/sub/photo.png", "image", 0),
+            entry("Roman/sub/notes.txt", "text", 0),
+            entry("other.txt", "text", 0),
+        ];
+        // Glob keeps `*.png` only; ancestor dirs of the surviving leaf
+        // ride along so the tree path is still navigable.
+        let f = CatalogFilter::parse("*.png", "", "").unwrap();
+        let mut kept = apply_filter(std::mem::take(&mut entries), &f);
+        kept.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<&str> = kept.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["Roman", "Roman/sub", "Roman/sub/photo.png"]);
+    }
 }

@@ -609,6 +609,94 @@ h4.inspect-layer {
   text-decoration: none;
 }
 .link-btn:hover { text-decoration: underline; }
+/* Stage 11.17: ✕ file-delete button. Same visual weight as the rest of
+   the action row, just nudged toward `--bad` so it reads as destructive
+   on hover. */
+.link-btn-danger { color: var(--bad); }
+.link-btn-danger:hover { color: var(--bad); text-decoration: underline; }
+
+/* Stage 11.17: catalog filter bar. Sits above the tree / focus grid;
+   submits as a GET form so the URL captures the filter state. The
+   `clear` link mirrors the visual weight of the apply button so users
+   can reset the view in one click. */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin: 10px 0 14px 0;
+  border: 1px solid var(--bord);
+  border-radius: 6px;
+  background: var(--surf);
+}
+.filter-bar input[type="text"],
+.filter-bar input[type="date"] {
+  font: inherit;
+  padding: 4px 8px;
+  border: 1px solid var(--bord);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.filter-bar input[type="text"]:focus,
+.filter-bar input[type="date"]:focus { border-color: var(--accent); outline: none; }
+.filter-bar .filter-name { min-width: 200px; flex: 1 1 200px; }
+.filter-bar .filter-date-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--mut);
+}
+.filter-bar .filter-clear {
+  margin-left: 4px;
+  color: var(--mut);
+  text-decoration: none;
+  font-size: 13px;
+}
+.filter-bar .filter-clear:hover { color: var(--accent); text-decoration: underline; }
+
+/* Stage 11.18: flatpickr theming. flatpickr ships its own CSS off the
+   CDN; these overrides re-paint the popup so it matches the holofs
+   light/dark theme instead of flatpickr's stock light-only palette. */
+.flatpickr-calendar {
+  background: var(--surf);
+  color: var(--fg);
+  border: 1px solid var(--bord);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.flatpickr-calendar.arrowTop:before,
+.flatpickr-calendar.arrowBottom:before { border-bottom-color: var(--bord); border-top-color: var(--bord); }
+.flatpickr-calendar.arrowTop:after,
+.flatpickr-calendar.arrowBottom:after { border-bottom-color: var(--surf); border-top-color: var(--surf); }
+.flatpickr-months .flatpickr-month,
+.flatpickr-current-month .flatpickr-monthDropdown-months,
+.flatpickr-current-month input.cur-year { color: var(--fg); background: transparent; }
+.flatpickr-weekdays, .flatpickr-weekday { color: var(--mut); background: transparent; }
+.flatpickr-days, .dayContainer { background: var(--surf); }
+.flatpickr-day {
+  color: var(--fg);
+  background: transparent;
+  border-color: transparent;
+}
+.flatpickr-day.today { border-color: var(--accent); }
+.flatpickr-day.selected,
+.flatpickr-day.selected:hover,
+.flatpickr-day.startRange,
+.flatpickr-day.endRange {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+.flatpickr-day:hover { background: var(--surf2); }
+.flatpickr-day.disabled,
+.flatpickr-day.prevMonthDay,
+.flatpickr-day.nextMonthDay { color: var(--mut); }
+.flatpickr-months .flatpickr-prev-month,
+.flatpickr-months .flatpickr-next-month { fill: var(--fg); }
+.flatpickr-months .flatpickr-prev-month:hover svg,
+.flatpickr-months .flatpickr-next-month:hover svg { fill: var(--accent); }
 
 /* === Stage 10: /help docs viewer ===========================================
  * Two-column layout: sticky sidebar (TOC + language switcher) + rendered

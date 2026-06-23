@@ -6,6 +6,7 @@ use leptos_router::hooks::{use_params_map, use_query_map};
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::{current_locale, translate};
+use crate::t;
 
 // ===== View-models (Send across SSR ⇄ hydrate boundary) ====================
 
@@ -139,13 +140,13 @@ pub fn SimilarPage() -> impl IntoView {
         <crate::ui::Topbar active="catalog"/>
 
         <main class="container">
-            <Suspense fallback=move || view! { <p class="mut">"loading similar…"</p> }>
+            <Suspense fallback=move || view! { <p class="mut">{t!("similar.loading")}</p> }>
                 {move || data.get().map(|res| {
                     let active_scope = scope();
                     match res {
                         Ok(v) => view! { <SimilarBody data=v active_scope=active_scope/> }.into_any(),
                         Err(e) => view! {
-                            <p class="bad">"failed to load: " {e.to_string()}</p>
+                            <p class="bad">{t!("generic.load_failed")} " " {e.to_string()}</p>
                         }.into_any(),
                     }
                 })}
@@ -198,7 +199,7 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
 
     view! {
         <h2 style="margin-top:0">
-            "find similar to "
+            {t!("similar.title_prefix")} " "
             <a href={format!("/{object_link_enc}")}>{name.clone()}</a>
         </h2>
 
@@ -207,48 +208,38 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
         {if is_text {
             view! {
                 <p class="mut">
-                    "method: " <b>"bottom-K MinHash on 5-shingles"</b> ", K=" {minhash_k}
-                    ". fingerprint (first 8 values): " <code>{fingerprint_hex.clone()}</code>
+                    {t!("similar.method_label")} " "
+                    <b>{t!("similar.method.minhash_name")}</b>
+                    ", K=" {minhash_k}
+                    {t!("similar.method.minhash_fp")} " "
+                    <code>{fingerprint_hex.clone()}</code>
                 </p>
-                <p class="mut">
-                    "MinHash catches " <b>"partial text overlaps"</b>
-                    ": if 60% of document A is contained in document B, Jaccard surfaces it "
-                    "even when a plain SHA-256 wouldn't match. Useful for plagiarism "
-                    "detection, finding drafts, dedup of edited texts."
-                </p>
+                <p class="mut">{t!("similar.method.minhash_blurb")}</p>
             }.into_any()
         } else {
             view! {
                 <p class="mut">
-                    "method: " <b>"per-channel dHash on L0 shards"</b>
-                    ". fingerprint (48 bytes, 3 channels × K=16 means): "
+                    {t!("similar.method_label")} " "
+                    <b>{t!("similar.method.dhash_name")}</b>
+                    {t!("similar.method.dhash_fp")} " "
                     <code>{fingerprint_hex.clone()}</code>
                 </p>
-                <p class="mut">
-                    "the fingerprint stacks the mean luminance of K=16 systematic L0 "
-                    "shards for each of the R / G / B channels (DWT LL band for image, "
-                    "bass envelope for audio). Similarity = "
-                    "Hamming distance over 45 dHash bits ("
-                    <code>"fp[i] > fp[i+1]"</code>
-                    " within every channel strip), re-anchored against the random "
-                    "baseline so unrelated objects clamp to 0 % and identical inputs "
-                    "score 100 %."
-                </p>
+                <p class="mut">{t!("similar.method.dhash_blurb")}</p>
             }.into_any()
         }}
 
-        <h3>"top similar (" {n_neighbors} ")"</h3>
+        <h3>{t!("similar.top_h")} " (" {n_neighbors} ")"</h3>
         {if neighbors.is_empty() {
-            view! { <p class="mut">"no other objects of the same kind in the catalog"</p> }.into_any()
+            view! { <p class="mut">{t!("similar.top_empty")}</p> }.into_any()
         } else {
             let self_enc = self_enc.clone();
             view! {
                 <table>
                     <tr>
-                        <th class="name">"name"</th>
-                        <th>"similarity"</th>
-                        <th>"method"</th>
-                        <th>"actions"</th>
+                        <th class="name">{t!("similar.col.name")}</th>
+                        <th>{t!("similar.col.similarity")}</th>
+                        <th>{t!("similar.col.method")}</th>
+                        <th>{t!("similar.col.actions")}</th>
                     </tr>
                     {neighbors.into_iter().map(|m| {
                         let cls = if m.similarity_pct > 90.0 { "ok" }
@@ -270,11 +261,11 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
                                 <td class=cls><b>{sim}</b></td>
                                 <td class="name"><code>{method}</code></td>
                                 <td class="name">
-                                    <a href={format!("/{nenc}")} target="_blank">"open"</a>
+                                    <a href={format!("/{nenc}")} target="_blank">{t!("similar.action.open")}</a>
                                     " · "
-                                    <a href={format!("/inspect/{nenc}")}>"shards"</a>
+                                    <a href={format!("/inspect/{nenc}")}>{t!("similar.action.shards")}</a>
                                     " · "
-                                    <a href={format!("/diff?a={self_enc}&b={nenc}")}>"diff →"</a>
+                                    <a href={format!("/diff?a={self_enc}&b={nenc}")}>{t!("similar.action.diff")}</a>
                                 </td>
                             </tr>
                         }
@@ -283,24 +274,19 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
             }.into_any()
         }}
 
-        <h3>"shard overlaps (" {n_overlaps} ")"</h3>
+        <h3>{t!("similar.overlaps_h")} " (" {n_overlaps} ")"</h3>
         {if overlaps.is_empty() {
             view! {
-                <p class="mut">
-                    "unique object — no shard hash overlaps with any other"
-                </p>
+                <p class="mut">{t!("similar.overlaps_empty")}</p>
             }.into_any()
         } else {
             view! {
-                <p class="mut">
-                    "dedup at the SHA-256 shard level. An overlap means that part of the data "
-                    "is already physically stored in the cluster (new shards do not duplicate it)."
-                </p>
+                <p class="mut">{t!("similar.overlaps_blurb")}</p>
                 <table>
                     <tr>
-                        <th class="name">"name"</th>
-                        <th>"common shards"</th>
-                        <th>"% overlap"</th>
+                        <th class="name">{t!("similar.col.name")}</th>
+                        <th>{t!("similar.col.common")}</th>
+                        <th>{t!("similar.col.overlap_pct")}</th>
                     </tr>
                     {overlaps.into_iter().map(|o| {
                         let nenc = crate::url_encode(&o.name);
@@ -321,9 +307,9 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
         }}
 
         <p style="margin-top:24px">
-            <a href={format!("/inspect/{footer_enc}")}>"← all shards"</a>
+            <a href={format!("/inspect/{footer_enc}")}>{t!("similar.footer.all_shards")}</a>
             " · "
-            <a href="/">"catalog"</a>
+            <a href="/">{t!("generic.back_to_catalog")}</a>
         </p>
     }
 }

@@ -10,6 +10,8 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 use serde::{Deserialize, Serialize};
 
+use crate::t;
+
 // ===== View-models (Send across SSR ⇄ hydrate boundary) ====================
 
 /// One row of the per-node table on `/health`.
@@ -196,11 +198,11 @@ pub fn HealthIndexPage() -> impl IntoView {
         <crate::ui::Topbar active="health"/>
 
         <main class="container">
-            <Suspense fallback=move || view! { <p class="mut">"loading health…"</p> }>
+            <Suspense fallback=move || view! { <p class="mut">{t!("health.loading")}</p> }>
                 {move || data.get().map(|res| match res {
                     Ok(idx) => view! { <HealthIndexBody data=idx/> }.into_any(),
                     Err(e) => view! {
-                        <p class="bad">"failed to load: " {e.to_string()}</p>
+                        <p class="bad">{t!("generic.load_failed")} " " {e.to_string()}</p>
                     }.into_any(),
                 })}
             </Suspense>
@@ -226,15 +228,15 @@ fn HealthIndexBody(data: HealthIndex) -> impl IntoView {
     view! {
         <LiveClusterStats initial=initial/>
 
-        <h2>"cluster nodes"</h2>
+        <h2>{t!("health.cluster_nodes_h")}</h2>
         <table class="health-nodes">
             <thead>
                 <tr>
                     <th>"#"</th>
-                    <th class="name">"address"</th>
-                    <th>"zone"</th>
-                    <th>"status"</th>
-                    <th>"action"</th>
+                    <th class="name">{t!("health.col.address")}</th>
+                    <th>{t!("health.col.zone")}</th>
+                    <th>{t!("health.col.status")}</th>
+                    <th>{t!("health.col.action")}</th>
                 </tr>
             </thead>
             <tbody>
@@ -246,9 +248,9 @@ fn HealthIndexBody(data: HealthIndex) -> impl IntoView {
             </tbody>
         </table>
 
-        <h2>"objects"</h2>
+        <h2>{t!("health.objects_h")}</h2>
         {if objects.is_empty() {
-            view! { <p class="empty-state">"no objects yet — upload via the catalog page"</p> }.into_any()
+            view! { <p class="empty-state">{t!("health.objects_empty")}</p> }.into_any()
         } else {
             view! {
                 <ul class="object-links">
@@ -329,19 +331,19 @@ fn LiveClusterStats(initial: HealthSnapshot) -> impl IntoView {
         <section class="cluster-stats">
             <div class="stat">
                 <div class=live_class>{live_label}</div>
-                <div class="l">"live / total nodes"</div>
+                <div class="l">{t!("health.stat.live_total")}</div>
             </div>
             <div class="stat">
                 <div class="v">{objects_label}</div>
-                <div class="l">"objects"</div>
+                <div class="l">{t!("health.objects_h")}</div>
             </div>
             <div class="stat">
                 <div class="v">{disabled_label}</div>
-                <div class="l">"admin-disabled"</div>
+                <div class="l">{t!("health.stat.admin_disabled")}</div>
             </div>
             <div class="stat live-hint">
                 <div class="v mono">"●"</div>
-                <div class="l">"live · SSE"</div>
+                <div class="l">{t!("health.stat.live_sse")}</div>
             </div>
         </section>
     }
@@ -356,11 +358,15 @@ fn NodeRowView(node: NodeRow) -> impl IntoView {
         admin_killed,
     } = node;
     let (status_label, status_class) = if admin_killed {
-        ("disabled", "bad")
+        (t!("health.status.disabled"), "bad")
     } else {
-        ("live", "ok")
+        (t!("health.status.live"), "ok")
     };
-    let button_label = if admin_killed { "revive" } else { "kill" };
+    let button_label = if admin_killed {
+        t!("health.action.revive")
+    } else {
+        t!("health.action.kill")
+    };
     view! {
         <tr>
             <td>{idx}</td>
@@ -397,11 +403,11 @@ pub fn HealthDetailPage() -> impl IntoView {
         <crate::ui::Topbar active="health"/>
 
         <main class="container">
-            <Suspense fallback=move || view! { <p class="mut">"loading object health…"</p> }>
+            <Suspense fallback=move || view! { <p class="mut">{t!("health.loading_object")}</p> }>
                 {move || data.get().map(|res| match res {
                     Ok(v) => view! { <HealthDetailBody data=v/> }.into_any(),
                     Err(e) => view! {
-                        <p class="bad">"failed to load: " {e.to_string()}</p>
+                        <p class="bad">{t!("generic.load_failed")} " " {e.to_string()}</p>
                     }.into_any(),
                 })}
             </Suspense>
@@ -441,23 +447,23 @@ fn HealthDetailBody(data: ObjectHealthView) -> impl IntoView {
         <p><a href="/health">"← /health"</a></p>
         <h2>{name.clone()}</h2>
         <section class="cluster-stats">
-            <div class="stat"><div class="v">{n_live}"/"{n_total}</div><div class="l">"live nodes"</div></div>
-            <div class="stat"><div class="v">{k}</div><div class="l">"k (threshold)"</div></div>
-            <div class="stat"><div class="v">{channels}"×"{nlayers}</div><div class="l">"channels × layers"</div></div>
-            <div class="stat"><div class=resolution_class>{resolution_label}</div><div class="l">"current resolution"</div></div>
+            <div class="stat"><div class="v">{n_live}"/"{n_total}</div><div class="l">{t!("health.stat.live_total")}</div></div>
+            <div class="stat"><div class="v">{k}</div><div class="l">{t!("health.stat.k_threshold")}</div></div>
+            <div class="stat"><div class="v">{channels}"×"{nlayers}</div><div class="l">{t!("health.stat.channels_layers")}</div></div>
+            <div class="stat"><div class=resolution_class>{resolution_label}</div><div class="l">{t!("health.stat.current_res")}</div></div>
             <div class="stat"><div class="v mono">{cid_short}</div><div class="l">"data_cid"</div></div>
         </section>
 
-        <h2>"redundancy margin by (channel, layer)"</h2>
+        <h2>{t!("health.matrix_h")}</h2>
         <LayerMatrix layers=layers channels=channels nlayers=nlayers k=k/>
 
         {(!scenarios.is_empty()).then(|| view! {
-            <h2>"random loss simulation (Monte-Carlo)"</h2>
+            <h2>{t!("health.loss_h")}</h2>
             <LossTable scenarios=scenarios nlayers=nlayers/>
         })}
 
         {(!zone_failures.is_empty()).then(|| view! {
-            <h2>"whole-zone failure (anti-affinity)"</h2>
+            <h2>{t!("health.zone_h")}</h2>
             <ZoneTable rows=zone_failures/>
         })}
     }
@@ -476,8 +482,8 @@ fn LayerMatrix(layers: Vec<LayerRow>, channels: u8, nlayers: u8, k: u16) -> impl
         <table class="health-layers">
             <thead>
                 <tr>
-                    <th>"layer"</th>
-                    {(0..channels).map(|c| view! { <th>"ch " {c}</th> }).collect_view()}
+                    <th>{t!("health.col.layer")}</th>
+                    {(0..channels).map(|c| view! { <th>{t!("health.col.channel_short")} " " {c}</th> }).collect_view()}
                 </tr>
             </thead>
             <tbody>
@@ -528,8 +534,8 @@ fn LossTable(scenarios: Vec<LossRow>, nlayers: u8) -> impl IntoView {
         <table class="health-loss">
             <thead>
                 <tr>
-                    <th>"kill %"</th>
-                    <th>"trials"</th>
+                    <th>{t!("health.col.kill_pct")}</th>
+                    <th>{t!("health.col.trials")}</th>
                     {col_headers.into_iter().map(|h| view! { <th>{h}</th> }).collect_view()}
                 </tr>
             </thead>
@@ -568,9 +574,9 @@ fn ZoneTable(rows: Vec<ZoneFailureRow>) -> impl IntoView {
         <table class="health-zones">
             <thead>
                 <tr>
-                    <th>"zone"</th>
-                    <th>"nodes in zone"</th>
-                    <th>"remaining resolution"</th>
+                    <th>{t!("health.col.zone")}</th>
+                    <th>{t!("health.col.nodes_in_zone")}</th>
+                    <th>{t!("health.col.remaining_res")}</th>
                 </tr>
             </thead>
             <tbody>

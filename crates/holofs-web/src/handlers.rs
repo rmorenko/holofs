@@ -328,6 +328,33 @@ pub async fn rmdir(
     }
 }
 
+/// `POST /api/rm` (form-urlencoded `path=`) — form-friendly variant of
+/// `DELETE /<name>` for the ✕ button on file rows. Redirects to
+/// `return_to` (or the parent dir) on success. Mirrors `rmdir_form`
+/// but resolves to `remove_object` instead of `rmdir`. Stage 11.17.
+pub async fn rm_form(
+    Extension(gw): Extension<Arc<Gateway>>,
+    body: Bytes,
+) -> Response {
+    let body_str = match std::str::from_utf8(&body) {
+        Ok(s) => s,
+        Err(_) => return bad_request("non-utf8 body"),
+    };
+    let Some(path) = parse_urlencoded_field(body_str, "path") else {
+        return bad_request("missing 'path'");
+    };
+    if !is_valid_put_name(&path) {
+        return bad_request("reserved or empty top segment");
+    }
+    let return_to_field = parse_urlencoded_field(body_str, "return_to").unwrap_or_default();
+    let parent = path.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+    let target = pick_return_to(&return_to_field, &parent);
+    match gw.remove_object(&path).await {
+        Ok(_) => redirect_to(&target),
+        Err(e) => error_to_response(e),
+    }
+}
+
 /// `POST /api/rmdir` (form-urlencoded `path=`) — form-friendly variant for
 /// the delete button on directory cards. Redirects back to the parent
 /// directory on success.
@@ -928,6 +955,11 @@ pub async fn escrow_split(
     let mut filename = String::from("secret.bin");
     let mut k: usize = 3;
     let mut n: usize = 5;
+    // Stage 11.19b: the form ships a hidden `lang` field carrying the
+    // current page locale so the server-rendered result page matches
+    // the language the user saw on `/escrow`. Falls back to `en` when
+    // the field is absent or unknown.
+    let mut lang = String::from("en");
     while let Ok(Some(field)) = form.next_field().await {
         let name = field.name().unwrap_or("").to_string();
         let fname = field.file_name().map(|s| s.to_string());
@@ -954,6 +986,14 @@ pub async fn escrow_split(
                     n = v;
                 }
             }
+            "lang" => {
+                if let Ok(s) = std::str::from_utf8(&bytes) {
+                    let trimmed = s.trim();
+                    if crate::i18n::is_known_locale(trimmed) {
+                        lang = trimmed.to_string();
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -961,7 +1001,7 @@ pub async fn escrow_split(
         return bad_request("no file field");
     };
     match gw.escrow_split(file_bytes, filename, k, n).await {
-        Ok(res) => escrow_split_html(res),
+        Ok(res) => escrow_split_html(res, &lang),
         Err(e) => error_to_response(e),
     }
 }
@@ -1016,7 +1056,11 @@ pub async fn escrow_recover(
     }
 }
 
-fn escrow_split_html(res: EscrowSplitResult) -> Response {
+fn escrow_split_html(res: EscrowSplitResult, lang: &str) -> Response {
+    use crate::escrow::{EscrowShareRow, EscrowSplitResultView};
+    use crate::i18n::{translate, LocaleSignal};
+    use leptos::prelude::*;
+
     let EscrowSplitResult {
         filename,
         source_bytes,
@@ -1025,38 +1069,53 @@ fn escrow_split_html(res: EscrowSplitResult) -> Response {
         escrow_id_hex,
         shares,
     } = res;
-    let id_preview: String = escrow_id_hex.chars().take(16).collect();
-    let mut rows = String::new();
-    for s in &shares {
-        rows.push_str(&format!(
-            "<tr><td>{idx}</td>\
-<td class=\"name\"><code>{fname}</code></td>\
-<td>{bytes} B</td>\
-<td class=\"name\"><a href=\"/escrow/download/{dl}\" download=\"{fname}\">↓ download</a></td></tr>",
-            idx = s.idx,
-            fname = html_escape(&s.filename),
-            bytes = s.bytes,
-            dl = s.download_path,
-        ));
-    }
+    let rows: Vec<EscrowShareRow> = shares
+        .into_iter()
+        .map(|s| EscrowShareRow {
+            idx: usize::from(s.idx),
+            filename: s.filename,
+            bytes: s.bytes as u64,
+            download_path: s.download_path,
+        })
+        .collect();
+    let lang_owned = lang.to_string();
+    let lang_for_view = lang_owned.clone();
+    let lang_for_shell = lang_owned.clone();
+
+    // Stage 11.19b: render through the same `view!` pipeline the rest
+    // of the site uses, then wrap in a manual document shell. We need
+    // the manual shell because this response isn't routed through the
+    // Leptos router — it's a direct POST result, so we can't reuse the
+    // `App` shell which builds `<Router>` + `<RoutedApp>`.
+    let owner = Owner::new();
+    let body_html: String = owner.with(|| {
+        // Provide a LocaleSignal so every `t!()` inside the view picks
+        // up the request locale instead of falling back to "en".
+        provide_context(LocaleSignal(Signal::derive(move || lang_for_view.clone())));
+        view! {
+            <EscrowSplitResultView
+                filename=filename.clone()
+                source_bytes=source_bytes as u64
+                k=k
+                n=n
+                escrow_id_hex=escrow_id_hex.clone()
+                shares=rows.clone()
+            />
+        }
+        .to_html()
+    });
+
+    let title = translate("escrow.result.title_tag", &lang_for_shell);
     let body = format!(
-        "<!DOCTYPE html><html lang=\"en\"><head>\
-<meta charset=\"utf-8\"/>\
-<link rel=\"stylesheet\" href=\"/pkg/holofs.css\"/>\
-<title>escrow · holofs</title>\
-</head><body>\
-<header class=\"topbar\"><h1>holofs</h1>\
-<nav><a href=\"/\">catalog</a><a href=\"/health\">health</a>\
-<a href=\"/escrow\" class=\"active\">escrow</a></nav></header>\
-<main class=\"container\">\
-<h2>file split into {n} shares · need {k} to recover</h2>\
-<p>source: <code>{fname}</code> · {source_bytes} B · escrow_id <code>{id_preview}</code></p>\
-<p class=\"mut\">Download each share immediately and distribute. Shares live in gateway memory and vanish on restart.</p>\
-<table><thead><tr><th>#</th><th class=\"name\">file</th><th>size</th><th></th></tr></thead>\
-<tbody>{rows}</tbody></table>\
-<p><a href=\"/escrow\">← back to escrow</a></p>\
-</main></body></html>\n",
-        fname = html_escape(&filename),
+        r#"<!DOCTYPE html><html lang="{lang_for_shell}"><head>\
+<meta charset="utf-8"/>\
+<meta name="viewport" content="width=device-width, initial-scale=1"/>\
+<script>(function(){{try{{var t=localStorage.getItem('holofs-theme')||'dark';\
+document.documentElement.dataset.theme=t;}}catch(e){{}}}})();</script>\
+<link rel="stylesheet" href="/pkg/holofs.css"/>\
+<title>{title}</title>\
+</head><body>{body_html}</body></html>
+"#,
     );
     (
         StatusCode::OK,

@@ -38,6 +38,7 @@ ssr = [
     "dep:tracing-subscriber",
     "dep:rustls",
     "dep:pulldown-cmark",
+    "dep:regex",
     "leptos/ssr",
     "leptos_router/ssr",
     "leptos_meta/ssr",
@@ -98,6 +99,10 @@ tracing-subscriber = { workspace = true, optional = true }
 rustls           = { workspace = true, optional = true }
 # Stage 10: in-app /help section renders markdown server-side.
 pulldown-cmark   = { workspace = true, optional = true }
+# Stage 11.17: catalog name filter compiles `*` globs to a regex.
+# Already in the dep graph via several transitives; depending on it
+# directly costs nothing and avoids a hand-rolled matcher.
+regex            = { version = "1", optional = true }
 # Needed in both ssr and hydrate: server side builds the SSE payload; client
 # side parses it inside the LiveClusterStats EventSource handler.
 serde_json       = { workspace = true }

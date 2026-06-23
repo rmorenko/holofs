@@ -5,6 +5,8 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_query_map;
 use serde::{Deserialize, Serialize};
 
+use crate::t;
+
 // ===== View-models (Send across SSR ⇄ hydrate boundary) ====================
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -123,11 +125,11 @@ pub fn DiffPage() -> impl IntoView {
         <crate::ui::Topbar active="catalog"/>
 
         <main class="container">
-            <Suspense fallback=move || view! { <p class="mut">"loading diff…"</p> }>
+            <Suspense fallback=move || view! { <p class="mut">{t!("diff.loading")}</p> }>
                 {move || data.get().map(|res| match res {
                     Ok(v) => view! { <DiffBody data=v/> }.into_any(),
                     Err(e) => view! {
-                        <p class="bad">"failed to load: " {e.to_string()}</p>
+                        <p class="bad">{t!("generic.load_failed")} " " {e.to_string()}</p>
                     }.into_any(),
                 })}
             </Suspense>
@@ -157,55 +159,30 @@ fn DiffBody(data: DiffReportView) -> impl IntoView {
 
     view! {
         <h2 style="margin-top:0">
-            "chunk diff: "
+            {t!("diff.title_prefix")} " "
             <a href={format!("/{enc_a}")}>{name_a.clone()}</a>
             " ↔ "
             <a href={format!("/{enc_b}")}>{name_b.clone()}</a>
         </h2>
-        <p class="mut">
-            <b>"diff = byte-perfect dedup analyzer."</b>
-            " Each cell maps to one systematic shard (the first K in each layer).
-            Two cells are " <span class="ok">"green"</span>
-            " only when the shard hashes match — i.e. the underlying source "
-            "chunks are " <b>"byte-for-byte identical"</b>
-            " in both files. "
-            <span class="bad">"red"</span> " = any byte difference."
-        </p>
-        <p class="mut">
-            <b>"⚠ this is not a visual similarity metric."</b>
-            " A Gaussian-blurred copy of the same photo, a desaturated copy, or a "
-            "resaved JPEG will all paint mostly red here — different bytes, no "
-            "dedup savings. For perceptual similarity (which catches blur / "
-            "desaturation / mild crops) go to " <code>/similar/&lt;name&gt;</code> "."
-        </p>
-        <p class="mut">
-            "Useful when: confirming you uploaded the same file twice; spotting "
-            "shared chunks between near-identical derivatives that survived the "
-            "codec deterministically; or auditing dedup savings on a workload."
-        </p>
+        <p class="mut">{t!("diff.intro")}</p>
+        <p class="mut">{t!("diff.not_visual_warn")}</p>
+        <p class="mut">{t!("diff.useful_blurb")}</p>
         {is_text.then(|| view! {
-            <p class="mut">
-                <b>"⚠ text limitation"</b>
-                ": fixed-size chunking is used (equal-byte slices). A small change near "
-                "the start shifts all boundaries — every subsequent chunk differs. A "
-                "git-style diff would need content-defined chunking (rolling hash / "
-                "FastCDC) — that's a separate task. Right now text diff works well only "
-                "for " <b>"identical copies"</b> " (100%) and totally different files (0%)."
-            </p>
+            <p class="mut">{t!("diff.text_limit_warn")}</p>
         })}
 
         <div class="cluster-stats">
-            <div class="stat"><div class="v">{common_str}</div><div class="l">"identical chunks"</div></div>
-            <div class="stat"><div class="v">{sim}</div><div class="l">"byte-dedup overlap"</div></div>
-            <div class="stat"><div class="v">{kb}</div><div class="l">"storage saved"</div></div>
+            <div class="stat"><div class="v">{common_str}</div><div class="l">{t!("diff.stat.identical")}</div></div>
+            <div class="stat"><div class="v">{sim}</div><div class="l">{t!("diff.stat.byte_overlap")}</div></div>
+            <div class="stat"><div class="v">{kb}</div><div class="l">{t!("diff.stat.storage_saved")}</div></div>
         </div>
 
         {layers.into_iter().map(move |ly| {
-            let kind_label = if is_text { "text chunks" } else { "systematic shards" };
+            let kind_label = if is_text { t!("diff.kind.text_chunks") } else { t!("diff.kind.systematic_shards") };
             view! {
                 <h4 class="inspect-layer">
                     "ch" {ly.channel} " · L" {ly.layer} " — "
-                    {ly.n_common} "/" {ly.n_total} " common " {kind_label}
+                    {ly.n_common} "/" {ly.n_total} " " {kind_label}
                 </h4>
                 <div class="diff-grid">
                     {ly.cells.into_iter().map(|c| {
@@ -220,14 +197,15 @@ fn DiffBody(data: DiffReportView) -> impl IntoView {
         }).collect_view()}
 
         <p class="mut">
-            "storage saving: those " <b>{common}</b> " common chunks are not physically "
-            "duplicated in the cluster — nodes keep one copy per hash."
+            {t!("diff.storage_explainer_prefix")} " "
+            <b>{common}</b>
+            " " {t!("diff.storage_explainer_suffix")}
         </p>
 
         <p style="margin-top:24px">
-            <a href={format!("/similar/{footer_enc_a}")}>"← similar to a"</a>
+            <a href={format!("/similar/{footer_enc_a}")}>{t!("diff.footer.similar_a")}</a>
             " · "
-            <a href="/">"catalog"</a>
+            <a href="/">{t!("generic.back_to_catalog")}</a>
         </p>
     }
 }

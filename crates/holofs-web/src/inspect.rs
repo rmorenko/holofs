@@ -9,6 +9,8 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 use serde::{Deserialize, Serialize};
 
+use crate::t;
+
 // ===== View-models (Send across SSR ⇄ hydrate boundary) ====================
 
 /// One shard placement on a node.
@@ -223,11 +225,11 @@ pub fn InspectPage() -> impl IntoView {
         <crate::ui::Topbar active="catalog"/>
 
         <main class="container">
-            <Suspense fallback=move || view! { <p class="mut">"loading shards…"</p> }>
+            <Suspense fallback=move || view! { <p class="mut">{t!("inspect.loading")}</p> }>
                 {move || data.get().map(|res| match res {
                     Ok(v) => view! { <InspectBody data=v/> }.into_any(),
                     Err(e) => view! {
-                        <p class="bad">"failed to load: " {e.to_string()}</p>
+                        <p class="bad">{t!("generic.load_failed")} " " {e.to_string()}</p>
                     }.into_any(),
                 })}
             </Suspense>
@@ -259,15 +261,8 @@ fn InspectBody(data: InspectView) -> impl IntoView {
     let enc_for_footer = enc.clone();
 
     view! {
-        <h2 style="margin-top:0">{name.clone()} " — what is physically stored on nodes"</h2>
-        <p class="mut">
-            "each cell below = one shard on one cluster node. "
-            <span class="ok">"systematic"</span> " shards (first K in each layer) carry a raw "
-            "data chunk in payload — it shows in the structure. "
-            <span class="partial">"RLNC"</span> " shards are random linear combinations over "
-            "GF(256), visually uniform noise. Knowing only one shard, you cannot recover "
-            "anything — you need ≥K independent shards of one (channel, layer)."
-        </p>
+        <h2 style="margin-top:0">{name.clone()} " " {t!("inspect.title_suffix")}</h2>
+        <p class="mut">{t!("inspect.intro")}</p>
 
         {by_channel.into_iter().enumerate().map(|(c, layers)| {
             let ch_label = channel_label(&kind_for_labels, c as u8);
@@ -283,8 +278,8 @@ fn InspectBody(data: InspectView) -> impl IntoView {
                     let enc = enc.clone();
                     view! {
                         <h4 class="inspect-layer">
-                            "layer " {layer} " — " {layer_label} " · " {n_shards} " shards ("
-                            {kk} " systematic + " {n_rlnc} " RLNC)"
+                            {t!("inspect.layer_prefix")} " " {layer} " — " {layer_label} " · " {n_shards} " " {t!("inspect.shards_word")} " ("
+                            {kk} " " {t!("inspect.systematic_word")} " + " {n_rlnc} " " {t!("inspect.rlnc_word")} ")"
                         </h4>
                         <div class="shard-grid">
                             {shards.into_iter().map(|s| {
@@ -307,8 +302,8 @@ fn InspectBody(data: InspectView) -> impl IntoView {
         }).collect_view()}
 
         <p>
-            <a href={format!("/health/{enc_for_footer}")}>"← health"</a> " · "
-            <a href="/">"catalog"</a>
+            <a href={format!("/health/{enc_for_footer}")}>"← " {t!("nav.health")}</a> " · "
+            <a href="/">{t!("generic.back_to_catalog")}</a>
         </p>
     }
 }
@@ -356,11 +351,11 @@ pub fn InspectZoomPage() -> impl IntoView {
         <crate::ui::Topbar active="catalog"/>
 
         <main class="container">
-            <Suspense fallback=move || view! { <p class="mut">"loading shard…"</p> }>
+            <Suspense fallback=move || view! { <p class="mut">{t!("inspect.loading_shard")}</p> }>
                 {move || resource.get().map(|res| match res {
                     Ok(v) => view! { <ZoomBody data=v/> }.into_any(),
                     Err(e) => view! {
-                        <p class="bad">"failed to load: " {e.to_string()}</p>
+                        <p class="bad">{t!("generic.load_failed")} " " {e.to_string()}</p>
                     }.into_any(),
                 })}
             </Suspense>
@@ -385,6 +380,10 @@ fn ZoomBody(data: ZoomView) -> impl IntoView {
     let enc = crate::url_encode(&name);
     let kind_class = if is_systematic { "sys" } else { "rlnc" };
     let kind_label = if is_systematic { "SYSTEMATIC" } else { "RLNC" };
+    // Stage 11.19: the long descriptive blurb (sys vs RLNC explanation)
+    // stays in English for now. Translating "coeffs = e_i = one in the
+    // i-th position" meaningfully needs domain-specific phrasing that
+    // we can pass through later as a polish step.
     let kind_descr = if is_systematic {
         "this is the i-th raw data chunk (coeffs = e_i = one in the i-th position, zero elsewhere). Given any K systematic shards of a layer, recovery is concatenation."
     } else {
@@ -397,7 +396,7 @@ fn ZoomBody(data: ZoomView) -> impl IntoView {
 
     view! {
         <h2 style="margin-top:0">
-            "shard of object "
+            {t!("inspect.shard_of")} " "
             <a href={back_href.clone()}>{name.clone()}</a>
         </h2>
         <div class="zoom-wrap">
@@ -408,31 +407,33 @@ fn ZoomBody(data: ZoomView) -> impl IntoView {
                 <p><span class=tag_class>{kind_label}</span></p>
                 <p class="mut">{kind_descr}</p>
                 <dl>
-                    <dt>"shard_idx"</dt><dd>{idx}</dd>
-                    <dt>"channel"</dt><dd>{channel}</dd>
-                    <dt>"layer"</dt><dd>"L"{layer}</dd>
-                    <dt>"physical node"</dt>
+                    <dt>{t!("inspect.zoom.shard_idx")}</dt><dd>{idx}</dd>
+                    <dt>{t!("inspect.zoom.channel")}</dt><dd>{channel}</dd>
+                    <dt>{t!("inspect.zoom.layer")}</dt><dd>"L"{layer}</dd>
+                    <dt>{t!("inspect.zoom.physical_node")}</dt>
                     <dd>"n"{node_idx} " · " <code>{node_addr}</code></dd>
-                    <dt>"sym_len"</dt><dd>{sym_len} " bytes"</dd>
-                    <dt>"shard_hash"</dt><dd><code>{hash_hex}</code></dd>
+                    <dt>{t!("inspect.zoom.sym_len")}</dt><dd>{sym_len} " " {t!("inspect.zoom.bytes")}</dd>
+                    <dt>{t!("inspect.zoom.shard_hash")}</dt><dd><code>{hash_hex}</code></dd>
                 </dl>
                 {match shard {
                     Some(s) => view! {
-                        <p><b>"coeffs"</b> " (K bytes):"</p>
+                        <p><b>{t!("inspect.zoom.coeffs")}</b> " " {t!("inspect.zoom.coeffs_k_bytes")}</p>
                         <pre>{s.coeffs_hex}</pre>
                         <p>
-                            <b>"payload"</b> " (first 64 bytes of " {s.payload_len} " as hex):"
+                            <b>{t!("inspect.zoom.payload_prefix")}</b>
+                            " " {t!("inspect.zoom.payload_first_64")}
+                            " " {s.payload_len} " " {t!("inspect.zoom.as_hex")}
                         </p>
                         <pre>{s.payload_preview_hex}</pre>
                     }.into_any(),
                     None => view! {
-                        <p class="bad">"shard not retrieved (node unavailable or removed)"</p>
+                        <p class="bad">{t!("inspect.zoom.shard_unavailable")}</p>
                     }.into_any(),
                 }}
             </div>
         </div>
         <p style="margin-top:24px">
-            <a href={back_href}>"← all shards of the object"</a>
+            <a href={back_href}>{t!("inspect.zoom.back_link")}</a>
         </p>
     }
 }
@@ -441,24 +442,24 @@ fn ZoomBody(data: ZoomView) -> impl IntoView {
 
 fn channel_label(kind: &str, c: u8) -> String {
     match (kind, c) {
-        ("image", 0) => "channel 0 · R (red)".into(),
-        ("image", 1) => "channel 1 · G (green)".into(),
-        ("image", 2) => "channel 2 · B (blue)".into(),
-        ("audio", 0) => "channel 0 · L (left)".into(),
-        ("audio", 1) => "channel 1 · R (right)".into(),
-        _ => format!("channel {c}"),
+        ("image", 0) => t!("inspect.label.image_r").to_string(),
+        ("image", 1) => t!("inspect.label.image_g").to_string(),
+        ("image", 2) => t!("inspect.label.image_b").to_string(),
+        ("audio", 0) => t!("inspect.label.audio_l").to_string(),
+        ("audio", 1) => t!("inspect.label.audio_r").to_string(),
+        _ => format!("{} {c}", t!("inspect.zoom.channel")),
     }
 }
 
 fn layer_label(kind: &str, l: u8, nlayers: u8) -> String {
     let last = nlayers.saturating_sub(1);
     match (kind, l) {
-        ("image", 0) => "L0 · LL · coarse structure".into(),
-        ("image", x) if x == last => format!("L{x} · HH · finest details"),
-        ("image", _) => "mid frequencies".into(),
-        ("audio", 0) => "L0 · bass and envelope".into(),
-        ("audio", x) if x == last => "high frequencies".into(),
-        ("audio", _) => "mid frequencies".into(),
+        ("image", 0) => t!("inspect.label.image_coarse").to_string(),
+        ("image", x) if x == last => format!("L{x} · {}", t!("inspect.label.image_fine")),
+        ("image", _) => t!("inspect.label.audio_mid").to_string(),
+        ("audio", 0) => t!("inspect.label.audio_bass").to_string(),
+        ("audio", x) if x == last => t!("inspect.label.audio_high").to_string(),
+        ("audio", _) => t!("inspect.label.audio_mid").to_string(),
         _ => String::new(),
     }
 }

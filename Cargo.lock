@@ -1210,6 +1210,7 @@ dependencies = [
  "mime_guess",
  "png",
  "pulldown-cmark",
+ "regex",
  "rustls",
  "serde",
  "serde_json",

@@ -123,6 +123,9 @@ async fn main() {
         .route("/api/mkdir", post(handlers::mkdir_form))
         .route("/api/rmdir/*path", delete(handlers::rmdir))
         .route("/api/rmdir", post(handlers::rmdir_form))
+        // Stage 11.17: form-friendly file delete (mirror of rmdir_form
+        // for non-directory entries).
+        .route("/api/rm", post(handlers::rm_form))
         .route("/api/mv", post(handlers::mv))
         // Stage 11.4: form-friendly file upload from the catalog page.
         .route(
