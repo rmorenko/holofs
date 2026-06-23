@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 
-use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// Resolve `<locale>/<slug>.md` to a real path on disk. Tries the
 /// localized variant first, then the English fallback at `docs/<slug>.md`,
@@ -80,6 +80,10 @@ pub fn render_markdown(md: &str) -> String {
     let mut out_events: Vec<Event<'_>> = Vec::new();
     let mut in_mermaid = false;
     let mut mermaid_src = String::new();
+    // Stage 11.15: collect heading text into a buffer so we can derive
+    // an `id` from it on TagEnd and re-emit the whole heading as a
+    // raw-HTML block with the id + a wrapping anchor link.
+    let mut heading_state: Option<(HeadingLevel, String, String)> = None;
 
     for ev in parser {
         match ev {
@@ -102,6 +106,41 @@ pub fn render_markdown(md: &str) -> String {
             }
             Event::Text(t) if in_mermaid => {
                 mermaid_src.push_str(&t);
+            }
+            // ===== Heading interception =====
+            Event::Start(Tag::Heading { level, id, .. }) => {
+                let explicit = id.map(|s| s.to_string()).unwrap_or_default();
+                heading_state = Some((level, explicit, String::new()));
+            }
+            Event::End(TagEnd::Heading(_)) if heading_state.is_some() => {
+                let (level, explicit, text) = heading_state.take().unwrap();
+                let lvl = heading_level_u8(level);
+                let id = if !explicit.is_empty() {
+                    explicit
+                } else {
+                    slugify(&text)
+                };
+                let html_block = if id.is_empty() {
+                    format!("<h{lvl}>{}</h{lvl}>", html_escape(&text))
+                } else {
+                    format!(
+                        "<h{lvl} id=\"{id}\"><a class=\"heading-link\" href=\"#{id}\">{text}</a></h{lvl}>",
+                        text = html_escape(&text)
+                    )
+                };
+                out_events.push(Event::Html(CowStr::from(html_block)));
+            }
+            Event::Text(t) if heading_state.is_some() => {
+                if let Some((_, _, buf)) = heading_state.as_mut() {
+                    buf.push_str(&t);
+                }
+            }
+            Event::Code(t) if heading_state.is_some() => {
+                // Drop the <code> wrapper from headings — slug + visible
+                // text only care about the literal content.
+                if let Some((_, _, buf)) = heading_state.as_mut() {
+                    buf.push_str(&t);
+                }
             }
             Event::InlineMath(expr) => {
                 let html_block = format!(
@@ -180,6 +219,48 @@ fn rewrite_md_link(dest: &str) -> String {
     dest.to_string()
 }
 
+fn heading_level_u8(l: HeadingLevel) -> u8 {
+    match l {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    }
+}
+
+/// GitHub-style heading slug: lowercase, Unicode-aware, alphanumeric +
+/// dash-separated. Trailing dashes and double-dashes are collapsed.
+/// Punctuation is dropped; whitespace and `-`/`_` become a single `-`.
+///
+/// Matches the way the localized TOCs were written: `## 1. Bring up the
+/// cluster` slugs to `1-bring-up-the-cluster`; `## 1. Подготовка
+/// кластера` slugs to `1-подготовка-кластера` (and URLs encode the
+/// Cyrillic on the wire — browsers handle it transparently).
+pub fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c.is_alphanumeric() {
+            for lc in c.to_lowercase() {
+                out.push(lc);
+            }
+            prev_dash = false;
+        } else if c.is_whitespace() || c == '-' || c == '_' {
+            if !prev_dash && !out.is_empty() {
+                out.push('-');
+                prev_dash = true;
+            }
+        }
+        // else: punctuation — drop silently.
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
 fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -202,7 +283,10 @@ mod tests {
     #[test]
     fn renders_plain_markdown() {
         let html = render_markdown("# title\n\nhello **world**\n");
-        assert!(html.contains("<h1>title</h1>"));
+        // Stage 11.15: headings carry an id + wrapping anchor link
+        // so TOC entries can navigate.
+        assert!(html.contains("<h1 id=\"title\""));
+        assert!(html.contains("title</a></h1>"));
         assert!(html.contains("<strong>world</strong>"));
     }
 
@@ -263,5 +347,45 @@ mod tests {
         let html = render_markdown("see [theory](./theory.md) for math");
         assert!(html.contains(r#"href="/help/theory""#));
         assert!(!html.contains("./theory.md"));
+    }
+
+    #[test]
+    fn slugify_english() {
+        assert_eq!(slugify("1. Bring up the cluster"), "1-bring-up-the-cluster");
+        assert_eq!(slugify("HTTP Range on GET (Stage 11.1)"), "http-range-on-get-stage-111");
+        assert_eq!(slugify("Documentation"), "documentation");
+    }
+
+    #[test]
+    fn slugify_cyrillic_unicode_aware() {
+        assert_eq!(slugify("1. Подготовка кластера"), "1-подготовка-кластера");
+        assert_eq!(slugify("Содержание"), "содержание");
+    }
+
+    #[test]
+    fn slugify_strips_punctuation_and_collapses_dashes() {
+        assert_eq!(slugify("Hello,   world!"), "hello-world");
+        assert_eq!(slugify("—a — b—"), "a-b");
+        assert_eq!(slugify(""), "");
+    }
+
+    #[test]
+    fn headings_get_id_and_anchor_link() {
+        let html = render_markdown("## 1. Bring up the cluster\n\nbody");
+        // The heading itself has an id so TOC anchors land on it.
+        assert!(html.contains("<h2 id=\"1-bring-up-the-cluster\""));
+        // And the heading text is wrapped in a self-link so users can
+        // click the heading to address it.
+        assert!(html.contains("href=\"#1-bring-up-the-cluster\""));
+        assert!(html.contains("class=\"heading-link\""));
+    }
+
+    #[test]
+    fn cyrillic_heading_slug_matches_toc() {
+        // Reproduces the `/help/test-scenarios?lang=ru` flow — the
+        // generated heading id must equal the TOC link target.
+        let html = render_markdown("## 1. Подготовка кластера\n");
+        assert!(html.contains("id=\"1-подготовка-кластера\""));
+        assert!(html.contains("href=\"#1-подготовка-кластера\""));
     }
 }
