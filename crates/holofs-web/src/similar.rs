@@ -2,8 +2,10 @@
 //! or MinHash Jaccard (text) plus cross-object shard-hash overlaps.
 
 use leptos::prelude::*;
-use leptos_router::hooks::use_params_map;
+use leptos_router::hooks::{use_params_map, use_query_map};
 use serde::{Deserialize, Serialize};
+
+use crate::i18n::{current_locale, translate};
 
 // ===== View-models (Send across SSR ⇄ hydrate boundary) ====================
 
@@ -51,11 +53,15 @@ pub struct SimilarReportView {
     prefix = "/api",
     endpoint = "similar",
 )]
-pub async fn get_similar(name: String) -> Result<SimilarReportView, ServerFnError> {
+pub async fn get_similar(
+    name: String,
+    scope: String,
+) -> Result<SimilarReportView, ServerFnError> {
     use std::sync::Arc;
     let gw = expect_context::<Arc<holofs_gateway::Gateway>>();
+    let scope = holofs_gateway::SimilarScope::parse(&scope);
     let rep = gw
-        .similar_to(&name)
+        .similar_to(&name, scope)
         .await
         .map_err(|e| ServerFnError::<server_fn::error::NoCustomError>::ServerError(e.to_string()))?;
     Ok(report_to_view(rep))
@@ -108,15 +114,24 @@ fn report_to_view(rep: holofs_gateway::SimilarReport) -> SimilarReportView {
 #[component]
 pub fn SimilarPage() -> impl IntoView {
     let params = use_params_map();
+    let query = use_query_map();
     let name = move || params.with(|p| p.get("name").unwrap_or_default());
+    // Stage 11.16: `?scope=all|folder|tree`. Default `all` keeps the
+    // existing behaviour for bookmarks made before this stage.
+    let scope = move || {
+        query
+            .with(|q| q.get("scope").unwrap_or_default())
+            .to_string()
+    };
 
-    let data = Resource::new(name, |n| async move {
+    let inputs = move || (name(), scope());
+    let data = Resource::new(inputs, |(n, s)| async move {
         if n.is_empty() {
             Err(ServerFnError::<server_fn::error::NoCustomError>::ServerError(
                 "missing name".into(),
             ))
         } else {
-            get_similar(n).await
+            get_similar(n, s).await
         }
     });
 
@@ -125,19 +140,40 @@ pub fn SimilarPage() -> impl IntoView {
 
         <main class="container">
             <Suspense fallback=move || view! { <p class="mut">"loading similar…"</p> }>
-                {move || data.get().map(|res| match res {
-                    Ok(v) => view! { <SimilarBody data=v/> }.into_any(),
-                    Err(e) => view! {
-                        <p class="bad">"failed to load: " {e.to_string()}</p>
-                    }.into_any(),
+                {move || data.get().map(|res| {
+                    let active_scope = scope();
+                    match res {
+                        Ok(v) => view! { <SimilarBody data=v active_scope=active_scope/> }.into_any(),
+                        Err(e) => view! {
+                            <p class="bad">"failed to load: " {e.to_string()}</p>
+                        }.into_any(),
+                    }
                 })}
             </Suspense>
         </main>
     }
 }
 
+/// Build a `/similar/<name>` URL preserving the current `?scope=` and
+/// `?lang=`. Empty values are dropped so the URL stays clean.
+fn similar_href(name_enc: &str, scope: &str) -> String {
+    let lang = current_locale();
+    let mut params: Vec<String> = Vec::new();
+    if !scope.is_empty() && scope != "all" {
+        params.push(format!("scope={scope}"));
+    }
+    if lang != "en" {
+        params.push(format!("lang={lang}"));
+    }
+    if params.is_empty() {
+        format!("/similar/{name_enc}")
+    } else {
+        format!("/similar/{name_enc}?{}", params.join("&"))
+    }
+}
+
 #[component]
-fn SimilarBody(data: SimilarReportView) -> impl IntoView {
+fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
     let SimilarReportView {
         name,
         kind,
@@ -154,12 +190,19 @@ fn SimilarBody(data: SimilarReportView) -> impl IntoView {
     let self_enc = enc.clone();
     let footer_enc = enc.clone();
     let object_link_enc = enc.clone();
+    let scope_for_links = if active_scope.is_empty() {
+        "all".to_string()
+    } else {
+        active_scope.clone()
+    };
 
     view! {
         <h2 style="margin-top:0">
             "find similar to "
             <a href={format!("/{object_link_enc}")}>{name.clone()}</a>
         </h2>
+
+        <ScopeSelector name_enc=enc.clone() active=scope_for_links.clone()/>
 
         {if is_text {
             view! {
@@ -218,10 +261,11 @@ fn SimilarBody(data: SimilarReportView) -> impl IntoView {
                         let nenc = crate::url_encode(&m.name);
                         let sim = format!("{:.1}%", m.similarity_pct);
                         let self_enc = self_enc.clone();
+                        let href = similar_href(&nenc, &scope_for_links);
                         view! {
                             <tr>
                                 <td class="name">
-                                    <a href={format!("/similar/{nenc}")}>{m.name.clone()}</a>
+                                    <a href=href>{m.name.clone()}</a>
                                 </td>
                                 <td class=cls><b>{sim}</b></td>
                                 <td class="name"><code>{method}</code></td>
@@ -261,10 +305,11 @@ fn SimilarBody(data: SimilarReportView) -> impl IntoView {
                     {overlaps.into_iter().map(|o| {
                         let nenc = crate::url_encode(&o.name);
                         let pct = format!("{:.1}%", o.overlap_pct);
+                        let href = similar_href(&nenc, &scope_for_links);
                         view! {
                             <tr>
                                 <td class="name">
-                                    <a href={format!("/similar/{nenc}")}>{o.name.clone()}</a>
+                                    <a href=href>{o.name.clone()}</a>
                                 </td>
                                 <td><code>{o.common}</code></td>
                                 <td><b>{pct}</b></td>
@@ -279,6 +324,40 @@ fn SimilarBody(data: SimilarReportView) -> impl IntoView {
             <a href={format!("/inspect/{footer_enc}")}>"← all shards"</a>
             " · "
             <a href="/">"catalog"</a>
+        </p>
+    }
+}
+
+/// Stage 11.16: scope picker for `/similar/<name>`. Three modes —
+/// whole catalog (legacy), direct siblings, subtree. SSR-friendly: each
+/// option is an `<a>` so the browser reloads with the new `?scope=`.
+#[component]
+fn ScopeSelector(name_enc: String, active: String) -> impl IntoView {
+    let options = [
+        ("all", "similar.scope.all"),
+        ("folder", "similar.scope.folder"),
+        ("tree", "similar.scope.tree"),
+    ];
+    let items = options.iter().map(|(slug, key)| {
+        let slug = *slug;
+        let key = *key;
+        let is_active = slug == active;
+        let href = similar_href(&name_enc, slug);
+        let label = translate(key, &current_locale());
+        if is_active {
+            view! {
+                <span class="scope-pill scope-active">{label}</span>
+            }.into_any()
+        } else {
+            view! {
+                <a class="scope-pill" href=href>{label}</a>
+            }.into_any()
+        }
+    }).collect_view();
+    view! {
+        <p class="scope-picker mut">
+            <span class="scope-label">{move || translate("similar.scope.label", &current_locale())}</span>
+            {items}
         </p>
     }
 }

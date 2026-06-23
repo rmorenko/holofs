@@ -214,6 +214,20 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("card.action.similar",
         ["similar", "похожие", "ähnlich", "similaires", "similares"]),
 
+    // ---- similar page: scope picker (Stage 11.16) ----------------------
+    ("similar.scope.label",
+        ["scope:", "область:", "Bereich:", "portée :", "ámbito:"]),
+    ("similar.scope.all",
+        ["all files", "все файлы", "alle Dateien",
+         "tous les fichiers", "todos los archivos"]),
+    ("similar.scope.folder",
+        ["current folder", "текущая папка", "aktueller Ordner",
+         "dossier actuel", "carpeta actual"]),
+    ("similar.scope.tree",
+        ["current folder (recursive)", "текущая папка (рекурсивно)",
+         "aktueller Ordner (rekursiv)", "dossier actuel (récursif)",
+         "carpeta actual (recursivo)"]),
+
     // ---- escrow ---------------------------------------------------------
     ("escrow.title",
         ["holographic key escrow",

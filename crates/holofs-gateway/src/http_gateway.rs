@@ -1317,8 +1317,15 @@ impl Gateway {
     }
 
     /// `/similar/<name>` view-model: top-10 neighbours of the same kind +
-    /// cross-object shard overlaps (any kind).
-    pub async fn similar_to(&self, name: &str) -> Result<SimilarReport, GatewayError> {
+    /// cross-object shard overlaps (any kind). `scope` constrains the
+    /// candidate pool relative to the target's parent directory — `All`
+    /// scans the whole catalog (current behavior), `Folder` keeps only
+    /// direct siblings, `Tree` keeps the subtree rooted at the parent.
+    pub async fn similar_to(
+        &self,
+        name: &str,
+        scope: SimilarScope,
+    ) -> Result<SimilarReport, GatewayError> {
         use holofs_model::manifest::ObjectKind;
 
         let snapshot = self.catalog.lock().await.clone();
@@ -1332,10 +1339,14 @@ impl Gateway {
         } else {
             self.compute_fingerprint(&manifest).await
         };
+        let target_parent = parent_dir(name);
 
         let mut neighbors: Vec<SimilarMatch> = Vec::new();
         for n in snapshot.names() {
             if n == name {
+                continue;
+            }
+            if !in_scope(target_parent, &n, scope) {
                 continue;
             }
             let m = match snapshot.get(&n) {
@@ -1374,6 +1385,9 @@ impl Gateway {
         let total_a = manifest.shard_hashes.iter().flatten().flatten().count();
         for n in snapshot.names() {
             if n == name {
+                continue;
+            }
+            if !in_scope(target_parent, &n, scope) {
                 continue;
             }
             let other = match snapshot.get(&n) {
@@ -1638,6 +1652,57 @@ pub struct ShardPayload {
     pub node_addr: String,
     /// Symbol length for the parent layer.
     pub sym_len: u32,
+}
+
+/// Scope filter for [`Gateway::similar_to`]. Constrains the candidate
+/// pool relative to the target object's parent directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimilarScope {
+    /// Whole catalog (legacy default).
+    All,
+    /// Only direct siblings — entries whose parent dir equals the
+    /// target's parent dir.
+    Folder,
+    /// Subtree — entries whose path starts at the target's parent dir.
+    /// At the catalog root this collapses to `All`.
+    Tree,
+}
+
+impl SimilarScope {
+    /// Parse a query-string value (`all` / `folder` / `tree`). Unknown
+    /// values fall back to `All` so a hand-edited URL can't break the page.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "folder" => Self::Folder,
+            "tree" => Self::Tree,
+            _ => Self::All,
+        }
+    }
+}
+
+/// Directory portion of a catalog name. `"a/b/c.png"` → `"a/b"`;
+/// `"top.png"` → `""`.
+pub(crate) fn parent_dir(name: &str) -> &str {
+    name.rsplit_once('/').map(|(p, _)| p).unwrap_or("")
+}
+
+/// Whether `candidate` is in the comparison pool for a target whose
+/// parent directory is `target_parent`, under the given `scope`.
+pub(crate) fn in_scope(target_parent: &str, candidate: &str, scope: SimilarScope) -> bool {
+    match scope {
+        SimilarScope::All => true,
+        SimilarScope::Folder => parent_dir(candidate) == target_parent,
+        SimilarScope::Tree => {
+            if target_parent.is_empty() {
+                // Target sits at the catalog root — tree scope spans the
+                // whole catalog, indistinguishable from All.
+                true
+            } else {
+                // Either inside target_parent directly or anywhere below it.
+                candidate.starts_with(&format!("{target_parent}/"))
+            }
+        }
+    }
 }
 
 /// Comparison method used in [`SimilarMatch::method`].
@@ -1984,5 +2049,63 @@ mod tests {
         assert_eq!(a1, a2);
         assert_ne!(a1, b);
         assert_ne!(a1, 0);
+    }
+
+    #[test]
+    fn parent_dir_strips_last_segment() {
+        assert_eq!(parent_dir("a/b/c.png"), "a/b");
+        assert_eq!(parent_dir("top.png"), "");
+        assert_eq!(parent_dir("only/one.png"), "only");
+    }
+
+    #[test]
+    fn scope_all_keeps_everything() {
+        assert!(in_scope("photos/2024", "anything/else.png", SimilarScope::All));
+        assert!(in_scope("", "top.png", SimilarScope::All));
+    }
+
+    #[test]
+    fn scope_folder_keeps_direct_siblings_only() {
+        let p = "photos/2024";
+        assert!(in_scope(p, "photos/2024/x.png", SimilarScope::Folder));
+        assert!(in_scope(p, "photos/2024/y.jpg", SimilarScope::Folder));
+        assert!(!in_scope(p, "photos/2024/sub/z.png", SimilarScope::Folder));
+        assert!(!in_scope(p, "photos/2023/x.png", SimilarScope::Folder));
+        assert!(!in_scope(p, "top.png", SimilarScope::Folder));
+    }
+
+    #[test]
+    fn scope_folder_at_root_keeps_only_root_level() {
+        assert!(in_scope("", "top.png", SimilarScope::Folder));
+        assert!(!in_scope("", "sub/x.png", SimilarScope::Folder));
+    }
+
+    #[test]
+    fn scope_tree_keeps_subtree() {
+        let p = "photos/2024";
+        assert!(in_scope(p, "photos/2024/x.png", SimilarScope::Tree));
+        assert!(in_scope(p, "photos/2024/sub/z.png", SimilarScope::Tree));
+        assert!(in_scope(p, "photos/2024/sub/deeper/w.png", SimilarScope::Tree));
+        // Sibling directory must NOT match — `photos/2024sub` could
+        // collide with a naive prefix check, so the helper uses the
+        // `parent/` form.
+        assert!(!in_scope(p, "photos/2024sub/x.png", SimilarScope::Tree));
+        assert!(!in_scope(p, "photos/2023/x.png", SimilarScope::Tree));
+        assert!(!in_scope(p, "top.png", SimilarScope::Tree));
+    }
+
+    #[test]
+    fn scope_tree_at_root_spans_everything() {
+        assert!(in_scope("", "top.png", SimilarScope::Tree));
+        assert!(in_scope("", "sub/deep/x.png", SimilarScope::Tree));
+    }
+
+    #[test]
+    fn scope_parse_unknown_falls_back_to_all() {
+        assert_eq!(SimilarScope::parse("folder"), SimilarScope::Folder);
+        assert_eq!(SimilarScope::parse("tree"), SimilarScope::Tree);
+        assert_eq!(SimilarScope::parse("all"), SimilarScope::All);
+        assert_eq!(SimilarScope::parse(""), SimilarScope::All);
+        assert_eq!(SimilarScope::parse("garbage"), SimilarScope::All);
     }
 }
