@@ -169,10 +169,20 @@ async fn main() {
         .nest_service("/pkg", ServeDir::new(format!("{site_root}/pkg")))
         // Stage 11.5: static assets used by the upload form, the help
         // viewer (Mermaid + KaTeX bootstrap), and anything else dropped
-        // into `crates/holofs-web/assets/`. cargo-leptos copies that
-        // tree into `target/site/assets/` at build time; without an
-        // explicit nest the `/*path` object catch-all swallows the URLs.
-        .nest_service("/assets", ServeDir::new(format!("{site_root}/assets")))
+        // into `crates/holofs-web/assets/`.
+        //
+        // Stage 11.14: `ServeDir` falls back to the source directory if
+        // `target/site/assets/` is missing — `cargo leptos build` does
+        // not copy the source assets-dir reliably across rebuilds, and
+        // we don't want help-init.js / mermaid bootstrap to 404 just
+        // because the user only ran `cargo build`. Production
+        // deployments (Docker / Helm) bundle assets at the
+        // `target/site/assets` path so the primary `ServeDir` wins.
+        .nest_service(
+            "/assets",
+            ServeDir::new(format!("{site_root}/assets"))
+                .fallback(ServeDir::new("crates/holofs-web/assets")),
+        )
         .fallback(fallback)
         .layer(Extension(Arc::clone(&gateway)))
         // tower-http TraceLayer turns each HTTP request into a tracing span:

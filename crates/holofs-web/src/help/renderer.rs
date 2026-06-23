@@ -117,6 +117,25 @@ pub fn render_markdown(md: &str) -> String {
                 );
                 out_events.push(Event::Html(CowStr::from(html_block)));
             }
+            // Stage 11.14: rewrite relative `*.md` links so they land
+            // on the in-app help viewer instead of trying to GET a
+            // catalog object. Source docs link to siblings via
+            // `[theory.md](./theory.md)` for human readability; in the
+            // rendered HTML we point those at `/help/<slug>`.
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) => {
+                let new_dest = rewrite_md_link(&dest_url);
+                out_events.push(Event::Start(Tag::Link {
+                    link_type,
+                    dest_url: CowStr::from(new_dest),
+                    title,
+                    id,
+                }));
+            }
             other => out_events.push(other),
         }
     }
@@ -124,6 +143,41 @@ pub fn render_markdown(md: &str) -> String {
     let mut out = String::with_capacity(md.len() * 2);
     html::push_html(&mut out, out_events.into_iter());
     out
+}
+
+/// Rewrite a markdown link target so relative `.md` paths point at the
+/// in-app `/help/<slug>` route. Absolute URLs (http, https, mailto) and
+/// non-`.md` paths pass through unchanged. Anchor fragments survive —
+/// `./theory.md#section` becomes `/help/theory#section`.
+fn rewrite_md_link(dest: &str) -> String {
+    // Leave external links alone.
+    let lowered = dest.to_ascii_lowercase();
+    if lowered.starts_with("http://")
+        || lowered.starts_with("https://")
+        || lowered.starts_with("mailto:")
+        || lowered.starts_with("//")
+    {
+        return dest.to_string();
+    }
+    // Split off the anchor (#...) so we can put it back after rewriting
+    // the path part.
+    let (path_part, anchor) = match dest.split_once('#') {
+        Some((p, a)) => (p, Some(a)),
+        None => (dest, None),
+    };
+    // Only rewrite if the path actually ends in `.md`.
+    let stripped = path_part.trim_start_matches("./").trim_start_matches("../");
+    // Drop any directory prefix — the doc viewer only knows flat slugs.
+    let leaf = stripped.rsplit('/').next().unwrap_or(stripped);
+    if let Some(slug) = leaf.strip_suffix(".md") {
+        let mut out = format!("/help/{slug}");
+        if let Some(a) = anchor {
+            out.push('#');
+            out.push_str(a);
+        }
+        return out;
+    }
+    dest.to_string()
 }
 
 fn html_escape(s: &str) -> String {
@@ -181,5 +235,33 @@ mod tests {
     fn extract_h1_handles_atx() {
         assert_eq!(extract_h1("# Title\n\nbody"), Some("Title".to_string()));
         assert_eq!(extract_h1("no heading"), None);
+    }
+
+    #[test]
+    fn rewrite_md_link_relative_sibling() {
+        assert_eq!(rewrite_md_link("./theory.md"), "/help/theory");
+        assert_eq!(rewrite_md_link("../api.md"), "/help/api");
+        assert_eq!(rewrite_md_link("operations.md"), "/help/operations");
+        assert_eq!(
+            rewrite_md_link("./test-scenarios.md#1-bring-up-the-cluster"),
+            "/help/test-scenarios#1-bring-up-the-cluster"
+        );
+    }
+
+    #[test]
+    fn rewrite_md_link_external_pass_through() {
+        assert_eq!(
+            rewrite_md_link("https://example.com/file.md"),
+            "https://example.com/file.md"
+        );
+        assert_eq!(rewrite_md_link("mailto:hi@example.com"), "mailto:hi@example.com");
+        assert_eq!(rewrite_md_link("./image.png"), "./image.png");
+    }
+
+    #[test]
+    fn md_link_in_doc_gets_rewritten() {
+        let html = render_markdown("see [theory](./theory.md) for math");
+        assert!(html.contains(r#"href="/help/theory""#));
+        assert!(!html.contains("./theory.md"));
     }
 }

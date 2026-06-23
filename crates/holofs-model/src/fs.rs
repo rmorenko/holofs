@@ -90,7 +90,10 @@ impl Directory {
             let mut id = [0u8; 8];
             id.copy_from_slice(&h[..8]);
             let object_id = u64::from_be_bytes(id);
-            self.entries.insert(path, Manifest::directory(object_id));
+            // created_at = 0 — these placeholders are synthesized for
+            // legacy catalogs and we have no honest timestamp for them.
+            self.entries
+                .insert(path, Manifest::directory(object_id, 0));
         }
         n
     }
@@ -209,6 +212,7 @@ mod tests {
             chunk_lens: vec![],
             audio_sample_rate: 0,
             text_minhash: vec![],
+            created_at_unix: 1_700_000_000 + seed as u64,
         }
     }
 
@@ -319,7 +323,7 @@ mod tests {
     fn synthesize_skips_when_directory_already_present() {
         let mut d = Directory::new();
         // Pre-existing Directory marker with a hand-picked object_id.
-        d.insert("photos".into(), Manifest::directory(0xDEAD));
+        d.insert("photos".into(), Manifest::directory(0xDEAD, 0));
         d.insert("photos/img.png".into(), fake_manifest(1));
         let added = d.synthesize_missing_directories();
         assert_eq!(added, 0);

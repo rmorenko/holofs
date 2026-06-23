@@ -216,6 +216,7 @@ pub async fn upload_form(
     let mut name_override: Option<String> = None;
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut original_filename: Option<String> = None;
+    let mut return_to_field = String::new();
     while let Ok(Some(field)) = form.next_field().await {
         let field_name = field.name().unwrap_or("").to_string();
         let upload_filename = field.file_name().map(|s| s.to_string());
@@ -234,6 +235,9 @@ pub async fn upload_form(
             "file" => {
                 file_bytes = Some(bytes.to_vec());
                 original_filename = upload_filename.filter(|f| !f.is_empty());
+            }
+            "return_to" => {
+                return_to_field = String::from_utf8_lossy(&bytes).trim().to_string();
             }
             _ => {}
         }
@@ -255,8 +259,9 @@ pub async fn upload_form(
     if !is_valid_put_name(&path) {
         return bad_request("reserved or empty top segment");
     }
+    let target = pick_return_to(&return_to_field, &parent);
     match gw.ingest_bytes(&path, &body).await {
-        Ok(_) => redirect_to_catalog(&parent),
+        Ok(_) => redirect_to(&target),
         Err(e) => error_to_response(e),
     }
 }
@@ -292,6 +297,7 @@ pub async fn mkdir_form(
     let Some(name) = parse_urlencoded_field(body_str, "name") else {
         return bad_request("missing 'name'");
     };
+    let return_to_field = parse_urlencoded_field(body_str, "return_to").unwrap_or_default();
     let path = if parent.is_empty() {
         name
     } else {
@@ -300,8 +306,9 @@ pub async fn mkdir_form(
     if !is_valid_put_name(&path) {
         return bad_request("reserved or empty top segment");
     }
+    let target = pick_return_to(&return_to_field, &parent);
     match gw.mkdir(&path).await {
-        Ok(_) => redirect_to_catalog(&parent),
+        Ok(_) => redirect_to(&target),
         Err(e) => error_to_response(e),
     }
 }
@@ -338,22 +345,38 @@ pub async fn rmdir_form(
     if !is_valid_put_name(&path) {
         return bad_request("reserved or empty top segment");
     }
+    let return_to_field = parse_urlencoded_field(body_str, "return_to").unwrap_or_default();
     let parent = path.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+    let target = pick_return_to(&return_to_field, &parent);
     match gw.rmdir(&path).await {
-        Ok(_) => redirect_to_catalog(&parent),
+        Ok(_) => redirect_to(&target),
         Err(e) => error_to_response(e),
     }
 }
 
-/// 303 redirect to `/?p=<prefix>` (or `/` if prefix is empty). Used by
-/// the form-friendly mkdir/rmdir handlers so the browser navigates back
-/// to the directory the user was viewing.
-fn redirect_to_catalog(prefix: &str) -> Response {
-    let target = if prefix.is_empty() {
+/// Resolve where to send the user after a form mutation. Honours an
+/// explicit `return_to` field when present (the tree-view forms set
+/// this to `/` so the page doesn't switch to focus mode); otherwise
+/// falls back to `/?p=<parent>` for backward-compat with the
+/// focus-view forms that omit the field.
+fn pick_return_to(return_to: &str, parent: &str) -> String {
+    if !return_to.is_empty() {
+        return return_to.to_string();
+    }
+    if parent.is_empty() {
         "/".to_string()
     } else {
-        format!("/?p={prefix}")
-    };
+        format!("/?p={parent}")
+    }
+}
+
+/// 303 redirect to an absolute or relative URL. The form-friendly
+/// mkdir/rmdir/upload handlers pick the target from a hidden
+/// `return_to` field so each calling page can decide where to go after
+/// success — the tree-view stays on `/`, the focus-view comes back to
+/// `/?p=<parent>`, etc. Falls back to `/` if no target was given.
+fn redirect_to(target: &str) -> Response {
+    let target = if target.is_empty() { "/" } else { target };
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(header::LOCATION, target)
@@ -517,32 +540,40 @@ fn parse_urlencoded_field(body: &str, field: &str) -> Option<String> {
 }
 
 /// Decode `+` → space and `%XX` → byte for a single form field.
+///
+/// Stage 11.13: bytes flow through a `Vec<u8>` rather than being pushed
+/// straight into a `String`. The old code did `out.push(byte as char)`,
+/// which treated each decoded byte as a Unicode code point — fine for
+/// ASCII, garbage for any multi-byte UTF-8 sequence. A Russian "С"
+/// (UTF-8 `D0 A1`) used to render as `Ð¡`; with the byte-buffer path we
+/// reassemble the original UTF-8 bytes and `String::from_utf8_lossy`
+/// hands back the right characters.
 fn url_decode_simple(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut out: Vec<u8> = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
             b'+' => {
-                out.push(' ');
+                out.push(b' ');
                 i += 1;
             }
             b'%' if i + 2 < bytes.len() => {
                 let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
                 if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    out.push(byte as char);
+                    out.push(byte);
                 } else {
-                    out.push('%');
+                    out.push(b'%');
                 }
                 i += 3;
             }
             c => {
-                out.push(c as char);
+                out.push(c);
                 i += 1;
             }
         }
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // === Response builders ====================================================

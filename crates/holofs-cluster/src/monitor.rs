@@ -297,6 +297,7 @@ fn probe_manifest(nodes: Vec<String>) -> Manifest {
         chunk_lens: vec![],
         audio_sample_rate: 0,
         text_minhash: vec![],
+        created_at_unix: 0,
     }
 }
 

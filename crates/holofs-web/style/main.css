@@ -1,4 +1,7 @@
-:root {
+/* Default = dark; an explicit `data-theme="light"` on <html> swaps the
+ * palette. A tiny pre-paint script in `<head>` reads the user's choice
+ * from localStorage so theme survives reloads with no flash. */
+:root, [data-theme="dark"] {
   --bg: #0e1116;
   --surf: #161b22;
   --surf2: #1c2129;
@@ -10,6 +13,20 @@
   --warn: #d29922;
   --bad: #f85149;
 }
+[data-theme="light"] {
+  --bg: #ffffff;
+  --surf: #f6f8fa;
+  --surf2: #eaeef2;
+  --bord: #d0d7de;
+  --fg: #1f2328;
+  --mut: #59636e;
+  --accent: #0969da;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --bad: #cf222e;
+}
+html { color-scheme: dark; }
+[data-theme="light"] html, html[data-theme="light"] { color-scheme: light; }
 
 * { box-sizing: border-box; }
 
@@ -747,4 +764,287 @@ h4.inspect-layer {
     padding-right: 0;
     padding-bottom: 12px;
   }
+}
+
+/* === Stage 11.10: tree-view catalog ========================================
+ * The default `/` view renders the full catalog as nested <details>
+ * elements. Native browser expand/collapse, no JS, no client state.
+ * The focused per-folder view (`/?p=<path>`) keeps the grid layout
+ * for create / manage actions.
+ */
+.tree-intro {
+  margin: 0 0 18px 0;
+  font-size: 16px;
+  line-height: 1.6;
+}
+.focus-tip {
+  margin: 8px 0 22px 0;
+  font-size: 15px;
+}
+
+/* Sticky controls bar above the scrollable tree. */
+.tree-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  padding: 8px 0;
+  z-index: 10;
+}
+.tree-control-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font: 500 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  letter-spacing: 0.2px;
+  color: var(--mut);
+  background: transparent;
+  border: 1px solid var(--bord);
+  border-radius: 999px;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: border-color .15s ease, color .15s ease, background .15s ease;
+}
+.tree-control-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(106, 167, 255, 0.06);
+}
+.tree-control-btn:active { background: rgba(106, 167, 255, 0.12); }
+.tree-control-icon {
+  font-size: 15px;
+  line-height: 1;
+  display: inline-block;
+}
+.tree-control-label { line-height: 1; }
+
+/* Inline mkdir inside the controls bar. */
+.tree-mkdir {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tree-mkdir input[type="text"] {
+  font: 13px inherit;
+  color: var(--fg);
+  background: var(--surf2);
+  border: 1px solid var(--bord);
+  border-radius: 999px;
+  padding: 8px 14px;
+  width: 200px;
+  outline: none;
+  transition: border-color .12s ease;
+}
+.tree-mkdir input[type="text"]:focus { border-color: var(--accent); }
+
+/* Sort selector — pill-style toggles. */
+.tree-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--mut);
+}
+.tree-sort-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; }
+.tree-sort-link {
+  color: var(--mut);
+  text-decoration: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: color .12s ease, background .12s ease;
+}
+.tree-sort-link:hover { color: var(--accent); }
+.tree-sort-link.active { color: var(--accent); background: rgba(106, 167, 255, 0.1); font-weight: 600; }
+
+/* Scrollable viewport for the tree. Bounded height keeps the page from
+ * stretching forever; the inner <ul> handles long lists. */
+.tree-scroll {
+  max-height: 75vh;
+  overflow-y: auto;
+  border: 1px solid var(--bord);
+  border-radius: 12px;
+  padding: 14px 18px;
+  background: var(--surf);
+}
+.tree-scroll::-webkit-scrollbar { width: 12px; }
+.tree-scroll::-webkit-scrollbar-track { background: var(--surf); }
+.tree-scroll::-webkit-scrollbar-thumb {
+  background: var(--bord);
+  border-radius: 8px;
+  border: 3px solid var(--surf);
+}
+
+.tree-root, .tree-children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.tree-root { font-size: 30px; }
+.tree-children {
+  margin-left: 58px;
+  border-left: 2px dashed var(--bord);
+  padding-left: 34px;
+  margin-top: 10px;
+}
+
+.tree-branch, .tree-leaf {
+  margin: 12px 0;
+  line-height: 1.5;
+}
+
+.tree-branch > details > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 22px 26px;
+  border-radius: 13px;
+  user-select: none;
+}
+.tree-branch > details > summary::-webkit-details-marker { display: none; }
+.tree-branch > details > summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 32px;
+  color: var(--mut);
+  font-size: 32px;
+  transition: transform .12s ease;
+}
+.tree-branch > details[open] > summary::before {
+  transform: rotate(90deg);
+}
+.tree-branch > details > summary:hover {
+  background: var(--surf2);
+}
+
+.tree-leaf {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 19px 26px 19px 62px;
+  border-radius: 13px;
+}
+.tree-leaf:hover { background: var(--surf2); }
+
+.tree-icon {
+  display: inline-block;
+  width: 54px;
+  text-align: center;
+  font-size: 45px;
+  line-height: 1;
+}
+.tree-name {
+  color: var(--fg);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 30px;
+}
+.tree-leaf .tree-name {
+  font-weight: 500;
+  font: 26px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.tree-name:hover { color: var(--accent); }
+.tree-count {
+  color: var(--mut);
+  font-size: 21px;
+  font-weight: 400;
+}
+.tree-actions {
+  margin-left: auto;
+  font-size: 18px;
+  color: var(--mut);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.tree-actions a { color: var(--accent); text-decoration: none; }
+.tree-actions a:hover { text-decoration: underline; }
+.tree-actions .link-btn { font-size: 18px; }
+
+/* Visible mid-dot separator between name / count and the action list,
+ * and between actions inside the action list. Same shade as `.mut`
+ * so it doesn't compete with the actual links. */
+.tree-sep {
+  color: var(--mut);
+  font-size: 18px;
+  user-select: none;
+  margin: 0 2px;
+}
+
+/* Inline mkdir on each folder row. The wrapping form lives inside
+ * `<summary>`, so clicks on the input or button must NOT bubble up to
+ * the `<details>` (that would toggle the expansion state); we stop
+ * propagation via the `onclick` attr on the form itself. */
+.tree-inline-mkdir {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tree-inline-mkdir input[type="text"] {
+  font: 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: var(--fg);
+  background: var(--surf2);
+  border: 1px solid var(--bord);
+  border-radius: 999px;
+  padding: 4px 10px;
+  width: 130px;
+  outline: none;
+  transition: border-color .12s ease;
+}
+.tree-inline-mkdir input[type="text"]:focus { border-color: var(--accent); }
+.tree-inline-mkdir .link-btn {
+  font-size: 13px;
+  padding: 4px 10px;
+  border: 1px solid var(--bord);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--mut);
+  transition: border-color .12s ease, color .12s ease;
+}
+.tree-inline-mkdir .link-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+/* Stage 11.13: per-row meta column — shard count + creation date.
+ * Sits between the name and the actions; gets pushed to the right edge
+ * by the actions' `margin-left: auto` since the meta has no auto margin
+ * of its own. */
+.tree-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  font: 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: var(--mut);
+  margin-left: 18px;
+  white-space: nowrap;
+}
+.tree-meta-size { min-width: 80px; text-align: right; }
+.tree-meta-date { min-width: 130px; text-align: right; }
+
+/* Theme switcher in topbar. */
+.theme-toggle {
+  margin-left: 12px;
+  background: transparent;
+  border: 1px solid var(--bord);
+  color: var(--mut);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font: 12px inherit;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+  transition: border-color .12s ease, color .12s ease;
+}
+.theme-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }

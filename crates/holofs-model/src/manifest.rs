@@ -84,6 +84,15 @@ pub struct Manifest {
     /// For `Text`: bottom-K MinHash fingerprint for fuzzy similar-text search.
     /// Computed at PUT time, ~64 u32 values. Empty for non-text.
     pub text_minhash: Vec<u32>,
+
+    // === Stage 11.12: creation timestamp =================================
+    /// Unix epoch seconds at which this manifest was created (PUT for
+    /// objects, `mkdir` for directories). `0` means "unknown / legacy"
+    /// — manifests written under magic `HOLOFSM6` or `HOLOFSM7` (i.e.
+    /// before Stage 11.12) carry no timestamp and decode as zero. The
+    /// gateway sets this field automatically on every catalog mutation,
+    /// so going forward it stays populated.
+    pub created_at_unix: u64,
 }
 
 impl Manifest {
@@ -93,8 +102,10 @@ impl Manifest {
     /// identity. Holofs treats this entry as an opaque tombstone for path
     /// resolution: it must exist for every prefix on the way to a real
     /// object, but it never round-trips through the encode / decode shard
-    /// machinery.
-    pub fn directory(object_id: u64) -> Self {
+    /// machinery. `created_at_unix` is Unix epoch seconds; pass `0` for
+    /// directories whose creation time is unknown (e.g. synthesized by
+    /// the legacy-catalog migration in `Directory::synthesize_missing_directories`).
+    pub fn directory(object_id: u64, created_at_unix: u64) -> Self {
         Self {
             object_id,
             k: 0,
@@ -117,6 +128,7 @@ impl Manifest {
             chunk_lens: Vec::new(),
             audio_sample_rate: 0,
             text_minhash: Vec::new(),
+            created_at_unix,
         }
     }
 
@@ -151,14 +163,18 @@ impl Manifest {
     }
 }
 
-/// Current on-disk magic. Stage 9 bumped from `HOLOFSM6` to `HOLOFSM7` to
-/// signal that a manifest may carry the `ObjectKind::Directory` discriminant
-/// (tag `4`). The wire layout is byte-for-byte the same as `HOLOFSM6`; only
-/// the legal set of `kind` values grew.
-const MAGIC: &[u8; 8] = b"HOLOFSM7";
-/// Legacy magic accepted on read so pre-Stage-9 catalogs migrate transparently.
-/// Files written under `HOLOFSM6` cannot contain `Directory` entries by
-/// definition — the discriminant did not exist yet.
+/// Current on-disk magic. Stage 11.12 bumped from `HOLOFSM7` to `HOLOFSM8`
+/// to append the new `created_at_unix: u64` field at the tail of the
+/// encoded record. Everything before that is byte-for-byte the same as
+/// `HOLOFSM7` — readers of the new format see a longer record, readers
+/// of the legacy formats decode through and treat `created_at_unix` as 0.
+const MAGIC: &[u8; 8] = b"HOLOFSM8";
+/// Stage 9 magic — accepted on read; lacks the trailing `created_at_unix`
+/// (default 0). Legal set of `kind` values is identical to `HOLOFSM8`.
+const MAGIC_LEGACY_V7: &[u8; 8] = b"HOLOFSM7";
+/// Pre-Stage-9 magic — also accepted on read. Cannot carry
+/// `ObjectKind::Directory`; otherwise identical wire layout. `created_at_unix`
+/// also defaults to 0 on decode.
 const MAGIC_LEGACY: &[u8; 8] = b"HOLOFSM6";
 
 impl Manifest {
@@ -243,13 +259,21 @@ impl Manifest {
         for &h in &self.text_minhash {
             b.extend_from_slice(&h.to_be_bytes());
         }
+
+        // === Stage 11.12: creation timestamp ==================================
+        b.extend_from_slice(&self.created_at_unix.to_be_bytes());
         b
     }
 
     pub fn decode(buf: &[u8]) -> io::Result<Self> {
         let mut c = Cursor::new(buf);
-        let magic = c.take(8)?;
-        if magic != MAGIC && magic != MAGIC_LEGACY {
+        let magic_bytes = c.take(8)?;
+        let mut magic = [0u8; 8];
+        magic.copy_from_slice(magic_bytes);
+        let is_current = magic == *MAGIC;
+        let is_legacy_v7 = magic == *MAGIC_LEGACY_V7;
+        let is_legacy_v6 = magic == *MAGIC_LEGACY;
+        if !is_current && !is_legacy_v7 && !is_legacy_v6 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "not a holofs manifest",
@@ -353,6 +377,10 @@ impl Manifest {
             text_minhash.push(c.u32()?);
         }
 
+        // Stage 11.12: trailing u64 timestamp. Only present in HOLOFSM8;
+        // legacy HOLOFSM6/HOLOFSM7 records end here and decode as 0.
+        let created_at_unix = if is_current { c.u64()? } else { 0 };
+
         Ok(Manifest {
             object_id,
             k,
@@ -375,6 +403,7 @@ impl Manifest {
             chunk_lens,
             audio_sample_rate,
             text_minhash,
+            created_at_unix,
         })
     }
 }
@@ -468,6 +497,7 @@ mod tests {
             chunk_lens: vec![100, 90, 80, 0],
             audio_sample_rate: 0,
             text_minhash: vec![],
+            created_at_unix: 1_700_000_000,
         };
         let bytes = m.encode();
         let back = Manifest::decode(&bytes).unwrap();
@@ -482,7 +512,7 @@ mod tests {
 
     #[test]
     fn directory_manifest_roundtrip() {
-        let dir = Manifest::directory(0xDEADBEEF);
+        let dir = Manifest::directory(0xDEADBEEF, 1_750_000_000);
         let bytes = dir.encode();
         let back = Manifest::decode(&bytes).unwrap();
         assert_eq!(back, dir);
@@ -520,10 +550,32 @@ mod tests {
             chunk_lens: vec![8],
             audio_sample_rate: 0,
             text_minhash: vec![],
+            // Legacy magic implies no `created_at_unix` was stored, so the
+            // expected decode default is 0 — the field gets set here to
+            // match what `decode` will yield.
+            created_at_unix: 0,
         };
         let mut bytes = m.encode();
+        // Pretend this is a HOLOFSM6 record: rewrite the magic AND chop
+        // off the trailing 8 bytes that Stage 11.12 appends — pre-11.12
+        // records don't carry the timestamp.
         bytes[..8].copy_from_slice(b"HOLOFSM6");
+        bytes.truncate(bytes.len() - 8);
         let back = Manifest::decode(&bytes).unwrap();
         assert_eq!(back, m);
+    }
+
+    #[test]
+    fn legacy_v7_magic_decodes_with_zero_timestamp() {
+        // Records written under HOLOFSM7 (Stage 9, pre-11.12) lack the
+        // trailing `created_at_unix` field. New code must still accept
+        // them and zero-fill the timestamp.
+        let m = Manifest::directory(0xC0FFEE, 0);
+        let mut bytes = m.encode();
+        bytes[..8].copy_from_slice(b"HOLOFSM7");
+        bytes.truncate(bytes.len() - 8);
+        let back = Manifest::decode(&bytes).unwrap();
+        assert_eq!(back.created_at_unix, 0);
+        assert_eq!(back.kind, ObjectKind::Directory);
     }
 }

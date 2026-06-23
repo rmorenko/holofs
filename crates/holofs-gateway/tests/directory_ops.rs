@@ -94,7 +94,7 @@ async fn rmdir_rejects_non_directory() {
         let mut cat = gw.catalog().lock().await;
         cat.insert(
             "docs/readme.txt".into(),
-            holofs_model::manifest::Manifest::directory(0xAAAA),
+            holofs_model::manifest::Manifest::directory(0xAAAA, 0),
         );
         cat.entries.get_mut("docs/readme.txt").unwrap().kind =
             holofs_model::manifest::ObjectKind::Text;

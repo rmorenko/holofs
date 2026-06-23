@@ -376,6 +376,10 @@ async fn put_named(
         chunk_lens: vec![],
         audio_sample_rate: 0,
         text_minhash: vec![],
+        created_at_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
     };
     put_object(gf, &mut m, &live.to_vec(), channels)
         .await

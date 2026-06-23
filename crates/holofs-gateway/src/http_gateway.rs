@@ -298,6 +298,7 @@ impl Gateway {
             chunk_lens: vec![],
             audio_sample_rate: 0,
             text_minhash: vec![],
+            created_at_unix: 0,
         }
     }
 
@@ -350,6 +351,7 @@ impl Gateway {
             chunk_lens: vec![],
             audio_sample_rate: sample_rate,
             text_minhash: vec![],
+            created_at_unix: 0,
         })
     }
 
@@ -381,6 +383,7 @@ impl Gateway {
             chunk_lens: vec![],
             audio_sample_rate: 0,
             text_minhash: vec![],
+            created_at_unix: 0,
         }
     }
 
@@ -422,6 +425,7 @@ impl Gateway {
             chunk_lens: vec![],
             audio_sample_rate: 0,
             text_minhash: vec![],
+            created_at_unix: 0,
         }
     }
 
@@ -547,6 +551,18 @@ pub struct RenameResult {
     /// Number of catalog entries that were rewritten (the entry itself
     /// plus every descendant when renaming a directory).
     pub moved_entries: usize,
+}
+
+/// Current Unix epoch seconds. Stamped onto every PUT'd manifest and
+/// every newly created `Directory` marker so the catalog can be sorted
+/// by creation time later. Falls back to `0` if the clock is somehow
+/// behind the epoch (we don't want to panic the whole ingest path on
+/// what should be impossible).
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Stable, path-derived id for directory markers. We hash with a separate
@@ -774,10 +790,13 @@ impl Gateway {
             }
         }
         let t0 = Instant::now();
-        let (manifest, _kind_str, total_shards) = self
+        let (mut manifest, _kind_str, total_shards) = self
             .put_any(name, body, &live)
             .await
             .map_err(GatewayError::BadRequest)?;
+        // Stage 11.12: stamp the manifest with creation time so the
+        // tree view can sort by date.
+        manifest.created_at_unix = now_unix();
         let put_ms = t0.elapsed().as_millis();
         let object_id = manifest.object_id;
         let cid_hex = hex(&manifest.data_cid);
@@ -849,7 +868,7 @@ impl Gateway {
                 }
             }
         }
-        let manifest = Manifest::directory(directory_object_id(path));
+        let manifest = Manifest::directory(directory_object_id(path), now_unix());
         let object_id = manifest.object_id;
         cat.insert(path.to_string(), manifest);
         drop(cat);
