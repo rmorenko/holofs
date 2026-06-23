@@ -158,6 +158,17 @@ async fn main() {
             put(handlers::put_object).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
         )
         .route("/*path", delete(handlers::delete_object))
+        // Stage 12.0 + 12.1: MCP (Model Context Protocol) server over
+        // Streamable HTTP. The tower service handles POST/GET/DELETE on
+        // `/mcp` per the spec — wire it as `nest_service` so axum hands
+        // the whole sub-path off to rmcp instead of routing per-method.
+        // Tools share the cluster's live `Arc<Gateway>`, so MCP clients
+        // see the same catalog as the UI.
+        //
+        // If `HOLOFS_MCP_TOKEN` is set, mount a bearer-auth middleware
+        // in front and flip `writes_enabled=true`; without the env var
+        // the endpoint stays open but read-only.
+        .merge(build_mcp_router(Arc::clone(&gateway)))
         .leptos_routes_with_context(
             &leptos_options,
             routes,
@@ -254,4 +265,60 @@ async fn fallback(
     let _ = options;
     let handler = leptos_axum::render_app_to_stream(App);
     handler(req).await.into_response()
+}
+
+/// Build the `/mcp` sub-router. Reads `HOLOFS_MCP_TOKEN` from the env
+/// once at startup:
+///
+/// - **unset**: mount the rmcp tower service as-is. Writes are refused
+///   inside `holofs-mcp` itself, so the endpoint is read-only and the
+///   network exposure is bounded.
+/// - **set**: mount the same service behind an `Authorization: Bearer
+///   <token>` middleware, and flip the `writes_enabled` flag so the
+///   write tools actually run. A request without the right token returns
+///   401 before reaching rmcp.
+///
+/// The token is read once; rotating it requires a restart. Logging only
+/// records *whether* a token was configured, never the token itself.
+fn build_mcp_router(gateway: Arc<holofs_gateway::Gateway>) -> Router<LeptosOptions> {
+    use axum::http::{header, StatusCode};
+    use axum::middleware::{from_fn, Next};
+
+    let token = std::env::var("HOLOFS_MCP_TOKEN").ok().filter(|s| !s.is_empty());
+    let writes = token.is_some();
+    let svc = holofs_mcp::make_mcp_service(gateway, writes);
+
+    info!(
+        mcp_writes_enabled = writes,
+        "MCP endpoint mounted at /mcp ({})",
+        if writes {
+            "bearer-auth required"
+        } else {
+            "read-only, set HOLOFS_MCP_TOKEN to enable writes"
+        }
+    );
+
+    let mcp_router: Router<LeptosOptions> = Router::new().nest_service("/mcp", svc);
+
+    match token {
+        Some(tok) => {
+            let expected = format!("Bearer {tok}");
+            mcp_router.layer(from_fn(move |req: Request<Body>, next: Next| {
+                let expected = expected.clone();
+                async move {
+                    let got = req
+                        .headers()
+                        .get(header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    if got == expected {
+                        next.run(req).await
+                    } else {
+                        StatusCode::UNAUTHORIZED.into_response()
+                    }
+                }
+            }))
+        }
+        None => mcp_router,
+    }
 }

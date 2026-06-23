@@ -29,6 +29,7 @@ ssr = [
     "dep:holofs-storage",
     "dep:holofs-gateway",
     "dep:holofs-analytics",
+    "dep:holofs-mcp",
     "dep:png",
     "dep:async-stream",
     "dep:futures-util",
@@ -87,6 +88,7 @@ holofs-cluster   = { workspace = true, optional = true }
 holofs-storage   = { workspace = true, optional = true }
 holofs-gateway   = { workspace = true, optional = true }
 holofs-analytics = { workspace = true, optional = true }
+holofs-mcp       = { workspace = true, optional = true }
 png              = { workspace = true, optional = true }
 async-stream     = { workspace = true, optional = true }
 futures-util     = { workspace = true, optional = true }

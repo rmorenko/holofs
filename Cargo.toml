@@ -12,6 +12,7 @@ members = [
     "crates/holofs-gateway",
     "crates/holofs-cli",
     "crates/holofs-web",
+    "crates/holofs-mcp",
 ]
 
 [workspace.package]
@@ -103,6 +104,7 @@ holofs-client    = { path = "crates/holofs-client",    version = "0.4.0" }
 holofs-cluster   = { path = "crates/holofs-cluster",   version = "0.4.0" }
 holofs-analytics = { path = "crates/holofs-analytics", version = "0.4.0" }
 holofs-gateway   = { path = "crates/holofs-gateway",   version = "0.4.0" }
+holofs-mcp       = { path = "crates/holofs-mcp",       version = "0.4.0" }
 
 [profile.release]
 opt-level = 3
