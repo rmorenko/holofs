@@ -8,41 +8,73 @@
 //! systematic L0 shards, clamped to 0..255. For a 512×512 image after a
 //! 3-level DWT this yields a **4×4 grid of mean luminances** — classic dHash.
 //!
-//! Distance is L1 over u8 (sum of |a-b|). We do not use Hamming because the
-//! u8 means carry ordinal information, not binary bits.
+//! ## Two similarity metrics
+//!
+//! The fingerprint **bytes** themselves are kept as u8 means — they are
+//! useful for the `/api/fingerprint/<name>` JSON view and for crude
+//! "is this exactly the same picture" checks. But the byte-magnitude L1
+//! distance saturates fast on natural images (typical inter-image
+//! distance ≈ 50-400 out of a theoretical max of FP_LEN × 255), so
+//! percentage scores all cluster at 85–99% and stop being informative.
+//!
+//! For the `/similar/<name>` UI we therefore use classic **dHash**:
+//! each pair of adjacent tile means produces one bit (`fp[i] > fp[i+1]`),
+//! computed independently within every channel's strip and concatenated.
+//! With 3 channels × 16 means → 3 × 15 = 45 bits. Hamming distance over
+//! those bits distinguishes geometric transforms — a 180°-flipped image
+//! picks up many flipped bits in each channel's gradient — and chroma
+//! divergence (e.g. a colorful photo vs a mostly-monochrome mandala)
+//! shows up strongly in the green/blue strips. The percentage is
+//! `1 - hamming / 45`.
+//!
+//! ## Channel layout in the fingerprint
+//!
+//! Bytes are laid out per-channel in source order: `[R0..R15, G0..G15,
+//! B0..B15]` for 3-channel images. For 1-channel audio only the first
+//! 16 bytes are populated; the rest stay at 0. For text/opaque we fall
+//! back to `data_cid` repeated to fill 48 bytes — a meaningless
+//! "perceptual" hash but stable across PUTs of the same payload.
 
 use holofs_core::merkle::Hash;
 use holofs_core::rlnc::Shard;
 use holofs_model::manifest::{Manifest, ObjectKind};
 
-/// Length of the perceptual fingerprint in bytes.
-pub const FP_LEN: usize = 16;
+/// Number of mean-byte slots reserved per channel inside [`Fingerprint`].
+pub const FP_PER_CHANNEL: usize = 16;
+/// Total length of the perceptual fingerprint in bytes. 3 channels ×
+/// 16 means each = 48 bytes; 1-channel kinds use only the first 16.
+pub const FP_LEN: usize = FP_PER_CHANNEL * 3;
 
 pub type Fingerprint = [u8; FP_LEN];
 
-/// Compute a fingerprint from the K systematic L0 shards of the first channel.
+/// Compute a fingerprint from the K systematic L0 shards of every
+/// channel. `shards_per_channel[c]` carries the verified L0 shards for
+/// channel `c`; pass an empty `Vec` for channels not yet known. Channels
+/// past index 2 are ignored (the fingerprint covers RGB only).
 ///
-/// `shards_l0` — every known shard (channel=0, layer=0) of this object.
-/// The function filters out systematic shards (identity coeffs) and takes
-/// the first K. If fewer than K are available the fingerprint is computed
-/// over what we have; remaining positions are 0. For image/audio this works
-/// — the count of systematic shards is always stable.
-pub fn perceptual_fingerprint(manifest: &Manifest, shards_l0: &[Shard]) -> Fingerprint {
+/// For each channel we scan its shards, take the K identity-coded
+/// (systematic) ones, and store their per-payload mean into the
+/// corresponding 16-byte strip. Missing positions stay 0. For text /
+/// opaque kinds we fall back to `data_cid` repeated to fill 48 bytes.
+pub fn perceptual_fingerprint(
+    manifest: &Manifest,
+    shards_per_channel: &[Vec<Shard>],
+) -> Fingerprint {
+    let mut fp = [0u8; FP_LEN];
     if manifest.kind == ObjectKind::Opaque || manifest.kind == ObjectKind::Text {
-        // For opaque/text a perceptual fingerprint makes no physical sense —
-        // these are raw bytes, not "low resolution". Return data_cid as a marker.
-        let mut fp = [0u8; FP_LEN];
-        fp.copy_from_slice(&manifest.data_cid[..FP_LEN]);
+        // CID is 32 bytes; we need 48. Repeat the first 16 bytes to fill.
+        fp[..32].copy_from_slice(&manifest.data_cid[..32]);
+        fp[32..].copy_from_slice(&manifest.data_cid[..16]);
         return fp;
     }
-    let mut fp = [0u8; FP_LEN];
     let k = manifest.k as usize;
-    // Systematic shards have coeffs = e_i. Walk every available shard; for
-    // each identity index in 0..K take the payload mean (as a byte).
-    for s in shards_l0 {
-        if let Some(i) = identity_index(&s.coeffs) {
-            if i < FP_LEN && i < k {
-                fp[i] = byte_mean(&s.payload);
+    for (c, shards) in shards_per_channel.iter().enumerate().take(3) {
+        let base = c * FP_PER_CHANNEL;
+        for s in shards {
+            if let Some(i) = identity_index(&s.coeffs) {
+                if i < FP_PER_CHANNEL && i < k {
+                    fp[base + i] = byte_mean(&s.payload);
+                }
             }
         }
     }
@@ -75,7 +107,10 @@ fn byte_mean(payload: &[u8]) -> u8 {
 }
 
 /// L1 distance between fingerprints (sum of |a-b|). Smaller is more similar.
-/// 0 = identical. Maximum = 16 * 255 = 4080.
+/// 0 = identical. Maximum = 16 * 255 = 4080. Kept for the JSON
+/// `fingerprint` API and as a raw secondary number on the `/similar`
+/// table; the UI similarity-pct comes from [`fingerprint_similarity_pct`]
+/// (dHash + Hamming) instead.
 pub fn fingerprint_distance(a: &Fingerprint, b: &Fingerprint) -> u32 {
     a.iter()
         .zip(b.iter())
@@ -83,11 +118,59 @@ pub fn fingerprint_distance(a: &Fingerprint, b: &Fingerprint) -> u32 {
         .sum()
 }
 
-/// Similarity in percent (100 = identical, 0 = maximally different).
+/// Total number of dHash bits the fingerprint produces. 3 strips of
+/// `FP_PER_CHANNEL - 1` = 3 × 15 = 45.
+pub const DHASH_BITS: u32 = ((FP_PER_CHANNEL - 1) * 3) as u32;
+
+/// dHash bits derived from the byte-mean fingerprint. Each bit answers
+/// "is tile i brighter than tile i+1", computed **independently within
+/// each channel strip** — we don't compare across channel boundaries
+/// because the means are channel-relative, not directly comparable.
+///
+/// Returns 45 bits packed into the low half of a u64; the rest is 0.
+pub fn dhash_bits(fp: &Fingerprint) -> u64 {
+    let mut bits: u64 = 0;
+    let mut pos: u32 = 0;
+    for c in 0..3 {
+        let base = c * FP_PER_CHANNEL;
+        for i in 0..FP_PER_CHANNEL - 1 {
+            if fp[base + i] > fp[base + i + 1] {
+                bits |= 1u64 << pos;
+            }
+            pos += 1;
+        }
+    }
+    bits
+}
+
+/// Hamming distance over the 45-bit dHash representation. Range 0..=45.
+pub fn fingerprint_hamming(a: &Fingerprint, b: &Fingerprint) -> u32 {
+    (dhash_bits(a) ^ dhash_bits(b)).count_ones()
+}
+
+/// Similarity in percent, **re-anchored against the random-baseline**.
+/// Two unrelated 45-bit hashes statistically share ~22.5 bits already
+/// just by chance, so the naive `(1 - h/45) * 100` placed the noise
+/// floor at 50% — making everything look weakly similar. We map
+/// `0..=half` Hamming linearly to `100..=0` and clamp anything above
+/// the midpoint to 0; the new scale reads as a real "signal above
+/// noise":
+///
+/// | Hamming | similarity |
+/// |--------:|-----------:|
+/// |       0 |       100% |
+/// |       3 |       ~73% |
+/// |      11 |       ~51% |
+/// |      18 |       ~20% |
+/// |    ≥ 23 |         0% |
+///
+/// Identical fingerprints → 100, mid-range Hamming ≈ noise → 0, and
+/// genuinely similar inputs (blurred / desaturated copies, etc.) land
+/// in the 40–90 band where humans can actually rank them.
 pub fn fingerprint_similarity_pct(a: &Fingerprint, b: &Fingerprint) -> f32 {
-    let d = fingerprint_distance(a, b) as f32;
-    let max = (FP_LEN * 255) as f32;
-    ((1.0 - d / max) * 100.0).clamp(0.0, 100.0)
+    let h = fingerprint_hamming(a, b) as f32;
+    let half = DHASH_BITS as f32 / 2.0;
+    (100.0 * (1.0 - h / half)).clamp(0.0, 100.0)
 }
 
 /// Hex representation of a fingerprint (32 hex chars).
@@ -264,10 +347,28 @@ mod tests {
         }
     }
 
+    /// 3-channel shard set with the same per-channel pattern. For
+    /// fingerprint tests this gives a stable 48-byte output that mirrors
+    /// the production code path.
+    fn per_channel_systematic(pattern: &[u8]) -> Vec<Vec<Shard>> {
+        let mut out = Vec::with_capacity(3);
+        for _ in 0..3 {
+            out.push(
+                pattern
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &b)| sys_shard(i, b))
+                    .collect(),
+            );
+        }
+        out
+    }
+
     #[test]
     fn fingerprint_identical_data_gives_zero_distance() {
         let m = fake_manifest(ObjectKind::Image, 1);
-        let shards: Vec<Shard> = (0..16).map(|i| sys_shard(i, (i * 10) as u8)).collect();
+        let pattern: Vec<u8> = (0..16).map(|i| (i * 10) as u8).collect();
+        let shards = per_channel_systematic(&pattern);
         let fp1 = perceptual_fingerprint(&m, &shards);
         let fp2 = perceptual_fingerprint(&m, &shards);
         assert_eq!(fingerprint_distance(&fp1, &fp2), 0);
@@ -277,18 +378,25 @@ mod tests {
     #[test]
     fn fingerprint_picks_up_brightness_per_chunk() {
         let m = fake_manifest(ObjectKind::Image, 1);
-        // The i-th chunk has bytes i*10.
-        let shards: Vec<Shard> = (0..16).map(|i| sys_shard(i, (i * 10) as u8)).collect();
+        let pattern: Vec<u8> = (0..16).map(|i| (i * 10) as u8).collect();
+        let shards = per_channel_systematic(&pattern);
         let fp = perceptual_fingerprint(&m, &shards);
+        // Channel 0 strip
         for i in 0..16 {
             assert_eq!(fp[i], (i * 10) as u8);
+        }
+        // Channel 1 + 2 strips carry the same pattern.
+        for c in 1..3 {
+            for i in 0..16 {
+                assert_eq!(fp[c * FP_PER_CHANNEL + i], (i * 10) as u8);
+            }
         }
     }
 
     #[test]
     fn fingerprint_ignores_rlnc_shards() {
         let m = fake_manifest(ObjectKind::Image, 1);
-        // 8 systematic + 8 RLNC shards (non-identity coeffs).
+        // For each channel: 8 systematic + 8 RLNC shards.
         let mut shards: Vec<Shard> = (0..8).map(|i| sys_shard(i, 100)).collect();
         for _ in 0..8 {
             shards.push(Shard {
@@ -296,28 +404,93 @@ mod tests {
                 payload: vec![0xAA; 64],
             });
         }
-        let fp = perceptual_fingerprint(&m, &shards);
-        for i in 0..8 {
-            assert_eq!(fp[i], 100);
-        }
-        for i in 8..16 {
-            assert_eq!(fp[i], 0, "an RLNC shard must not enter the fingerprint");
+        let per_channel = vec![shards.clone(), shards.clone(), shards];
+        let fp = perceptual_fingerprint(&m, &per_channel);
+        for c in 0..3 {
+            let base = c * FP_PER_CHANNEL;
+            for i in 0..8 {
+                assert_eq!(fp[base + i], 100);
+            }
+            for i in 8..16 {
+                assert_eq!(fp[base + i], 0, "RLNC shard must not enter ch {c} pos {i}");
+            }
         }
     }
 
     #[test]
-    fn distance_grows_with_difference() {
-        let mut a: Fingerprint = [0; 16];
-        let mut b: Fingerprint = [0; 16];
+    fn l1_distance_grows_with_difference() {
+        let mut a: Fingerprint = [0; FP_LEN];
+        let mut b: Fingerprint = [0; FP_LEN];
         a[0] = 100;
         b[0] = 200;
         assert_eq!(fingerprint_distance(&a, &b), 100);
+    }
+
+    #[test]
+    fn dhash_similarity_identical_is_100() {
+        let mut fp: Fingerprint = [0; FP_LEN];
+        for (i, b) in fp.iter_mut().enumerate() {
+            *b = (i * 5) as u8;
+        }
+        assert_eq!(fingerprint_similarity_pct(&fp, &fp), 100.0);
+        assert_eq!(fingerprint_hamming(&fp, &fp), 0);
+    }
+
+    #[test]
+    fn dhash_similarity_noise_floor_is_zero() {
+        // Random uncorrelated bit patterns should map to ≈ 0%, not 50%.
+        // The midpoint h=22.5 is the statistical noise baseline for 45
+        // bits; the re-anchored formula clamps anything ≥ that to 0%.
+        let mut a: Fingerprint = [0; FP_LEN];
+        let mut b: Fingerprint = [0; FP_LEN];
+        // Construct: every other tile within each channel inverted →
+        // many flipped dHash bits across all 3 strips.
+        for i in 0..FP_LEN {
+            a[i] = if i % 2 == 0 { 50 } else { 200 };
+            b[i] = if i % 2 == 0 { 200 } else { 50 };
+        }
         let s = fingerprint_similarity_pct(&a, &b);
-        assert!(s > 95.0 && s < 100.0, "similarity {s}");
+        assert!(s < 5.0, "uncorrelated patterns should clamp to 0, got {s}");
+    }
+
+    #[test]
+    fn dhash_similarity_reversed_drops_sharply() {
+        // Reverse every channel strip individually — analogous to a
+        // 180°-rotated image whose per-channel gradients all invert.
+        let mut a: Fingerprint = [0; FP_LEN];
+        for (i, b) in a.iter_mut().enumerate() {
+            *b = (i % FP_PER_CHANNEL * 10) as u8;
+        }
+        let mut b = a;
+        for c in 0..3 {
+            b[c * FP_PER_CHANNEL..(c + 1) * FP_PER_CHANNEL].reverse();
+        }
+        let s = fingerprint_similarity_pct(&a, &b);
+        assert!(s < 20.0, "reversed similarity must be low, got {s}");
+    }
+
+    #[test]
+    fn dhash_similarity_unrelated_patterns_clamp_to_zero() {
+        // With the re-anchored scale, two completely unrelated fingerprints
+        // collapse to 0% — they share no genuine bit signal above the
+        // random baseline.
+        let mut a: Fingerprint = [0; FP_LEN];
+        let mut b: Fingerprint = [0; FP_LEN];
+        let xs_a: [u8; 16] = [50, 80, 70, 120, 90, 30, 200, 10, 60, 40, 180, 120, 90, 70, 30, 100];
+        let xs_b: [u8; 16] = [10, 5, 200, 30, 90, 40, 80, 220, 15, 150, 70, 60, 40, 130, 10, 90];
+        for c in 0..3 {
+            a[c * FP_PER_CHANNEL..(c + 1) * FP_PER_CHANNEL].copy_from_slice(&xs_a);
+            b[c * FP_PER_CHANNEL..(c + 1) * FP_PER_CHANNEL].copy_from_slice(&xs_b);
+        }
+        let s = fingerprint_similarity_pct(&a, &b);
+        assert!(s < 30.0, "unrelated should approach 0%, got {s}");
     }
 
     #[test]
     fn opaque_fingerprint_falls_back_to_cid() {
+        // CID is 32 bytes of the same value; the fallback pads the
+        // 48-byte fingerprint as [cid(32) | cid[..16]]. With a uniform
+        // CID that means the whole 48-byte buffer reads as that value.
         let m = fake_manifest(ObjectKind::Opaque, 0xAB);
         let fp = perceptual_fingerprint(&m, &[]);
         assert_eq!(fp, [0xAB; FP_LEN]);
@@ -386,12 +559,12 @@ mod tests {
 
     #[test]
     fn rank_neighbors_sorts_by_distance() {
-        let target: Fingerprint = [100; 16];
+        let target: Fingerprint = [100; FP_LEN];
         let cats = vec![
-            ("near".to_string(), [101u8; 16]),  // distance 16
-            ("far".to_string(), [200u8; 16]),   // distance 1600
-            ("self".to_string(), [100u8; 16]),  // filtered out
-            ("close".to_string(), [105u8; 16]), // distance 80
+            ("near".to_string(), [101u8; FP_LEN]),  // distance 48
+            ("far".to_string(), [200u8; FP_LEN]),   // distance 4800
+            ("self".to_string(), [100u8; FP_LEN]),  // filtered out
+            ("close".to_string(), [105u8; FP_LEN]), // distance 240
         ];
         let r = rank_neighbors(&target, &cats, "self", 3);
         assert_eq!(r.len(), 3);

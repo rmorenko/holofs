@@ -163,10 +163,25 @@ fn DiffBody(data: DiffReportView) -> impl IntoView {
             <a href={format!("/{enc_b}")}>{name_b.clone()}</a>
         </h2>
         <p class="mut">
-            "we compare " <b>"systematic shards"</b> " (first K in each layer). Each "
-            "systematic carries a concrete source data chunk; its hash = the hash of that "
-            "chunk. " <span class="ok">"green"</span> " = chunk bytes match in both files "
-            "(dedup!), " <span class="bad">"red"</span> " = differ."
+            <b>"diff = byte-perfect dedup analyzer."</b>
+            " Each cell maps to one systematic shard (the first K in each layer).
+            Two cells are " <span class="ok">"green"</span>
+            " only when the shard hashes match — i.e. the underlying source "
+            "chunks are " <b>"byte-for-byte identical"</b>
+            " in both files. "
+            <span class="bad">"red"</span> " = any byte difference."
+        </p>
+        <p class="mut">
+            <b>"⚠ this is not a visual similarity metric."</b>
+            " A Gaussian-blurred copy of the same photo, a desaturated copy, or a "
+            "resaved JPEG will all paint mostly red here — different bytes, no "
+            "dedup savings. For perceptual similarity (which catches blur / "
+            "desaturation / mild crops) go to " <code>/similar/&lt;name&gt;</code> "."
+        </p>
+        <p class="mut">
+            "Useful when: confirming you uploaded the same file twice; spotting "
+            "shared chunks between near-identical derivatives that survived the "
+            "codec deterministically; or auditing dedup savings on a workload."
         </p>
         {is_text.then(|| view! {
             <p class="mut">
@@ -180,9 +195,9 @@ fn DiffBody(data: DiffReportView) -> impl IntoView {
         })}
 
         <div class="cluster-stats">
-            <div class="stat"><div class="v">{common_str}</div><div class="l">"common chunks"</div></div>
-            <div class="stat"><div class="v">{sim}</div><div class="l">"match"</div></div>
-            <div class="stat"><div class="v">{kb}</div><div class="l">"saved by dedup"</div></div>
+            <div class="stat"><div class="v">{common_str}</div><div class="l">"identical chunks"</div></div>
+            <div class="stat"><div class="v">{sim}</div><div class="l">"byte-dedup overlap"</div></div>
+            <div class="stat"><div class="v">{kb}</div><div class="l">"storage saved"</div></div>
         </div>
 
         {layers.into_iter().map(move |ly| {

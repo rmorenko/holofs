@@ -12,8 +12,11 @@ use serde::{Deserialize, Serialize};
 pub enum MethodView {
     /// MinHash Jaccard over 5-shingles (text).
     Jaccard,
-    /// L1 distance over the 16-byte perceptual fingerprint (image/audio).
-    L1,
+    /// Hamming distance over the 45-bit dHash derived from the per-channel
+    /// 48-byte fingerprint (image/audio). Stage 11.6 retired the old
+    /// `L1` byte-magnitude scoring after it kept saturating at 95%+ on
+    /// unrelated photos.
+    DHash,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -84,7 +87,7 @@ fn report_to_view(rep: holofs_gateway::SimilarReport) -> SimilarReportView {
                 similarity_pct: m.similarity_pct,
                 method: match m.method {
                     SimilarityMethod::Jaccard => MethodView::Jaccard,
-                    SimilarityMethod::L1 => MethodView::L1,
+                    SimilarityMethod::DHash => MethodView::DHash,
                 },
             })
             .collect(),
@@ -174,13 +177,19 @@ fn SimilarBody(data: SimilarReportView) -> impl IntoView {
         } else {
             view! {
                 <p class="mut">
-                    "method: " <b>"perceptual fingerprint on L0 shards"</b>
-                    ". fingerprint (16 bytes): " <code>{fingerprint_hex.clone()}</code>
+                    "method: " <b>"per-channel dHash on L0 shards"</b>
+                    ". fingerprint (48 bytes, 3 channels × K=16 means): "
+                    <code>{fingerprint_hex.clone()}</code>
                 </p>
                 <p class="mut">
-                    "fingerprint is computed on K=16 systematic L0 shards (DWT LL band for "
-                    "image, bass envelope for audio) — \"low resolution in the frequency "
-                    "domain\", analogous to dHash. L1 distance over u8."
+                    "the fingerprint stacks the mean luminance of K=16 systematic L0 "
+                    "shards for each of the R / G / B channels (DWT LL band for image, "
+                    "bass envelope for audio). Similarity = "
+                    "Hamming distance over 45 dHash bits ("
+                    <code>"fp[i] > fp[i+1]"</code>
+                    " within every channel strip), re-anchored against the random "
+                    "baseline so unrelated objects clamp to 0 % and identical inputs "
+                    "score 100 %."
                 </p>
             }.into_any()
         }}
@@ -204,7 +213,7 @@ fn SimilarBody(data: SimilarReportView) -> impl IntoView {
                                   else { "mut" };
                         let method = match m.method {
                             MethodView::Jaccard => "Jaccard",
-                            MethodView::L1 => "L1",
+                            MethodView::DHash => "dHash",
                         };
                         let nenc = crate::url_encode(&m.name);
                         let sim = format!("{:.1}%", m.similarity_pct);

@@ -191,21 +191,31 @@ impl Gateway {
             return holofs_analytics::fingerprint::perceptual_fingerprint(manifest, &[]);
         }
         let live = self.effective_live().await;
-        let shards = holofs_client::gather_layer(manifest, &live, 0, 0)
-            .await
-            .unwrap_or_default();
-        // Hash verification — we don't let garbage into the fingerprint.
-        let expected: std::collections::HashSet<_> = manifest
-            .shard_hashes
-            .first()
-            .and_then(|c| c.first())
-            .map(|hs| hs.iter().copied().collect())
-            .unwrap_or_default();
-        let verified: Vec<holofs_core::rlnc::Shard> = shards
-            .into_iter()
-            .filter(|s| expected.contains(&holofs_core::merkle::shard_hash(s)))
-            .collect();
-        holofs_analytics::fingerprint::perceptual_fingerprint(manifest, &verified)
+        // Stage 11.6: gather L0 for every channel (up to 3 — fingerprint
+        // covers RGB). Per-channel means power the new 45-bit dHash; a
+        // single-channel fingerprint clustered too many unrelated images
+        // at 95%+ similarity. The per-(name, channel, layer) cache (Stage
+        // 11.2) deduplicates concurrent gathers for the same object.
+        let n_channels = (manifest.channels as usize).min(3);
+        let mut per_channel: Vec<Vec<holofs_core::rlnc::Shard>> =
+            Vec::with_capacity(n_channels);
+        for c in 0..n_channels {
+            let shards = holofs_client::gather_layer(manifest, &live, c as u8, 0)
+                .await
+                .unwrap_or_default();
+            let expected: std::collections::HashSet<_> = manifest
+                .shard_hashes
+                .get(c)
+                .and_then(|cl| cl.first())
+                .map(|hs| hs.iter().copied().collect())
+                .unwrap_or_default();
+            let verified: Vec<holofs_core::rlnc::Shard> = shards
+                .into_iter()
+                .filter(|s| expected.contains(&holofs_core::merkle::shard_hash(s)))
+                .collect();
+            per_channel.push(verified);
+        }
+        holofs_analytics::fingerprint::perceptual_fingerprint(manifest, &per_channel)
     }
 
     /// Universal PUT: tries image → audio → text → reject. Returns the
@@ -1326,7 +1336,7 @@ impl Gateway {
                 let fp = self.compute_fingerprint(m).await;
                 let sim =
                     holofs_analytics::fingerprint::fingerprint_similarity_pct(&target_fp, &fp);
-                (sim, SimilarityMethod::L1)
+                (sim, SimilarityMethod::DHash)
             };
             neighbors.push(SimilarMatch {
                 name: n,
@@ -1387,6 +1397,16 @@ impl Gateway {
 
     /// `/diff/<a>/<b>` view-model: per-(channel, layer) chunk diff cells +
     /// aggregated counters.
+    ///
+    /// `chunk_diff` is intentionally a **byte-perfect dedup analyzer**.
+    /// Two cells are green only when the corresponding systematic shard
+    /// hashes are identical — i.e. the underlying source chunks are
+    /// byte-for-byte the same. Stage 11.7-11.8 experimented with
+    /// perceptual variants (mean-based, then per-coefficient L1) to make
+    /// blurred copies "look closer", but every threshold had pathological
+    /// neighbours: desaturation that preserves luminance scored higher
+    /// than blur; mandala outscored real photos. Perceptual ranking is
+    /// what `/similar/<name>` is for; `/diff` stays the dedup tool.
     pub async fn diff_chunks(
         &self,
         name_a: &str,
@@ -1406,6 +1426,7 @@ impl Gateway {
                 "diff: both objects must be of the same kind".into(),
             ));
         }
+
         let diff = holofs_analytics::fingerprint::chunk_diff(&a, &b);
 
         // Group cells by (channel, layer).
@@ -1605,8 +1626,9 @@ pub struct ShardPayload {
 pub enum SimilarityMethod {
     /// MinHash Jaccard over 5-shingles (text).
     Jaccard,
-    /// L1 distance over the 16-byte perceptual fingerprint (image/audio).
-    L1,
+    /// Hamming distance over the 45-bit dHash derived from the per-channel
+    /// 48-byte perceptual fingerprint (image/audio).
+    DHash,
 }
 
 /// One row of the top-similar table on `/similar/<name>`.
