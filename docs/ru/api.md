@@ -9,6 +9,7 @@
 2. [Проводной протокол (TCP)](#2-wire-protocol-tcp)
 3. [Форматы на диске](#3-on-disk-formats)
 4. [Соглашения о заголовках ответа](#4-response-header-conventions)
+5. [MCP-сервер (Stage 12)](#5-mcp-сервер-stage-12)
 
 ---
 
@@ -359,3 +360,124 @@ payload         payload_len bytes
 | `X-Holofs-Chunks-Total`      | usize     | text: общее число chunk'ов |
 | `X-Holofs-Chunks-Missing`    | usize     | text: chunk'ов, заменённых маркерами пропусков |
 | `X-Holofs-Escrow-Shares-Used`| usize     | escrow recover: число использованных долей |
+
+---
+
+## 5. MCP-сервер (Stage 12)
+
+Gateway отдаёт эндпоинт **Model Context Protocol** на `POST /mcp` по
+транспорту Streamable HTTP (спека ревизии `2025-03-26`). MCP-клиенты
+вроде Claude Desktop и Claude Code обращаются к нему напрямую, без
+парсинга веб-UI; обе поверхности шарят один `Arc<Gateway>`, так что
+чтения и записи остаются согласованными.
+
+### 5.1 Транспорт
+
+`/mcp` отвечает на POST (сообщения клиент → сервер), GET (опциональный
+SSE-поток сервер → клиент) и DELETE (закрытие сессии). Сессия несёт
+заголовок `Mcp-Session-Id`, выданный на первом `initialize`. Эндпоинт
+сидит за тем же axum-роутером, что и остальной web (по умолчанию
+`127.0.0.1:8787`).
+
+### 5.2 Аутентификация
+
+Управляется одной env-переменной на сервере:
+
+| `HOLOFS_MCP_TOKEN`  | Поведение                                              |
+|---------------------|--------------------------------------------------------|
+| не задана / пустая  | `/mcp` открыт, но **только на чтение** — write-инструменты отказывают |
+| любое непустое значение | требует `Authorization: Bearer <token>` на каждом запросе |
+
+Когда токен задан, write-инструменты (`put_object_text`, `mkdir`,
+`rmdir`, `mv_object`) включаются. Без токена они возвращают ошибку
+`invalid_request` с подсказкой про env. Токен читается один раз на
+старте и нигде не логируется — ротация требует перезапуска.
+
+Подключение в Claude Code:
+
+```sh
+# read-only
+claude mcp add --transport http holofs http://127.0.0.1:8787/mcp
+
+# с auth
+claude mcp add --transport http holofs http://127.0.0.1:8787/mcp \
+  --header "Authorization: Bearer $HOLOFS_MCP_TOKEN"
+```
+
+### 5.3 Инструменты
+
+Двенадцать инструментов, сгруппированных по возможностям:
+
+**Чтение (всегда доступны)**
+
+| Tool                  | Входы                                   | Возвращает |
+|-----------------------|-----------------------------------------|------------|
+| `list_catalog`        | `prefix?`, `recursive?`                 | строки каталога под prefix |
+| `read_object_text`    | `path`                                  | UTF-8 тело, кап 256 KiB |
+| `find_similar`        | `path`, `scope?` (`all`/`folder`/`tree`)| топ-10 соседей + метод |
+| `get_cluster_health`  | —                                       | ноды + снапшот каталога |
+| `get_object_health`   | `path`                                  | сводка по готовности декодирования |
+
+**Инспекция (всегда доступны)**
+
+| Tool             | Входы                                                 | Возвращает |
+|------------------|-------------------------------------------------------|------------|
+| `diff_objects`   | `a`, `b`, `include_cells?`                            | пересечение чанков по слоям |
+| `inspect_object` | `path`                                                | расклад по (каналу, слою) |
+| `inspect_shard`  | `path`, `channel`, `layer`, `idx`, `include_payload?` | метаданные шарда + опциональный payload |
+
+**Запись (под `HOLOFS_MCP_TOKEN`)**
+
+| Tool              | Входы                                 | Возвращает |
+|-------------------|---------------------------------------|------------|
+| `put_object_text` | `path`, `content`, `content_type?`    | `{path, action="wrote", note}` |
+| `mkdir`           | `path`                                | `{path, action="created"}` |
+| `rmdir`           | `path` (должна быть пустой)           | `{path, action="removed"}` |
+| `mv_object`       | `from`, `to`                          | `{path, action="renamed", note}` |
+
+### 5.4 Ресурсы
+
+Каждая non-directory запись каталога доступна и через поверхность MCP
+`resources/` под URI `holofs:///<catalog-path>`. `resources/list` отдаёт
+по строке на файл с `mimeType` из манифеста и кратким описанием;
+`resources/read` декодирует объект на сервере и возвращает:
+
+- **text-kind** → `TextResourceContents` с UTF-8
+- **image / audio / opaque** → `BlobResourceContents` с base64-payload
+
+Чтение кэпнуто 1 MiB на запрос, чтобы один resource fetch не забил
+контекст LLM-клиента.
+
+### 5.5 Пример по протоколу (curl)
+
+Поток initialize → `tools/list` → `tools/call` по Streamable HTTP:
+
+```sh
+SID=$(curl -si -X POST http://127.0.0.1:8787/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+    "protocolVersion":"2025-06-18","capabilities":{},
+    "clientInfo":{"name":"curl","version":"1"}}}' \
+  | grep -i 'mcp-session-id:' | awk '{print $2}' | tr -d '\r')
+
+# обязательно после initialize
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Mcp-Session-Id: $SID" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' > /dev/null
+
+# список инструментов
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Mcp-Session-Id: $SID" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# найти похожие на объект, ограничив поиск его папкой
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Mcp-Session-Id: $SID" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+    "name":"find_similar","arguments":{
+      "path":"photos/2026/mandala.png","scope":"folder"}}}'
+```

@@ -9,6 +9,7 @@ Drei externe Schnittstellen: **HTTP-gateway**, **node-Wire-Protokoll** und
 2. [Wire-Protokoll (TCP)](#2-wire-protocol-tcp)
 3. [On-Disk-Formate](#3-on-disk-formats)
 4. [Konventionen der Antwortheader](#4-response-header-conventions)
+5. [MCP-Server (Stage 12)](#5-mcp-server-stage-12)
 
 ---
 
@@ -362,3 +363,127 @@ Eigene `X-Holofs-*`-Header bei Objektantworten:
 | `X-Holofs-Chunks-Total`      | usize     | text: Gesamtanzahl der Chunks |
 | `X-Holofs-Chunks-Missing`    | usize     | text: durch Lückenmarker ersetzte Chunks |
 | `X-Holofs-Escrow-Shares-Used`| usize     | Escrow-Recover: Anzahl der verbrauchten Anteile |
+
+
+---
+
+## 5. MCP-Server (Stage 12)
+
+Das Gateway stellt einen **Model-Context-Protocol**-Endpunkt unter
+`POST /mcp` per Streamable-HTTP-Transport (Spezifikation Rev.
+`2025-03-26`) bereit. MCP-Clients wie Claude Desktop oder Claude Code
+sprechen direkt damit, ohne das Web-UI zu scrapen; beide Oberflächen
+nutzen denselben `Arc<Gateway>`, daher bleiben Lesen und Schreiben
+kohärent.
+
+### 5.1 Transport
+
+`/mcp` antwortet auf POST (Client → Server), GET (optionaler
+Server → Client-SSE-Stream) und DELETE (Sitzungsabbau). Eine Sitzung
+trägt den Header `Mcp-Session-Id`, ausgestellt beim ersten
+`initialize`. Der Endpunkt sitzt hinter demselben axum-Router wie der
+Rest (Standard `127.0.0.1:8787`).
+
+### 5.2 Authentifizierung
+
+Gesteuert über eine einzige Env-Variable auf dem Server:
+
+| `HOLOFS_MCP_TOKEN`     | Verhalten                                              |
+|------------------------|--------------------------------------------------------|
+| nicht gesetzt / leer   | `/mcp` ist offen, aber **nur lesend** — Schreibwerkzeuge verweigern |
+| ein Wert ungleich leer | erfordert `Authorization: Bearer <token>` bei jeder Anfrage |
+
+Mit gesetztem Token werden Schreibwerkzeuge (`put_object_text`, `mkdir`,
+`rmdir`, `mv_object`) aktiviert. Ohne Token liefern sie
+`invalid_request` mit Hinweis auf die Env-Variable. Der Token wird beim
+Start einmal gelesen und nie geloggt — Rotation erfordert Neustart.
+
+Einbindung in Claude Code:
+
+```sh
+# nur lesen
+claude mcp add --transport http holofs http://127.0.0.1:8787/mcp
+
+# mit Auth
+claude mcp add --transport http holofs http://127.0.0.1:8787/mcp \
+  --header "Authorization: Bearer $HOLOFS_MCP_TOKEN"
+```
+
+### 5.3 Werkzeuge
+
+Zwölf Werkzeuge nach Fähigkeit gruppiert:
+
+**Lesen (immer verfügbar)**
+
+| Tool                  | Eingaben                                | Liefert |
+|-----------------------|-----------------------------------------|---------|
+| `list_catalog`        | `prefix?`, `recursive?`                 | Katalogzeilen unter Prefix |
+| `read_object_text`    | `path`                                  | UTF-8-Inhalt, Limit 256 KiB |
+| `find_similar`        | `path`, `scope?` (`all`/`folder`/`tree`)| Top-10-Nachbarn + Methode |
+| `get_cluster_health`  | —                                       | Nodes + Katalog-Snapshot |
+| `get_object_health`   | `path`                                  | Decode-Bereitschaftsübersicht |
+
+**Inspektion (immer verfügbar)**
+
+| Tool             | Eingaben                                              | Liefert |
+|------------------|-------------------------------------------------------|---------|
+| `diff_objects`   | `a`, `b`, `include_cells?`                            | Chunk-Überlappung pro Layer |
+| `inspect_object` | `path`                                                | Layout pro (Kanal, Layer) |
+| `inspect_shard`  | `path`, `channel`, `layer`, `idx`, `include_payload?` | Shard-Metadaten + optionaler Payload |
+
+**Schreiben (per `HOLOFS_MCP_TOKEN` freigeschaltet)**
+
+| Tool              | Eingaben                              | Liefert |
+|-------------------|---------------------------------------|---------|
+| `put_object_text` | `path`, `content`, `content_type?`    | `{path, action="wrote", note}` |
+| `mkdir`           | `path`                                | `{path, action="created"}` |
+| `rmdir`           | `path` (muss leer sein)               | `{path, action="removed"}` |
+| `mv_object`       | `from`, `to`                          | `{path, action="renamed", note}` |
+
+### 5.4 Ressourcen
+
+Jeder Katalogeintrag, der keine Directory ist, ist auch über die
+MCP-`resources/`-Oberfläche unter `holofs:///<catalog-path>` erreichbar.
+`resources/list` liefert eine Zeile pro Datei mit `mimeType` aus dem
+Manifest und kurzer Beschreibung; `resources/read` dekodiert das Objekt
+serverseitig und liefert:
+
+- **text-kind** → `TextResourceContents` mit UTF-8-Inhalt
+- **image / audio / opaque** → `BlobResourceContents` mit base64-Payload
+
+Lesungen sind auf 1 MiB pro Abruf begrenzt, damit ein einzelnes Resource
+nicht das LLM-Kontextfenster sprengt.
+
+### 5.5 Beispiel auf Protokollebene (curl)
+
+Flow initialize → `tools/list` → `tools/call` über Streamable HTTP:
+
+```sh
+SID=$(curl -si -X POST http://127.0.0.1:8787/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+    "protocolVersion":"2025-06-18","capabilities":{},
+    "clientInfo":{"name":"curl","version":"1"}}}' \
+  | grep -i 'mcp-session-id:' | awk '{print $2}' | tr -d '\r')
+
+# nach initialize erforderlich
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Mcp-Session-Id: $SID" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' > /dev/null
+
+# alle Werkzeuge auflisten
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Mcp-Session-Id: $SID" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# ähnliche Dateien zu einem Objekt, beschränkt auf dessen Ordner
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Mcp-Session-Id: $SID" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+    "name":"find_similar","arguments":{
+      "path":"photos/2026/mandala.png","scope":"folder"}}}'
+```

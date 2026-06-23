@@ -9,6 +9,7 @@ Three external interfaces: **HTTP gateway**, **node wire protocol**, and
 2. [Wire protocol (TCP)](#2-wire-protocol-tcp)
 3. [On-disk formats](#3-on-disk-formats)
 4. [Response header conventions](#4-response-header-conventions)
+5. [MCP server (Stage 12)](#5-mcp-server-stage-12)
 
 ---
 
@@ -368,3 +369,125 @@ Custom `X-Holofs-*` headers on object responses:
 | `X-Holofs-Chunks-Total`      | usize     | text: total chunk count |
 | `X-Holofs-Chunks-Missing`    | usize     | text: chunks replaced by hole markers |
 | `X-Holofs-Escrow-Shares-Used`| usize     | escrow recover: number of shares consumed |
+
+---
+
+## 5. MCP server (Stage 12)
+
+The gateway exposes a **Model Context Protocol** endpoint at `POST /mcp`
+using the Streamable HTTP transport (spec rev `2025-03-26`). MCP clients
+like Claude Desktop or Claude Code can call it directly with no scraping
+of the web UI; the same `Arc<Gateway>` backs both surfaces, so reads and
+writes stay coherent.
+
+### 5.1 Transport
+
+`/mcp` answers POST (client → server messages), GET (optional
+server → client SSE stream) and DELETE (session teardown). Sessions
+carry an `Mcp-Session-Id` header issued on the initial `initialize`
+call. The endpoint sits behind the rest of the axum router on the same
+port (default `127.0.0.1:8787`).
+
+### 5.2 Authentication
+
+Auth is controlled by a single env var on the server:
+
+| `HOLOFS_MCP_TOKEN`  | Behaviour                                              |
+|---------------------|--------------------------------------------------------|
+| unset / empty       | `/mcp` is open but **read-only** — write tools refuse |
+| any non-empty value | requires `Authorization: Bearer <token>` on every request |
+
+When a token is set, write tools (`put_object_text`, `mkdir`, `rmdir`,
+`mv_object`) are enabled. Without a token they return an
+`invalid_request` error pointing the caller at the env var. The token is
+read once at startup and never logged — rotating it requires a restart.
+
+Claude Code wiring:
+
+```sh
+# read-only
+claude mcp add --transport http holofs http://127.0.0.1:8787/mcp
+
+# with auth
+claude mcp add --transport http holofs http://127.0.0.1:8787/mcp \
+  --header "Authorization: Bearer $HOLOFS_MCP_TOKEN"
+```
+
+### 5.3 Tools
+
+Twelve tools, organised by capability:
+
+**Read (always available)**
+
+| Tool                  | Inputs                                  | Returns |
+|-----------------------|-----------------------------------------|---------|
+| `list_catalog`        | `prefix?`, `recursive?`                 | catalog rows under prefix |
+| `read_object_text`    | `path`                                  | UTF-8 body, capped at 256 KiB |
+| `find_similar`        | `path`, `scope?` (`all`/`folder`/`tree`)| top-10 neighbours + method |
+| `get_cluster_health`  | —                                       | nodes + catalog snapshot |
+| `get_object_health`   | `path`                                  | decode-readiness summary |
+
+**Inspect (always available)**
+
+| Tool             | Inputs                                                | Returns |
+|------------------|-------------------------------------------------------|---------|
+| `diff_objects`   | `a`, `b`, `include_cells?`                            | per-layer chunk overlap |
+| `inspect_object` | `path`                                                | per-(channel, layer) layout |
+| `inspect_shard`  | `path`, `channel`, `layer`, `idx`, `include_payload?` | shard metadata + optional bytes |
+
+**Write (gated by `HOLOFS_MCP_TOKEN`)**
+
+| Tool              | Inputs                                | Returns |
+|-------------------|---------------------------------------|---------|
+| `put_object_text` | `path`, `content`, `content_type?`    | `{path, action="wrote", note}` |
+| `mkdir`           | `path`                                | `{path, action="created"}` |
+| `rmdir`           | `path` (must be empty)                | `{path, action="removed"}` |
+| `mv_object`       | `from`, `to`                          | `{path, action="renamed", note}` |
+
+### 5.4 Resources
+
+Every non-directory catalog entry is also exposed via the MCP
+`resources/` surface at `holofs:///<catalog-path>`. `resources/list`
+returns a row per file with `mimeType` from the manifest and a short
+description; `resources/read` decodes the object server-side and
+returns:
+
+- **text-kind** → `TextResourceContents` with UTF-8 body
+- **image / audio / opaque** → `BlobResourceContents` with base64-encoded payload
+
+Reads are capped at 1 MiB per fetch to keep one resource pull from
+saturating an LLM context window.
+
+### 5.5 Wire example (curl)
+
+The initialize → `tools/list` → `tools/call` flow over the Streamable HTTP transport:
+
+```sh
+SID=$(curl -si -X POST http://127.0.0.1:8787/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+    "protocolVersion":"2025-06-18","capabilities":{},
+    "clientInfo":{"name":"curl","version":"1"}}}' \
+  | grep -i 'mcp-session-id:' | awk '{print $2}' | tr -d '\r')
+
+# required after initialize
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Mcp-Session-Id: $SID" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' > /dev/null
+
+# list every tool
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Mcp-Session-Id: $SID" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# find similar files of a given object, restricted to its folder
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Mcp-Session-Id: $SID" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+    "name":"find_similar","arguments":{
+      "path":"photos/2026/mandala.png","scope":"folder"}}}'
+```

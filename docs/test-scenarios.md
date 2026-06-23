@@ -608,6 +608,151 @@ Both must return `200`/`201`, not `400 multipart read: Error parsing`.
 
 ---
 
+## 16. Stage 11.16 – 12 regression checks
+
+### 16.1 Similar scope (Stage 11.16)
+
+Three scope pills at the top of `/similar/<name>`: **all files** /
+**current folder** / **current folder (recursive)**.
+
+```sh
+# unrestricted (legacy default — top-10 across the catalog)
+curl -s 'http://127.0.0.1:8787/similar/check.txt' \
+  | grep -oE 'top similar \(<!>[0-9]+'
+
+# only files inside the same parent directory
+curl -s 'http://127.0.0.1:8787/similar/check.txt?scope=folder' \
+  | grep -oE 'top similar \(<!>[0-9]+'
+
+# subtree of the parent (root → whole catalog, equivalent to `all`)
+curl -s 'http://127.0.0.1:8787/similar/check.txt?scope=tree' \
+  | grep -oE 'top similar \(<!>[0-9]+'
+```
+
+Scope is sticky — clicking a neighbour navigates to its own `/similar`
+URL with the same `?scope=` (and `?lang=`) preserved.
+
+### 16.2 Catalog filter + file delete (Stage 11.17)
+
+Server-side filter on `/` and `/?p=<prefix>` via three query params:
+`q` (name glob, `*` = wildcard, basename match, case-insensitive),
+`from`, `to` (`YYYY-MM-DD`, range over `created_at_unix`).
+
+```sh
+# all PNG files
+curl -s 'http://127.0.0.1:8787/?q=*.png' \
+  | grep -oE 'class="tree-leaf' | wc -l
+
+# combined: text files added in 2026
+curl -s 'http://127.0.0.1:8787/?q=*.txt&from=2026-01-01' \
+  | grep -oE 'class="tree-leaf' | wc -l
+```
+
+The tree view keeps ancestor directories of any retained leaf so paths
+stay navigable. Legacy entries with `created_at_unix=0`
+(HOLOFSM6/HOLOFSM7) always pass any date filter.
+
+File deletion is a form-POST mirror of the existing `rmdir_form`:
+
+```sh
+curl -s -X PUT 'http://127.0.0.1:8787/tmp-delete-me.txt' \
+  -H 'Content-Type: text/plain' --data 'will be deleted'
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST 'http://127.0.0.1:8787/api/rm' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data 'path=tmp-delete-me.txt&return_to=/'
+# expect 303 (redirect to return_to on success)
+```
+
+The tree leaf rows render a small `✕` button with a confirm prompt.
+
+### 16.3 Localized date picker (Stage 11.18)
+
+Native `<input type="date">` on the filter bar carries a `lang`
+attribute matching the page locale; in Chromium browsers a flatpickr
+overlay (loaded from jsdelivr) replaces the native picker so the
+calendar always speaks the page language, not the OS locale.
+
+Visit `/?lang=ru`, click a date field — the calendar header is in
+Russian. Switch to `/?lang=fr`, repeat — French. The `value=…` round
+trips as `YYYY-MM-DD` regardless of locale.
+
+### 16.4 MCP server smoke test (Stage 12)
+
+Start the cluster with a token so write tools are enabled:
+
+```sh
+HOLOFS_MCP_TOKEN=devtoken ./holofs-web \
+  --storage ./holofs-data --addr 127.0.0.1:8787 \
+  --log warn --log-format text
+```
+
+Initialise an MCP session and list every tool:
+
+```sh
+TOKEN=devtoken
+SID=$(curl -si -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+    "protocolVersion":"2025-06-18","capabilities":{},
+    "clientInfo":{"name":"curl","version":"1"}}}' \
+  | grep -i 'mcp-session-id:' | awk '{print $2}' | tr -d '\r')
+
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' > /dev/null
+
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  | grep -oE '"name":"[^"]+"' | sort
+```
+
+Expect 12 names: `diff_objects`, `find_similar`, `get_cluster_health`,
+`get_object_health`, `inspect_object`, `inspect_shard`, `list_catalog`,
+`mkdir`, `mv_object`, `put_object_text`, `read_object_text`, `rmdir`.
+
+Auth gating:
+
+```sh
+# no header → 401
+curl -s -o /dev/null -w 'no-auth: %{http_code}\n' \
+  -X POST http://127.0.0.1:8787/mcp -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+    "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}'
+
+# valid bearer → 200
+curl -s -o /dev/null -w 'with-auth: %{http_code}\n' \
+  -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+    "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}'
+```
+
+Resources surface:
+
+```sh
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"resources/list"}' \
+  | grep -oE '"uri":"holofs:///[^"]+"' | head -5
+```
+
+For wiring into Claude Code see [api.md §5](./api.md#5-mcp-server-stage-12).
+
+---
+
 ## Wrap-up
 
 Clean stop:
