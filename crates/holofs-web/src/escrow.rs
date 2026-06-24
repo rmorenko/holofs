@@ -144,7 +144,10 @@ pub fn EscrowSplitResultView(
                         <th>{t!("escrow.result.col.idx")}</th>
                         <th class="name">{t!("escrow.result.col.file")}</th>
                         <th>{t!("escrow.result.col.size")}</th>
-                        <th></th>
+                        // Download-link column. Body uses `class="name"`
+                        // for left-alignment; pair the empty header so
+                        // it doesn't visually drift.
+                        <th class="name"></th>
                     </tr>
                 </thead>
                 <tbody>

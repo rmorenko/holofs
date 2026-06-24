@@ -439,10 +439,15 @@ impl CatalogEntry {
 /// Locale source is the `?lang=<code>` query string on the current URL;
 /// cookie / `Accept-Language` based persistence is deferred to a future
 /// pass that needs the axum request to flow into `provide_context`.
+/// Document shell — `<!DOCTYPE html>` through `</html>`. Owns the
+/// `<head>` and embeds `<App/>` inside `<body>`. Leptos 0.7's
+/// `render_app_to_stream` family expects the whole document to come
+/// from the rendered view, with `<HydrationScripts/>` inside `<head>`
+/// to bootstrap the WASM bundle on the client. Keeping the shell
+/// separate from `App` avoids accidentally double-wrapping the output
+/// in nested `<html><head><body>` trees.
 #[component]
-pub fn App() -> impl IntoView {
-    provide_meta_context();
-
+pub fn Shell(options: LeptosOptions) -> impl IntoView {
     view! {
         <!DOCTYPE html>
         <html lang="en">
@@ -456,15 +461,24 @@ pub fn App() -> impl IntoView {
                     "(function(){try{var t=localStorage.getItem('holofs-theme')||'dark';\
                     document.documentElement.dataset.theme=t;}catch(e){}})();"
                 }</script>
+                <HydrationScripts options/>
                 <Stylesheet id="leptos" href="/pkg/holofs.css"/>
                 <Title text="holofs"/>
             </head>
             <body>
-                <Router>
-                    <RoutedApp/>
-                </Router>
+                <App/>
             </body>
         </html>
+    }
+}
+
+#[component]
+pub fn App() -> impl IntoView {
+    provide_meta_context();
+    view! {
+        <Router>
+            <RoutedApp/>
+        </Router>
     }
 }
 
@@ -1126,40 +1140,96 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
         t!("folder.confirm_delete").replace('\'', "\\'")
     );
 
-    // Open state — top-level folders start open like the eager view;
-    // deeper levels stay closed until the user expands them. The
-    // `on:toggle` listener mirrors the `<details>` DOM state back
-    // into this signal so the children resource fetches on demand.
-    let initial_open = depth == 0;
+    // Stage 11.24: Resource-based lazy loading turned out to be
+    // brittle because the SSR cached an "empty" value for closed
+    // folders (open_sig=false → loader short-circuits) and Leptos
+    // didn't reliably re-run the loader on hydrate when the source
+    // flipped. We now drive the fetch explicitly: an Action shipped
+    // a `list_dir_page` per `open` toggle, the result lands in a
+    // plain `RwSignal<Option<…>>`, and the view reads that.
+    //
+    // For depth==0 (top-level folders that should appear expanded on
+    // first paint), we kick off an immediate fetch on mount so SSR
+    // streams a populated subtree. Deeper levels stay quiet until
+    // the user clicks.
+    //
+    // Stage 11.25: also auto-open any folder whose path is an
+    // ancestor of (or equal to) the `?open=<path>` query param. This
+    // is how the mkdir form returns the user to the tree with the
+    // freshly-created folder visible — return_to=`/?open=<parent>`
+    // unrolls the chain of `<details>` down to that point.
+    let open_target = use_query_map()
+        .with_untracked(|q| q.get("open").unwrap_or_default());
+    let auto_open = !open_target.is_empty()
+        && (open_target == path || open_target.starts_with(&format!("{path}/")));
+    let initial_open = depth == 0 || auto_open;
+    // Stage 11.25: the target node (exact match with `?open=`) is
+    // where the user just acted (mkdir), so we scroll it into view
+    // once it hydrates. Ancestor chain auto-opens but doesn't grab
+    // scroll focus — that would yank the page upward in the middle
+    // of loading deeper levels.
+    let is_open_target = !open_target.is_empty() && open_target == path;
+    let details_ref: NodeRef<leptos::html::Details> = NodeRef::new();
     let open_sig = RwSignal::new(initial_open);
-    let path_for_resource = path.clone();
-    let children = Resource::new(
-        move || (open_sig.get(), sort.as_str()),
-        move |(is_open, srt)| {
-            let p = path_for_resource.clone();
-            async move {
-                if !is_open {
-                    return Ok(ListDirPage::default());
-                }
-                list_dir_page(p, 0, LAZY_PAGE_SIZE, srt.to_string()).await
+    let children_state: RwSignal<Option<Result<ListDirPage, ServerFnError>>> =
+        RwSignal::new(None);
+    let path_for_load = path.clone();
+    let load_children = move || {
+        // Snapshot under `_untracked` so the surrounding effect
+        // doesn't get pulled into a dependency cycle. Re-loading
+        // after a load completes only happens via another toggle.
+        if children_state.with_untracked(|v| matches!(v, Some(Ok(_)))) {
+            return;
+        }
+        let p = path_for_load.clone();
+        let srt = sort.as_str().to_string();
+        leptos::task::spawn_local(async move {
+            let r = list_dir_page(p, 0, LAZY_PAGE_SIZE, srt).await;
+            children_state.set(Some(r));
+        });
+    };
+
+    // Drive the fetch entirely from the hydrate side. Whenever
+    // `open_sig` is true, kick off `list_dir_page` (idempotent via
+    // the `children_state` guard inside `load_children`). For
+    // depth==0 folders this fires once on hydrate; deeper folders
+    // fire on the first user toggle. Effects are no-ops during SSR,
+    // so the initial server-rendered HTML shows empty children even
+    // for `initial_open` folders — they fill in once JS takes over.
+    Effect::new(move |_| {
+        if open_sig.get() {
+            load_children();
+        }
+    });
+
+    // Stage 11.25: scroll the open-target folder into view once it
+    // mounts on the client. Without this the redirect after mkdir
+    // dumps the user at the top of the page even though the right
+    // `<details>` is already expanded somewhere below.
+    #[cfg(feature = "hydrate")]
+    if is_open_target {
+        Effect::new(move |_| {
+            if let Some(el) = details_ref.get() {
+                let el: web_sys::Element = (*el).clone().into();
+                el.scroll_into_view();
             }
-        },
-    );
+        });
+    }
 
     let on_toggle = move |ev: leptos::ev::Event| {
         #[cfg(feature = "hydrate")]
         {
             use wasm_bindgen::JsCast;
-            if let Some(target) = ev.target() {
-                if let Ok(d) = target.dyn_into::<web_sys::HtmlDetailsElement>() {
-                    open_sig.set(d.open());
-                }
+            let elem = ev
+                .current_target()
+                .or_else(|| ev.target())
+                .and_then(|t| t.dyn_into::<web_sys::HtmlDetailsElement>().ok());
+            if let Some(d) = elem {
+                open_sig.set(d.open());
             }
         }
         #[cfg(not(feature = "hydrate"))]
-        {
-            let _ = ev;
-        }
+        let _ = ev;
     };
 
     let path_for_form = path.clone();
@@ -1173,7 +1243,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
             // `on:toggle` listener mirrors that flip back into
             // `open_sig`, which triggers the lazy children fetch the
             // first time the user opens a deeper level.
-            <details open=initial_open on:toggle=on_toggle>
+            <details node_ref=details_ref open=initial_open on:toggle=on_toggle>
                 <summary class="tree-summary">
                     <span class="tree-icon">"📁"</span>
                     <span class="tree-name">{basename}</span>
@@ -1189,7 +1259,17 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                             onclick="event.stopPropagation()"
                         >
                             <input type="hidden" name="parent" value=path_for_form/>
-                            <input type="hidden" name="return_to" value="/"/>
+                            // Stage 11.25: land back on the tree view
+                            // with this folder expanded so the new
+                            // child is visible — `?open=<path>`
+                            // unrolls the `<details>` chain down to
+                            // it. Beats throwing the user into the
+                            // focus view, which loses the tree state.
+                            <input
+                                type="hidden"
+                                name="return_to"
+                                value={format!("/?open={enc_path}")}
+                            />
                             <input
                                 type="text"
                                 name="name"
@@ -1215,31 +1295,44 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                     </span>
                 </summary>
                 <ul class="tree-children">
-                    <Suspense fallback=move || view! { <li class="mut">{t!("catalog.loading")}</li> }>
-                        {move || {
-                            let p = inner_path.clone();
-                            children.get().map(|res| match res {
-                                Ok(page) if page.entries.is_empty() && !page.has_more && !open_sig.get() => {
-                                    // Closed and never opened — nothing to render.
-                                    ().into_any()
-                                }
-                                Ok(page) if page.entries.is_empty() && !page.has_more => {
-                                    view! { <li class="mut">{t!("tree.empty_folder")}</li> }.into_any()
-                                }
-                                Ok(page) => view! {
-                                    <LazyLevel
-                                        path=p
-                                        initial=page
-                                        sort=sort
-                                        depth=depth + 1
-                                    />
-                                }.into_any(),
-                                Err(e) => view! {
-                                    <li class="bad">{t!("catalog.load_failed")} " " {e.to_string()}</li>
-                                }.into_any(),
-                            })
-                        }}
-                    </Suspense>
+                    // Stage 11.24: render the resource's value directly
+                    // instead of inside `<Suspense>`. The Suspense
+                    // streamed an empty template on SSR (because
+                    // `open_sig=false` short-circuits the loader); on
+                    // hydrate it treated the resource as "resolved
+                    // forever" and never re-rendered when the user
+                    // opened the folder — even though the Resource's
+                    // source changed and a fresh fetch was kicked off,
+                    // the Suspense fallback child closure stayed stale.
+                    // Reading `.get()` directly here re-runs on every
+                    // resource state transition (pending / resolved).
+                    {move || {
+                        let p = inner_path.clone();
+                        let val = children_state.get();
+                        let is_open = open_sig.get();
+                        match val {
+                            // Folder closed and never opened: render nothing.
+                            None if !is_open => ().into_any(),
+                            // Open but the fetch is still in flight.
+                            None => view! {
+                                <li class="mut">{t!("catalog.loading")}</li>
+                            }.into_any(),
+                            Some(Ok(page)) if page.entries.is_empty() && !page.has_more => {
+                                ().into_any()
+                            }
+                            Some(Ok(page)) => view! {
+                                <LazyLevel
+                                    path=p
+                                    initial=page
+                                    sort=sort
+                                    depth=depth + 1
+                                />
+                            }.into_any(),
+                            Some(Err(e)) => view! {
+                                <li class="bad">{t!("catalog.load_failed")} " " {e.to_string()}</li>
+                            }.into_any(),
+                        }
+                    }}
                 </ul>
             </details>
         </li>
@@ -1565,7 +1658,15 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                                 onclick="event.stopPropagation()"
                             >
                                 <input type="hidden" name="parent" value=path.clone()/>
-                                <input type="hidden" name="return_to" value="/"/>
+                                // Stage 11.25: same `?open=` trick the
+                                // lazy tree uses — keeps the user on
+                                // the tree view with this folder
+                                // pre-expanded.
+                                <input
+                                    type="hidden"
+                                    name="return_to"
+                                    value={format!("/?open={enc_path}")}
+                                />
                                 <input
                                     type="text"
                                     name="name"

@@ -248,23 +248,15 @@ fn HealthIndexBody(data: HealthIndex) -> impl IntoView {
             </tbody>
         </table>
 
-        <h2>{t!("health.objects_h")}</h2>
-        {if objects.is_empty() {
-            view! { <p class="empty-state">{t!("health.objects_empty")}</p> }.into_any()
-        } else {
-            view! {
-                <ul class="object-links">
-                    <For
-                        each=move || objects.clone()
-                        key=|n| n.clone()
-                        children=|n| {
-                            let href = format!("/health/{}", crate::url_encode(&n));
-                            view! { <li><a href=href>{n}</a></li> }
-                        }
-                    />
-                </ul>
-            }.into_any()
-        }}
+        // Stage 11.23: the per-object list used to live here as a flat
+        // `<ul>`, but the catalog page already lists every object with
+        // a per-row `health` action — this list duplicated it with
+        // less metadata and no UI actions. Keep a one-line summary
+        // pointing back to the catalog instead.
+        <p class="mut health-objects-line">
+            {move || objects.len().to_string()} " " {t!("health.objects_h")}
+            " · " <a href="/">{t!("health.see_catalog")} " →"</a>
+        </p>
     }
 }
 
@@ -482,7 +474,11 @@ fn LayerMatrix(layers: Vec<LayerRow>, channels: u8, nlayers: u8, k: u16) -> impl
         <table class="health-layers">
             <thead>
                 <tr>
-                    <th>{t!("health.col.layer")}</th>
+                    // `layer` column carries text labels (`L0 · LL (coarse)`)
+                    // and its body cells use `class="name"` for the
+                    // left-aligned look — pair the header up so both
+                    // align identically.
+                    <th class="name">{t!("health.col.layer")}</th>
                     {(0..channels).map(|c| view! { <th>{t!("health.col.channel_short")} " " {c}</th> }).collect_view()}
                 </tr>
             </thead>

@@ -326,7 +326,13 @@ table {
   font: 13px ui-monospace, monospace;
 }
 th, td { padding: 8px 14px; text-align: right; border-bottom: 1px solid var(--bord); }
-th { background: var(--surf2); text-align: center; font-weight: 600; font-size: 12px; color: var(--mut); text-transform: uppercase; letter-spacing: 0.4px; }
+/* Stage 11.23: drop the th-specific `text-align: center` override. The
+   default of `right` (inherited from the `th, td` rule above) lines up
+   with `td`'s default so numeric columns no longer have a centred
+   header sitting over right-aligned values. Columns whose body cells
+   carry `class="name"` opt back into left-alignment on both the th
+   and the td via the matched-pair rule on the next line. */
+th { background: var(--surf2); font-weight: 600; font-size: 12px; color: var(--mut); text-transform: uppercase; letter-spacing: 0.4px; }
 td.name, th.name { text-align: left; }
 tr:last-child td { border-bottom: none; }
 
@@ -1057,12 +1063,15 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
   margin: 0;
   padding: 0;
 }
-.tree-root { font-size: 30px; }
+/* Stage 11.24: shrunk the tree typography ~20% — the previous sizes
+   were tuned for a near-empty catalog and felt oversized once real
+   directories landed. */
+.tree-root { font-size: 24px; }
 .tree-children {
-  margin-left: 58px;
+  margin-left: 46px;
   border-left: 2px dashed var(--bord);
-  padding-left: 34px;
-  margin-top: 10px;
+  padding-left: 27px;
+  margin-top: 8px;
 }
 
 .tree-branch, .tree-leaf {
@@ -1092,18 +1101,18 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 22px;
-  padding: 22px 26px;
-  border-radius: 13px;
+  gap: 18px;
+  padding: 18px 21px;
+  border-radius: 10px;
   user-select: none;
 }
 .tree-branch > details > summary::-webkit-details-marker { display: none; }
 .tree-branch > details > summary::before {
   content: "▸";
   display: inline-block;
-  width: 32px;
+  width: 26px;
   color: var(--mut);
-  font-size: 32px;
+  font-size: 26px;
   transition: transform .12s ease;
 }
 .tree-branch > details[open] > summary::before {
@@ -1116,55 +1125,55 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
 .tree-leaf {
   display: flex;
   align-items: center;
-  gap: 22px;
-  padding: 19px 26px 19px 62px;
-  border-radius: 13px;
+  gap: 18px;
+  padding: 15px 21px 15px 50px;
+  border-radius: 10px;
 }
 .tree-leaf:hover { background: var(--surf2); }
 
 .tree-icon {
   display: inline-block;
-  width: 54px;
+  width: 43px;
   text-align: center;
-  font-size: 45px;
+  font-size: 36px;
   line-height: 1;
 }
 .tree-name {
   color: var(--fg);
   text-decoration: none;
   font-weight: 600;
-  font-size: 30px;
+  font-size: 24px;
 }
 .tree-leaf .tree-name {
   font-weight: 500;
-  font: 26px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font: 21px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 .tree-name:hover { color: var(--accent); }
 .tree-count {
   color: var(--mut);
-  font-size: 21px;
+  font-size: 17px;
   font-weight: 400;
 }
 .tree-actions {
   margin-left: auto;
-  font-size: 18px;
+  font-size: 14px;
   color: var(--mut);
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
   justify-content: flex-end;
 }
 .tree-actions a { color: var(--accent); text-decoration: none; }
 .tree-actions a:hover { text-decoration: underline; }
-.tree-actions .link-btn { font-size: 18px; }
+.tree-actions .link-btn { font-size: 14px; }
 
 /* Visible mid-dot separator between name / count and the action list,
  * and between actions inside the action list. Same shade as `.mut`
  * so it doesn't compete with the actual links. */
 .tree-sep {
   color: var(--mut);
-  font-size: 18px;
+  font-size: 14px;
   user-select: none;
   margin: 0 2px;
 }

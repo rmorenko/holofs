@@ -35,7 +35,7 @@ use holofs_web::health::{GetHealthIndex, GetObjectHealth};
 use holofs_web::inspect::{GetInspect, GetInspectZoom};
 use holofs_web::help::{GetDoc, ListDocs};
 use holofs_web::similar::GetSimilar;
-use holofs_web::{App, GetCatalog, ListDir, ListDirPageFn};
+use holofs_web::{App, GetCatalog, ListDir, ListDirPageFn, Shell};
 
 /// Per-request body cap for upload routes (PUT and the two `/escrow/*`
 /// multipart endpoints). axum's default is 2 MiB which rejects realistic
@@ -95,6 +95,12 @@ async fn main() {
     // handler. Both need the same `Arc<Gateway>` in context.
     let gw_for_routes = Arc::clone(&gateway);
     let gw_for_server_fns = Arc::clone(&gateway);
+    // Stage 11.24 fix: provide `LeptosOptions` as context so the
+    // `App` shell can pick it up and render `<HydrationScripts/>`. The
+    // bundle (`pkg/holofs.js` + wasm) is never loaded otherwise — the
+    // page works as pure SSR with no client-side reactivity, which is
+    // exactly the symptom the lazy-tree refactor uncovered.
+    let opts_for_routes = leptos_options.clone();
 
     let app = Router::new()
         .route(
@@ -178,8 +184,12 @@ async fn main() {
             routes,
             move || {
                 provide_context(Arc::clone(&gw_for_routes));
+                provide_context(opts_for_routes.clone());
             },
-            App,
+            {
+                let opts = leptos_options.clone();
+                move || view! { <Shell options=opts.clone()/> }
+            },
         )
         .nest_service("/pkg", ServeDir::new(format!("{site_root}/pkg")))
         // Stage 11.5: static assets used by the upload form, the help
@@ -263,11 +273,15 @@ async fn fallback(
         return ([(http::header::CONTENT_TYPE, mime.as_ref())], bytes).into_response();
     }
 
-    // Leptos 0.7: `render_app_to_stream` takes only the app fn; the options
-    // are propagated via Router state. We discard `options` (read but unused
-    // beyond pulling `site_root`).
-    let _ = options;
-    let handler = leptos_axum::render_app_to_stream(App);
+    // For the fallback path we need to provide `LeptosOptions` into
+    // the render context and render the same `Shell` wrapper used on
+    // routed pages so `<HydrationScripts/>` ends up in `<head>`.
+    let opts = options;
+    let opts_for_ctx = opts.clone();
+    let handler = leptos_axum::render_app_to_stream_with_context(
+        move || provide_context(opts_for_ctx.clone()),
+        move || view! { <Shell options=opts.clone()/> },
+    );
     handler(req).await.into_response()
 }
 

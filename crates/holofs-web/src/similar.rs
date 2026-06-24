@@ -234,12 +234,19 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
         } else {
             let self_enc = self_enc.clone();
             view! {
+                // Stage 11.23: every header gets the same `class="name"`
+                // its data cells already had so the th text aligns with
+                // the values under it (left-aligned). Previously the
+                // headers fell through to the default centred `<th>` rule
+                // while three of the four `<td>` cells were left-aligned
+                // via `class="name"`, leaving similarity, method, and
+                // actions visibly offset from their column headers.
                 <table>
                     <tr>
                         <th class="name">{t!("similar.col.name")}</th>
-                        <th>{t!("similar.col.similarity")}</th>
-                        <th>{t!("similar.col.method")}</th>
-                        <th>{t!("similar.col.actions")}</th>
+                        <th class="name">{t!("similar.col.similarity")}</th>
+                        <th class="name">{t!("similar.col.method")}</th>
+                        <th class="name">{t!("similar.col.actions")}</th>
                     </tr>
                     {neighbors.into_iter().map(|m| {
                         let cls = if m.similarity_pct > 90.0 { "ok" }
@@ -253,12 +260,17 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
                         let sim = format!("{:.1}%", m.similarity_pct);
                         let self_enc = self_enc.clone();
                         let href = similar_href(&nenc, &scope_for_links);
+                        // Keep the colour class (`ok` / `partial` /
+                        // `mut`) alongside the `name` alignment class —
+                        // the `.ok`/`.partial`/`.mut` rules only set
+                        // colour, so they compose with `text-align: left`.
+                        let sim_cls = format!("name {cls}");
                         view! {
                             <tr>
                                 <td class="name">
                                     <a href=href>{m.name.clone()}</a>
                                 </td>
-                                <td class=cls><b>{sim}</b></td>
+                                <td class=sim_cls><b>{sim}</b></td>
                                 <td class="name"><code>{method}</code></td>
                                 <td class="name">
                                     <a href={format!("/{nenc}")} target="_blank">{t!("similar.action.open")}</a>
@@ -285,8 +297,8 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
                 <table>
                     <tr>
                         <th class="name">{t!("similar.col.name")}</th>
-                        <th>{t!("similar.col.common")}</th>
-                        <th>{t!("similar.col.overlap_pct")}</th>
+                        <th class="name">{t!("similar.col.common")}</th>
+                        <th class="name">{t!("similar.col.overlap_pct")}</th>
                     </tr>
                     {overlaps.into_iter().map(|o| {
                         let nenc = crate::url_encode(&o.name);
@@ -297,8 +309,8 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
                                 <td class="name">
                                     <a href=href>{o.name.clone()}</a>
                                 </td>
-                                <td><code>{o.common}</code></td>
-                                <td><b>{pct}</b></td>
+                                <td class="name"><code>{o.common}</code></td>
+                                <td class="name"><b>{pct}</b></td>
                             </tr>
                         }
                     }).collect_view()}
