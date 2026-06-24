@@ -1429,18 +1429,29 @@ body.catalog-page .tree-scroll {
 /* Stage 11.13: per-row meta column — shard count + creation date.
  * Sits between the name and the actions; gets pushed to the right edge
  * by the actions' `margin-left: auto` since the meta has no auto margin
- * of its own. */
+ * of its own.
+ *
+ * Stage 12.6.2: scales with `--tree-scale` so the meta keeps pace with
+ * the rest of the row when the user zooms — previously it was pinned
+ * at 13px and looked anomalously small next to bigger names/icons. */
 .tree-meta {
   display: inline-flex;
   align-items: center;
-  gap: 14px;
-  font: 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  gap: calc(14px * var(--tree-scale, 1));
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: calc(13px * var(--tree-scale, 1));
   color: var(--mut);
-  margin-left: 18px;
+  margin-left: calc(18px * var(--tree-scale, 1));
   white-space: nowrap;
 }
-.tree-meta-size { min-width: 80px; text-align: right; }
-.tree-meta-date { min-width: 130px; text-align: right; }
+.tree-meta-size {
+  min-width: calc(80px * var(--tree-scale, 1));
+  text-align: right;
+}
+.tree-meta-date {
+  min-width: calc(130px * var(--tree-scale, 1));
+  text-align: right;
+}
 
 /* Theme switcher in topbar. */
 .theme-toggle {
