@@ -1234,6 +1234,9 @@ body.catalog-page .tree-scroll {
   gap: 4px;
   min-width: 200px;
 }
+/* B-picker grows to give the searchable input room for full paths
+   like `photos/2026/some_long_filename.png`. */
+.mix-field-wide { flex: 1 1 320px; min-width: 320px; }
 .mix-field .lbl {
   font-size: 11px;
   text-transform: uppercase;

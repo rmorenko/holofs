@@ -82,6 +82,9 @@ fn MixBody(
     let a_for_default = a.clone();
 
     view! {
+        <p class="mut">
+            <a href="/" rel="external">"← " {t!("generic.back_to_catalog")}</a>
+        </p>
         <h2 style="margin-top:0">
             {t!("mix.title_prefix")} " "
             <a href={format!("/{enc_a}")} rel="external">{a_for_title}</a>
@@ -108,23 +111,35 @@ fn MixBody(
                             action="/mix"
                         >
                             <input type="hidden" name="a" value=a_form.clone()/>
-                            <label class="mix-field">
-                                <span class="lbl">{t!("mix.field.b")}</span>
-                                <select name="b" required=true>
-                                    <option value="" disabled=true selected={b_form.is_empty()}>
-                                        {t!("mix.pick_b")}
-                                    </option>
+                            <label class="mix-field mix-field-wide">
+                                <span class="lbl">
+                                    {t!("mix.field.b")}
+                                    " "
+                                    <span class="mut">
+                                        "(" {candidates.len().to_string()} ")"
+                                    </span>
+                                </span>
+                                // Stage 12.6.1: text input + datalist instead
+                                // of a `<select>`. Typing filters the list
+                                // natively in the browser — no JS — so
+                                // picking from hundreds of images stays
+                                // workable.
+                                <input
+                                    type="text"
+                                    name="b"
+                                    list="mix-b-options"
+                                    placeholder={t!("mix.pick_b")}
+                                    value=b_form.clone()
+                                    required=true
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                />
+                                <datalist id="mix-b-options">
                                     {candidates.into_iter().map(|c| {
-                                        let sel = c.name == b_form;
-                                        let value = c.name.clone();
-                                        let label = c.name;
-                                        view! {
-                                            <option value=value selected=sel>
-                                                {label}
-                                            </option>
-                                        }
+                                        let value = c.name;
+                                        view! { <option value=value/> }
                                     }).collect_view()}
-                                </select>
+                                </datalist>
                             </label>
                             <label class="mix-field">
                                 <span class="lbl">{t!("mix.field.split")}</span>
@@ -150,6 +165,11 @@ fn MixBody(
                                 default_dest=default_dest
                             />
                         })}
+                        <p style="margin-top:24px">
+                            <a href="/" rel="external">
+                                "← " {t!("generic.back_to_catalog")}
+                            </a>
+                        </p>
                     }.into_any()
                 }
                 Err(e) => view! {
