@@ -1062,16 +1062,31 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
  * off (worse). The `<details>` summary / leaf rows are flex with
  * `nowrap` (below) so they extend right until this container's
  * scrollbar takes over. */
+/* Stage 11.28: the tree keeps its own bounded vertical scroll
+   (`max-height: 75vh`) so the page doesn't grow taller than the
+   window. Horizontal scrolling moves to a fixed-position proxy
+   pinned to the viewport bottom (`.tree-hscroll-proxy` below), so
+   the user can drag it without first scrolling inside the tree to
+   reach the native gutter. The tree itself still has `overflow-x:
+   scroll` (so JS can set `scrollLeft`), but its native horizontal
+   bar is hidden via the webkit pseudo override below. */
 .tree-scroll {
-  max-height: 75vh;
+  /* Stage 11.28: size dynamically to fill viewport minus the chrome
+     above (topbar + filter-bar + intro + tree-controls + container
+     padding ≈ 250px) so the whole catalog page fits in a single
+     viewport — page-level vertical scroll goes away, only the
+     tree's internal vertical scroll remains. */
+  height: calc(100vh - 250px);
+  min-height: 220px;
   overflow-y: auto;
-  overflow-x: auto;
+  overflow-x: scroll;
   border: 1px solid var(--bord);
   border-radius: 12px;
   padding: 14px 18px;
   background: var(--surf);
 }
-.tree-scroll::-webkit-scrollbar { width: 12px; height: 12px; }
+.tree-scroll::-webkit-scrollbar { width: 12px; height: 0; }
+.tree-scroll::-webkit-scrollbar:horizontal { display: none; height: 0; }
 .tree-scroll::-webkit-scrollbar-track { background: var(--surf); }
 .tree-scroll::-webkit-scrollbar-thumb {
   background: var(--bord);
@@ -1079,10 +1094,90 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
   border: 3px solid var(--surf);
 }
 
+/* Fixed-position horizontal scrollbar pinned to the viewport bottom.
+   `left` / `width` are set by JS to mirror the tree-scroll's
+   bounding box so the drag ratio is 1:1 with what the user sees.
+   The inner spacer width matches the tree's `scrollWidth`, and the
+   proxy is hidden until content actually overflows. */
+.tree-hscroll-proxy {
+  position: fixed;
+  bottom: 0;
+  overflow-x: scroll;
+  overflow-y: hidden;
+  height: 18px;
+  background: var(--surf2);
+  border-top: 1px solid var(--bord);
+  z-index: 100;
+  scrollbar-color: var(--mut) var(--surf2);
+  scrollbar-width: auto;
+  display: none;
+}
+.tree-hscroll-proxy::-webkit-scrollbar { height: 14px; }
+.tree-hscroll-proxy::-webkit-scrollbar-track { background: var(--surf2); }
+.tree-hscroll-proxy::-webkit-scrollbar-thumb {
+  background: var(--mut);
+  border-radius: 8px;
+  border: 3px solid var(--surf2);
+}
+.tree-hscroll-proxy::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+.tree-hscroll-proxy-inner { height: 1px; }
+/* Stage 11.28: catalog page locks `<body>` to viewport height and
+   kills page-level scroll so the only vertical scroll is the
+   `.tree-scroll` itself. We use flexbox to give `.tree-scroll` the
+   remaining space after topbar + filter + tree-controls — beats a
+   brittle `calc(100vh - 340px)` that breaks when chrome above
+   changes height (different locales, new buttons, longer intro
+   text…). Other routes don't get this class; they keep normal
+   page scrolling. */
+body.catalog-page {
+  overflow: hidden;
+  height: 100vh;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+}
+body.catalog-page > header.topbar { flex-shrink: 0; }
+body.catalog-page > main.container {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* keep horizontal centering + max-width via the existing
+     `.container` rule — we only override the vertical flex bits */
+}
+/* Cascade the column-flex down through the catalog tree views so
+   `.tree-scroll` can use `flex: 1` to fill remaining vertical
+   space without us hand-tuning a calc(). The wrappers themselves
+   shrink to their content; only `.tree-scroll` grows. */
+body.catalog-page main.container > * { flex-shrink: 0; }
+body.catalog-page .tree-scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  /* Override the static height set below for non-catalog usages. */
+  height: auto;
+  max-height: none;
+}
+
 .tree-root, .tree-children {
   list-style: none;
   margin: 0;
   padding: 0;
+  /* Stage 11.28 fix: let the list grow to fit its widest row so
+     `.tree-scroll`'s `overflow-x: auto` actually triggers. With a
+     plain block `<ul>` the list capped at `.tree-scroll`'s width and
+     wide flex rows overflowed *inside* it without ever pushing the
+     direct child past the scroll boundary. `width: max-content`
+     (rather than `min-width`) sizes the list strictly to its
+     content — flex children stop trying to share an artificially
+     narrow box and the parent scroller picks up the overflow. */
+  width: max-content;
+  min-width: 100%;
+}
+/* The branch row also explicitly sizes to its summary so the row
+   doesn't snap back to container width before flex layout settles. */
+.tree-branch, .tree-leaf {
+  width: max-content;
+  min-width: 100%;
 }
 /* Stage 11.26: all tree sizes scale via `--tree-scale` (default 1.0)
    driven by the +/- buttons in the controls bar. The variable is
@@ -1126,9 +1221,13 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
   align-items: center;
   /* Stage 11.26: keep the whole row on one line so the horizontal
      scroll on `.tree-scroll` takes care of overflow instead of
-     wrapping the action links onto the next line. */
+     wrapping the action links onto the next line. Stage 11.28:
+     `min-width: max-content` makes the flex container as wide as
+     its items (nowrap intrinsic size), which pushes the parent
+     `<ul>` past the scroll viewport and triggers the scrollbar. */
   flex-wrap: nowrap;
   white-space: nowrap;
+  min-width: max-content;
   gap: calc(18px * var(--tree-scale, 1));
   padding: calc(18px * var(--tree-scale, 1)) calc(21px * var(--tree-scale, 1));
   border-radius: 10px;
@@ -1155,6 +1254,7 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
   align-items: center;
   flex-wrap: nowrap;
   white-space: nowrap;
+  min-width: max-content;
   gap: calc(18px * var(--tree-scale, 1));
   padding: calc(15px * var(--tree-scale, 1)) calc(21px * var(--tree-scale, 1))
           calc(15px * var(--tree-scale, 1)) calc(50px * var(--tree-scale, 1));

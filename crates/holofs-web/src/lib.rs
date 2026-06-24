@@ -476,13 +476,20 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
                 // that fetch resolves and renders, so a single querySelectorAll
                 // sweep would miss them.
                 <script>{
+                    // Stage 11.27/28: recursive expand. We keep retrying
+                    // until no new <details> show up for ~5 seconds in
+                    // a row — that's the slack the deepest lazy fetches
+                    // need to materialise their inner LazyDirNodes
+                    // before we declare the tree fully open. Earlier
+                    // value (8 × 200ms = 1.6s) wasn't enough for chains
+                    // 4-5 levels deep on a busy cluster.
                     "window.holofsExpandAll=function(root){\
-                    if(!root)return;var tries=8;function step(){\
+                    if(!root)return;var tries=25;function step(){\
                     var any=false;\
                     if(root.tagName==='DETAILS'&&!root.open){root.open=true;any=true;}\
                     root.querySelectorAll('details').forEach(function(d){\
                     if(!d.open){d.open=true;any=true;}});\
-                    if(any){tries=8;setTimeout(step,200);}\
+                    if(any){tries=25;setTimeout(step,200);}\
                     else if(--tries>0){setTimeout(step,200);}\
                     }step();};\
                     window.holofsCollapseAll=function(root){if(!root)return;\
@@ -490,6 +497,12 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
                     root.querySelectorAll('details').forEach(function(d){d.open=false;});};"
                 }</script>
                 <HydrationScripts options/>
+                // Stage 11.28: catalog-tree sticky H-scrollbar
+                // initialiser. Lives in the static head so it runs
+                // on every page; if the tree isn't on the current
+                // page the script is a no-op (init finds no
+                // `.tree-scroll` element).
+                <script defer="defer" src="/assets/tree-hscroll.js"></script>
                 <Stylesheet id="leptos" href="/pkg/holofs.css"/>
                 <Title text="holofs"/>
             </head>
@@ -562,6 +575,11 @@ fn CatalogPage() -> impl IntoView {
     let prefix_signal = move || query.with(|q| q.get("p").unwrap_or_default());
 
     view! {
+        // Stage 11.28: tag `<body>` so the catalog page can opt into
+        // `body { overflow: hidden; height: 100vh }` — kills the
+        // window-level vertical scroll. Other routes (help, similar
+        // etc.) without this class keep normal page scrolling.
+        <Body attr:class="catalog-page"/>
         <ui::Topbar active="catalog"/>
 
         <main class="container">
@@ -996,6 +1014,15 @@ fn CatalogTreeLazyShell(initial: ListDirPage, sort: TreeSort) -> impl IntoView {
                 />
             </ul>
         </div>
+        // Stage 11.28: sticky horizontal scrollbar proxy. The native
+        // bar on `.tree-scroll` is hidden via CSS; this div is the
+        // visible one, glued to the viewport bottom via `position:
+        // sticky`. Inner spacer width is filled in by JS so the
+        // proxy's scroll extent matches the tree's `scrollWidth`.
+        <div class="tree-hscroll-proxy">
+            <div class="tree-hscroll-proxy-inner"></div>
+        </div>
+        <script defer="defer" src="/assets/tree-hscroll.js"></script>
     }
 }
 
@@ -1499,6 +1526,13 @@ fn CatalogTreeBody(entries: Vec<CatalogEntry>, sort: TreeSort) -> impl IntoView 
                     view! { <TreeNodeView node=child depth=0/> }
                 }).collect_view()}
             </ul>
+        </div>
+        // Stage 11.28: sticky H-scroll proxy. See the LazyShell
+        // version for background; the init script lives in `Shell`
+        // (top-level <head>) because `<script>` tags injected via
+        // streamed Suspense templates don't execute per HTML5 spec.
+        <div class="tree-hscroll-proxy">
+            <div class="tree-hscroll-proxy-inner"></div>
         </div>
     }
 }
