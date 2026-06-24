@@ -614,6 +614,57 @@ pub async fn get_audio_filtered(
     Ok((out, bytes_used))
 }
 
+/// Stage 12.7: per-layer DWT coefficient energy, summed across channels.
+///
+/// Decodes every layer the same way the real GET path does, but instead
+/// of placing the coefficients into a plane + running the inverse Haar,
+/// it accumulates `sum(coef^2)` per layer. This is the natural "how
+/// much information lives at this scale" signal — coarse layers carry
+/// average brightness/loudness, fine layers carry edges/transients.
+/// Works for both image (`ObjectKind::Image`) and audio
+/// (`ObjectKind::Audio`); the math is identical because both use a
+/// Haar DWT, only the layer count and geometry differ.
+///
+/// Returns `(energy_per_layer, bytes_used)`. `energy_per_layer.len() ==
+/// manifest.nlayers`. Layers that lost too many shards to decode are
+/// returned as `LayerLost`; the page should surface that as "n/a".
+pub async fn layer_energies(
+    gf: &Gf,
+    manifest: &Manifest,
+    live: &LiveNodes,
+) -> Result<(Vec<f64>, u64), ClientError> {
+    let nlayers = manifest.nlayers as usize;
+    let mut energy = vec![0f64; nlayers];
+    let mut bytes_used: u64 = 0;
+
+    for c in 0..manifest.channels as usize {
+        for l in 0..nlayers {
+            let raw = gather_layer(manifest, live, c as u8, l as u8).await?;
+            let expected: HashSet<Hash> =
+                manifest.shard_hashes[c][l].iter().copied().collect();
+            let verified: Vec<Shard> = raw
+                .into_iter()
+                .filter(|s| expected.contains(&shard_hash(s)))
+                .collect();
+            let sl = manifest.sym_len[l] as usize;
+            bytes_used += verified.len() as u64 * (manifest.k as u64 + sl as u64);
+            let refs: Vec<&Shard> = verified.iter().collect();
+            let bytes = decode_layer(gf, &refs, sl).ok_or(ClientError::LayerLost {
+                channel: c as u8,
+                layer: l as u8,
+            })?;
+            let positions = &manifest.layer_positions[l];
+            for idx in 0..positions.len() {
+                let off = idx * 4;
+                let arr = [bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]];
+                let v = f32::from_le_bytes(arr) as f64;
+                energy[l] += v * v;
+            }
+        }
+    }
+    Ok((energy, bytes_used))
+}
+
 // === Stage 10: opaque blob (arbitrary files, no graceful degradation) ======
 
 /// Encode an arbitrary binary as a single RLNC "canvas": the payload is split

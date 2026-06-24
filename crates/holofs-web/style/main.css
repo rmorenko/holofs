@@ -1470,3 +1470,297 @@ body.catalog-page .tree-scroll {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* ============================================================
+ * Stage 12.7: per-file metrics on /health/<name> + /about page.
+ * ============================================================ */
+
+/* Sub-section heading and helper sentence below it. Same vertical
+ * rhythm as the existing matrix/loss tables; smaller than `h2` so the
+ * metrics block reads as a tier below "Unique metrics". */
+.metrics-h {
+  margin: 22px 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.metrics-sub {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Per-layer bar chart used for originality, energy, and audio bands.
+ * Each row: short label · stretchy track · numeric value. The fill is
+ * the accent colour at low opacity so the chart stays calm next to
+ * the existing `.stat` cards. */
+.layer-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 18px;
+  max-width: 640px;
+}
+.layer-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--mut);
+}
+.layer-bar .lb-label {
+  flex: 0 0 48px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.layer-bar .lb-track {
+  flex: 1 1 auto;
+  height: 10px;
+  background: var(--surf2);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.layer-bar .lb-fill {
+  height: 100%;
+  background: var(--accent);
+  opacity: 0.65;
+  transition: width .2s ease;
+}
+.layer-bar .lb-value {
+  flex: 0 0 64px;
+  text-align: right;
+  color: var(--fg);
+}
+
+/* Neighbours table: re-uses `.health-layers` look (8px row padding,
+ * uppercase headers) plus a dedicated stacked-bar column showing
+ * per-layer breakdown of the shared shards. */
+.metrics-neighbours {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  margin: 8px 0 18px;
+  font-size: 13px;
+  background: var(--surf);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.metrics-neighbours th,
+.metrics-neighbours td {
+  text-align: left;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--bord);
+}
+.metrics-neighbours th {
+  background: var(--surf2);
+  color: var(--mut);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.metrics-neighbours tr:last-child td { border-bottom: none; }
+.metrics-neighbours .name a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.metrics-neighbours .name a:hover { text-decoration: underline; }
+
+/* Per-row layer breakdown: thin stacked segments, one per layer. The
+ * `flex` per segment is set inline based on the percentage. Each
+ * segment cycles through subtle hues so the eye can pick layer-0
+ * apart from layer-N at a glance. */
+.layer-breakdown {
+  display: flex;
+  align-items: center;
+  width: 220px;
+  height: 14px;
+  background: var(--surf2);
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--bord);
+}
+.layer-seg {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: rgba(255, 255, 255, 0.85);
+  overflow: hidden;
+  background: var(--accent);
+  opacity: 0.55;
+  border-right: 1px solid var(--surf);
+}
+.layer-seg:last-child { border-right: none; }
+.layer-seg:nth-child(1) { background: #4da3ff; opacity: 0.85; }
+.layer-seg:nth-child(2) { background: #6aa7ff; opacity: 0.78; }
+.layer-seg:nth-child(3) { background: #88adff; opacity: 0.72; }
+.layer-seg:nth-child(4) { background: #a4b4ff; opacity: 0.66; }
+.layer-seg:nth-child(5) { background: #beb5ff; opacity: 0.60; }
+.layer-seg:nth-child(6) { background: #d2b3ff; opacity: 0.56; }
+.layer-seg:nth-child(7) { background: #e2acff; opacity: 0.52; }
+.layer-seg:nth-child(n+8) { background: #f0a4ff; opacity: 0.48; }
+
+/* ============================================================
+ * /about marketing page.
+ * ============================================================ */
+
+.about-page { max-width: 920px; }
+
+.about-hero {
+  padding: 36px 0 12px;
+  border-bottom: 1px solid var(--bord);
+  margin-bottom: 28px;
+}
+.about-hero-tag {
+  display: inline-block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--mut);
+  background: var(--surf);
+  border: 1px solid var(--bord);
+  border-radius: 999px;
+  padding: 3px 12px;
+  margin: 0 0 14px;
+}
+.about-hero-h {
+  font-size: 38px;
+  font-weight: 700;
+  line-height: 1.15;
+  margin: 0 0 14px;
+  color: var(--fg);
+  letter-spacing: -0.4px;
+}
+.about-hero-sub {
+  font-size: 17px;
+  line-height: 1.55;
+  color: var(--mut);
+  max-width: 760px;
+  margin: 0;
+}
+
+.about-section-h {
+  font-size: 18px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--fg);
+  margin: 36px 0 14px;
+  font-weight: 600;
+}
+
+/* Architecture cards: 2-column grid that collapses to one on narrow
+ * viewports. Each card is a calm rectangle with a left accent stripe
+ * — emphasises "this is a feature, not just text". */
+.about-cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+}
+.about-card {
+  background: var(--surf);
+  border: 1px solid var(--bord);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 16px 18px;
+}
+.about-card-h {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: var(--fg);
+}
+.about-card-body {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--mut);
+}
+
+/* Business outcomes — straightforward bullet list, but with a softly
+ * accented bullet glyph and slightly tighter rhythm than .help-body. */
+.about-value-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 8px;
+  max-width: 800px;
+}
+.about-value-list li {
+  position: relative;
+  padding: 6px 0 6px 26px;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--fg);
+  border-bottom: 1px dashed var(--bord);
+}
+.about-value-list li:last-child { border-bottom: none; }
+.about-value-list li::before {
+  content: "▸";
+  position: absolute;
+  left: 4px;
+  top: 6px;
+  color: var(--accent);
+}
+
+/* Use-case cards: warmer than .about-card (filled background, no
+ * accent stripe) — narrative tier, not feature tier. */
+.about-cases {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+}
+.about-case {
+  background: var(--surf2);
+  border: 1px solid var(--bord);
+  border-radius: 8px;
+  padding: 16px 18px;
+}
+.about-case-h {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: var(--accent);
+}
+.about-case-body {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--fg);
+}
+
+/* CTA block at the bottom — same look as the cluster stat cards but
+ * wider, with the button styled as an accented pill. */
+.about-cta {
+  margin: 32px 0 48px;
+  padding: 22px 24px;
+  background: var(--surf);
+  border: 1px solid var(--bord);
+  border-radius: 10px;
+}
+.about-cta h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.about-cta p { margin: 0 0 12px; font-size: 14px; color: var(--mut); line-height: 1.55; }
+.about-cta-btn {
+  display: inline-block;
+  padding: 9px 20px;
+  background: var(--accent);
+  color: var(--bg);
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 14px;
+  text-decoration: none;
+  transition: filter .12s ease;
+}
+.about-cta-btn:hover { filter: brightness(1.1); }
+
+@media (max-width: 720px) {
+  .about-cards, .about-cases { grid-template-columns: 1fr; }
+  .about-hero-h { font-size: 30px; }
+}

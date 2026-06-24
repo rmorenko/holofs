@@ -966,6 +966,10 @@ const RESERVED_TOP_SEGMENTS: &[&str] = &[
     "help", "inspect-zoom",
     // Stage 11.5: static-asset prefix served by ServeDir.
     "assets",
+    // Stage 12.6: wavelet-mix composer page.
+    "mix",
+    // Stage 12.7: pitch / marketing page.
+    "about",
 ];
 
 fn top_segment(path: &str) -> &str {

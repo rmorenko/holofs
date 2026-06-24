@@ -95,6 +95,36 @@ pub struct ObjectHealthView {
     pub zone_failures: Vec<ZoneFailureRow>,
 }
 
+/// One row of [`FileMetricsView::neighbours`] — see
+/// `holofs_gateway::NeighbourMetric` for the data-side counterpart.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct NeighbourRow {
+    pub name: String,
+    pub kind: String,
+    pub shared_total: u64,
+    pub shared_per_layer: Vec<u32>,
+    pub overlap_pct: f32,
+}
+
+/// View-model for the unique per-file metrics block. Renders below the
+/// existing margin / Monte Carlo tables on `/health/:name` and is the
+/// "what does holofs's architecture buy you" page in miniature.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct FileMetricsView {
+    pub kind: String,
+    pub total_shards_in_file: u64,
+    pub unique_shards_in_file: u64,
+    pub file_dedup_savings_pct: f32,
+    pub catalog_total_shards: u64,
+    pub catalog_unique_shards: u64,
+    pub unique_to_file: u64,
+    pub originality_pct: f32,
+    pub originality_per_layer: Vec<f32>,
+    pub neighbours: Vec<NeighbourRow>,
+    pub layer_energy: Option<Vec<f64>>,
+    pub audio_bands: Option<(f64, f64, f64)>,
+}
+
 // ===== Server functions ====================================================
 
 /// Cluster-wide health snapshot.
@@ -184,6 +214,62 @@ pub async fn get_object_health(name: String) -> Result<ObjectHealthView, ServerF
                 resolution: z.resolution,
             })
             .collect(),
+    })
+}
+
+/// Per-file unique metrics (originality, dedup, neighbours, layer energy).
+/// Heavy: on image/audio this triggers a full DWT decode against the live
+/// cluster (one network roundtrip per (channel, layer)). Results stay
+/// fresh-on-request; we don't cache because the catalog can change under
+/// us between calls.
+#[server(
+    name = GetFileMetrics,
+    prefix = "/api",
+    endpoint = "file_metrics",
+)]
+pub async fn get_file_metrics(name: String) -> Result<FileMetricsView, ServerFnError> {
+    use std::sync::Arc;
+    let gw = expect_context::<Arc<holofs_gateway::Gateway>>();
+    let m = gw
+        .file_metrics(&name)
+        .await
+        .map_err(|e| ServerFnError::<server_fn::error::NoCustomError>::ServerError(e.to_string()))?;
+    let kind_str = match m.kind {
+        holofs_model::manifest::ObjectKind::Image => "image",
+        holofs_model::manifest::ObjectKind::Audio => "audio",
+        holofs_model::manifest::ObjectKind::Text => "text",
+        holofs_model::manifest::ObjectKind::Opaque => "opaque",
+        holofs_model::manifest::ObjectKind::Directory => "directory",
+    };
+    Ok(FileMetricsView {
+        kind: kind_str.into(),
+        total_shards_in_file: m.total_shards_in_file,
+        unique_shards_in_file: m.unique_shards_in_file,
+        file_dedup_savings_pct: m.file_dedup_savings_pct,
+        catalog_total_shards: m.catalog_total_shards,
+        catalog_unique_shards: m.catalog_unique_shards,
+        unique_to_file: m.unique_to_file,
+        originality_pct: m.originality_pct,
+        originality_per_layer: m.originality_per_layer,
+        neighbours: m
+            .neighbours
+            .into_iter()
+            .map(|n| NeighbourRow {
+                kind: match n.kind {
+                    holofs_model::manifest::ObjectKind::Image => "image".into(),
+                    holofs_model::manifest::ObjectKind::Audio => "audio".into(),
+                    holofs_model::manifest::ObjectKind::Text => "text".into(),
+                    holofs_model::manifest::ObjectKind::Opaque => "opaque".into(),
+                    holofs_model::manifest::ObjectKind::Directory => "directory".into(),
+                },
+                name: n.name,
+                shared_total: n.shared_total,
+                shared_per_layer: n.shared_per_layer,
+                overlap_pct: n.overlap_pct,
+            })
+            .collect(),
+        layer_energy: m.layer_energy,
+        audio_bands: m.audio_bands.map(|a| (a.bass, a.mid, a.treble)),
     })
 }
 
@@ -435,6 +521,12 @@ fn HealthDetailBody(data: ObjectHealthView) -> impl IntoView {
     };
     let cid_short: String = cid_hex.chars().take(16).collect();
 
+    let metrics_name = name.clone();
+    let metrics = Resource::new(
+        move || metrics_name.clone(),
+        |n| async move { get_file_metrics(n).await },
+    );
+
     view! {
         <p><a href="/health">"← /health"</a></p>
         <h2>{name.clone()}</h2>
@@ -458,6 +550,257 @@ fn HealthDetailBody(data: ObjectHealthView) -> impl IntoView {
             <h2>{t!("health.zone_h")}</h2>
             <ZoneTable rows=zone_failures/>
         })}
+
+        <h2>{t!("health.metrics_h")}</h2>
+        <p class="mut">{t!("health.metrics_intro")}</p>
+        <Suspense fallback=move || view! {
+            <p class="mut">{t!("health.metrics_loading")}</p>
+        }>
+            {move || metrics.get().map(|res| match res {
+                Ok(m) => view! { <FileMetricsBlock data=m/> }.into_any(),
+                Err(e) => view! {
+                    <p class="bad">{t!("generic.load_failed")} " " {e.to_string()}</p>
+                }.into_any(),
+            })}
+        </Suspense>
+    }
+}
+
+#[component]
+fn FileMetricsBlock(data: FileMetricsView) -> impl IntoView {
+    let FileMetricsView {
+        kind,
+        total_shards_in_file,
+        unique_shards_in_file,
+        file_dedup_savings_pct,
+        catalog_total_shards,
+        catalog_unique_shards,
+        unique_to_file,
+        originality_pct,
+        originality_per_layer,
+        neighbours,
+        layer_energy,
+        audio_bands,
+    } = data;
+
+    let catalog_savings_pct = if catalog_total_shards > 0 {
+        (catalog_total_shards - catalog_unique_shards) as f32 * 100.0
+            / catalog_total_shards as f32
+    } else {
+        0.0
+    };
+    let originality_label = format!("{originality_pct:.1}%");
+    let originality_class = if originality_pct >= 50.0 {
+        "v ok"
+    } else if originality_pct >= 15.0 {
+        "v partial"
+    } else {
+        "v bad"
+    };
+    let neighbours_for_table = neighbours.clone();
+    let layer_energy_for_chart = layer_energy.clone();
+    let layer_energy_for_audio_check = layer_energy.clone();
+
+    view! {
+        // --- Card row: storage / dedup / originality.
+        <section class="cluster-stats">
+            <div class="stat">
+                <div class="v">{unique_shards_in_file.to_string()} "/" {total_shards_in_file.to_string()}</div>
+                <div class="l">{t!("health.metrics.shards_in_file")}</div>
+            </div>
+            <div class="stat">
+                <div class="v">{format!("{file_dedup_savings_pct:.1}%")}</div>
+                <div class="l">{t!("health.metrics.file_dedup")}</div>
+            </div>
+            <div class="stat">
+                <div class=originality_class>{originality_label}</div>
+                <div class="l">{t!("health.metrics.originality")}</div>
+            </div>
+            <div class="stat">
+                <div class="v">{unique_to_file.to_string()}</div>
+                <div class="l">{t!("health.metrics.unique_to_file")}</div>
+            </div>
+            <div class="stat">
+                <div class="v">{catalog_unique_shards.to_string()} "/" {catalog_total_shards.to_string()}</div>
+                <div class="l">{t!("health.metrics.catalog_dedup_raw")}</div>
+            </div>
+            <div class="stat">
+                <div class="v">{format!("{catalog_savings_pct:.1}%")}</div>
+                <div class="l">{t!("health.metrics.catalog_savings")}</div>
+            </div>
+        </section>
+
+        // --- Originality per layer (bar chart).
+        {(!originality_per_layer.is_empty()).then(|| view! {
+            <h3 class="metrics-h">{t!("health.metrics.layer_originality_h")}</h3>
+            <p class="mut metrics-sub">{t!("health.metrics.layer_originality_help")}</p>
+            <LayerBars values=originality_per_layer.clone() unit="%".to_string() max_hint=Some(100.0)/>
+        })}
+
+        // --- Decoded layer energy bars.
+        {layer_energy_for_chart.as_ref().map(|e| {
+            let e = e.clone();
+            view! {
+                <h3 class="metrics-h">{t!("health.metrics.layer_energy_h")}</h3>
+                <p class="mut metrics-sub">{t!("health.metrics.layer_energy_help")}</p>
+                <EnergyBars values=e/>
+            }
+        })}
+
+        // --- Audio bands (bass / mid / treble) — derived from layer_energy.
+        {(kind == "audio").then(|| audio_bands.map(|(bass, mid, treble)| view! {
+            <h3 class="metrics-h">{t!("health.metrics.audio_bands_h")}</h3>
+            <p class="mut metrics-sub">{t!("health.metrics.audio_bands_help")}</p>
+            <AudioBands bass=bass mid=mid treble=treble/>
+        })).flatten()}
+
+        // --- Neighbours table.
+        {(!neighbours_for_table.is_empty()).then(|| view! {
+            <h3 class="metrics-h">{t!("health.metrics.neighbours_h")}</h3>
+            <p class="mut metrics-sub">{t!("health.metrics.neighbours_help")}</p>
+            <NeighboursTable rows=neighbours_for_table.clone()/>
+        })}
+
+        {(neighbours.is_empty() && layer_energy_for_audio_check.is_none()).then(|| view! {
+            <p class="mut">{t!("health.metrics.empty")}</p>
+        })}
+    }
+}
+
+#[component]
+fn LayerBars(values: Vec<f32>, unit: String, max_hint: Option<f32>) -> impl IntoView {
+    let max_val: f32 = max_hint.unwrap_or_else(|| {
+        values
+            .iter()
+            .cloned()
+            .fold(0.0_f32, |a, b| a.max(b))
+            .max(1.0)
+    });
+    let max_val = max_val.max(1e-6);
+    view! {
+        <div class="layer-bars">
+            {values.into_iter().enumerate().map(|(i, v)| {
+                let pct = (v / max_val * 100.0).clamp(0.0, 100.0);
+                let label = format!("L{i}");
+                let value_label = format!("{v:.1}{}", unit);
+                view! {
+                    <div class="layer-bar">
+                        <div class="lb-label">{label}</div>
+                        <div class="lb-track">
+                            <div class="lb-fill" style=format!("width:{pct:.1}%")></div>
+                        </div>
+                        <div class="lb-value mono">{value_label}</div>
+                    </div>
+                }
+            }).collect_view()}
+        </div>
+    }
+}
+
+#[component]
+fn EnergyBars(values: Vec<f64>) -> impl IntoView {
+    let total: f64 = values.iter().sum::<f64>().max(1e-12);
+    view! {
+        <div class="layer-bars">
+            {values.into_iter().enumerate().map(|(i, v)| {
+                let pct = (v / total * 100.0).clamp(0.0, 100.0);
+                let label = format!("L{i}");
+                let value_label = format!("{pct:.1}%");
+                view! {
+                    <div class="layer-bar">
+                        <div class="lb-label">{label}</div>
+                        <div class="lb-track">
+                            <div class="lb-fill" style=format!("width:{pct:.1}%")></div>
+                        </div>
+                        <div class="lb-value mono">{value_label}</div>
+                    </div>
+                }
+            }).collect_view()}
+        </div>
+    }
+}
+
+#[component]
+fn AudioBands(bass: f64, mid: f64, treble: f64) -> impl IntoView {
+    let total = (bass + mid + treble).max(1e-12);
+    let row = |label: &str, v: f64| {
+        let pct = (v / total * 100.0).clamp(0.0, 100.0);
+        let val = format!("{pct:.1}%");
+        view! {
+            <div class="layer-bar">
+                <div class="lb-label">{label.to_string()}</div>
+                <div class="lb-track">
+                    <div class="lb-fill" style=format!("width:{pct:.1}%")></div>
+                </div>
+                <div class="lb-value mono">{val}</div>
+            </div>
+        }
+    };
+    view! {
+        <div class="layer-bars">
+            {row("bass", bass)}
+            {row("mid", mid)}
+            {row("treble", treble)}
+        </div>
+    }
+}
+
+#[component]
+fn NeighboursTable(rows: Vec<NeighbourRow>) -> impl IntoView {
+    let max_shared: u64 = rows.iter().map(|r| r.shared_total).max().unwrap_or(1).max(1);
+    view! {
+        <table class="metrics-neighbours">
+            <thead>
+                <tr>
+                    <th class="name">{t!("health.metrics.col.name")}</th>
+                    <th>{t!("health.metrics.col.kind")}</th>
+                    <th>{t!("health.metrics.col.shared")}</th>
+                    <th>{t!("health.metrics.col.overlap_pct")}</th>
+                    <th>{t!("health.metrics.col.layer_breakdown")}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows.into_iter().map(|r| {
+                    let layer_total = r.shared_per_layer.iter().copied().map(u64::from).sum::<u64>().max(1);
+                    let segments: Vec<_> = r.shared_per_layer.iter().enumerate().map(|(i, &n)| {
+                        let pct = n as f32 * 100.0 / layer_total as f32;
+                        let title = format!("L{i}: {n} shards");
+                        view! {
+                            <span
+                                class="layer-seg"
+                                style=format!("flex:{pct:.2}")
+                                title=title
+                            >
+                                {(pct >= 8.0).then(|| format!("L{i}"))}
+                            </span>
+                        }
+                    }).collect();
+                    let strength_pct = r.shared_total as f32 * 100.0 / max_shared as f32;
+                    let encoded_name = crate::url_encode(&r.name);
+                    view! {
+                        <tr>
+                            <td class="name">
+                                <a href={format!("/{encoded_name}")} rel="external">
+                                    {r.name.clone()}
+                                </a>
+                            </td>
+                            <td class="mut"><code>{r.kind.clone()}</code></td>
+                            <td>
+                                <div class="lb-track" style="width:80px;display:inline-block">
+                                    <div class="lb-fill" style=format!("width:{strength_pct:.1}%")></div>
+                                </div>
+                                " "
+                                <code>{r.shared_total.to_string()}</code>
+                            </td>
+                            <td><code>{format!("{:.1}%", r.overlap_pct)}</code></td>
+                            <td>
+                                <div class="layer-breakdown">{segments}</div>
+                            </td>
+                        </tr>
+                    }
+                }).collect_view()}
+            </tbody>
+        </table>
     }
 }
 

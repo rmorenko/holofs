@@ -16,7 +16,7 @@ use leptos_router::hooks::use_query_map;
 use leptos_router::path;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "ssr")]
+pub mod about;
 pub mod bootstrap;
 #[cfg(feature = "ssr")]
 pub mod cli;
@@ -560,6 +560,7 @@ fn RoutedApp() -> impl IntoView {
             <Route path=path!("/escrow") view=escrow::EscrowPage/>
             <Route path=path!("/help") view=help::HelpIndexPage/>
             <Route path=path!("/help/:slug") view=help::HelpDocPage/>
+            <Route path=path!("/about") view=about::AboutPage/>
         </Routes>
     }
 }
