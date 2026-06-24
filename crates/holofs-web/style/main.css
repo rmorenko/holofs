@@ -1001,6 +1001,19 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
 }
 .tree-control-label { line-height: 1; }
 
+/* Stage 11.26: compact icon-only zoom buttons (`−` / `+`). Square-ish
+   so they look like a pair next to expand/collapse, no label inside —
+   the `title=` attribute carries the localized hint. */
+.tree-control-btn.tree-control-zoom {
+  padding: 6px 12px;
+  min-width: 34px;
+  justify-content: center;
+}
+.tree-control-btn.tree-control-zoom .tree-control-icon {
+  font-size: 18px;
+  font-weight: 600;
+}
+
 /* Inline mkdir inside the controls bar. */
 .tree-mkdir {
   display: inline-flex;
@@ -1041,16 +1054,24 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
 .tree-sort-link.active { color: var(--accent); background: rgba(106, 167, 255, 0.1); font-weight: 600; }
 
 /* Scrollable viewport for the tree. Bounded height keeps the page from
- * stretching forever; the inner <ul> handles long lists. */
+ * stretching forever; the inner <ul> handles long lists.
+ *
+ * Stage 11.26: also allow horizontal scroll. Long folder names + many
+ * action links + deep indentation can push a row past the viewport;
+ * without horizontal scroll the row either wraps (ugly) or gets cut
+ * off (worse). The `<details>` summary / leaf rows are flex with
+ * `nowrap` (below) so they extend right until this container's
+ * scrollbar takes over. */
 .tree-scroll {
   max-height: 75vh;
   overflow-y: auto;
+  overflow-x: auto;
   border: 1px solid var(--bord);
   border-radius: 12px;
   padding: 14px 18px;
   background: var(--surf);
 }
-.tree-scroll::-webkit-scrollbar { width: 12px; }
+.tree-scroll::-webkit-scrollbar { width: 12px; height: 12px; }
 .tree-scroll::-webkit-scrollbar-track { background: var(--surf); }
 .tree-scroll::-webkit-scrollbar-thumb {
   background: var(--bord);
@@ -1063,14 +1084,16 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
   margin: 0;
   padding: 0;
 }
-/* Stage 11.24: shrunk the tree typography ~20% — the previous sizes
-   were tuned for a near-empty catalog and felt oversized once real
-   directories landed. */
-.tree-root { font-size: 24px; }
+/* Stage 11.26: all tree sizes scale via `--tree-scale` (default 1.0)
+   driven by the +/- buttons in the controls bar. The variable is
+   persisted in localStorage and re-applied by a pre-paint script in
+   `<head>`, same pattern as the dark/light theme toggle, so the
+   chosen zoom survives reloads without a flash of unscaled content. */
+.tree-root { font-size: calc(24px * var(--tree-scale, 1)); }
 .tree-children {
-  margin-left: 46px;
+  margin-left: calc(46px * var(--tree-scale, 1));
   border-left: 2px dashed var(--bord);
-  padding-left: 27px;
+  padding-left: calc(27px * var(--tree-scale, 1));
   margin-top: 8px;
 }
 
@@ -1101,8 +1124,13 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 18px 21px;
+  /* Stage 11.26: keep the whole row on one line so the horizontal
+     scroll on `.tree-scroll` takes care of overflow instead of
+     wrapping the action links onto the next line. */
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  gap: calc(18px * var(--tree-scale, 1));
+  padding: calc(18px * var(--tree-scale, 1)) calc(21px * var(--tree-scale, 1));
   border-radius: 10px;
   user-select: none;
 }
@@ -1110,9 +1138,9 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
 .tree-branch > details > summary::before {
   content: "▸";
   display: inline-block;
-  width: 26px;
+  width: calc(26px * var(--tree-scale, 1));
   color: var(--mut);
-  font-size: 26px;
+  font-size: calc(26px * var(--tree-scale, 1));
   transition: transform .12s ease;
 }
 .tree-branch > details[open] > summary::before {
@@ -1125,55 +1153,65 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
 .tree-leaf {
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 15px 21px 15px 50px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  gap: calc(18px * var(--tree-scale, 1));
+  padding: calc(15px * var(--tree-scale, 1)) calc(21px * var(--tree-scale, 1))
+          calc(15px * var(--tree-scale, 1)) calc(50px * var(--tree-scale, 1));
   border-radius: 10px;
 }
 .tree-leaf:hover { background: var(--surf2); }
 
 .tree-icon {
   display: inline-block;
-  width: 43px;
+  width: calc(43px * var(--tree-scale, 1));
   text-align: center;
-  font-size: 36px;
+  font-size: calc(36px * var(--tree-scale, 1));
   line-height: 1;
+  flex-shrink: 0;
 }
 .tree-name {
   color: var(--fg);
   text-decoration: none;
   font-weight: 600;
-  font-size: 24px;
+  font-size: calc(24px * var(--tree-scale, 1));
 }
 .tree-leaf .tree-name {
   font-weight: 500;
-  font: 21px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: calc(21px * var(--tree-scale, 1));
 }
 .tree-name:hover { color: var(--accent); }
 .tree-count {
   color: var(--mut);
-  font-size: 17px;
+  font-size: calc(17px * var(--tree-scale, 1));
   font-weight: 400;
 }
 .tree-actions {
   margin-left: auto;
-  font-size: 14px;
+  font-size: calc(14px * var(--tree-scale, 1));
   color: var(--mut);
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  gap: calc(10px * var(--tree-scale, 1));
+  /* Stage 11.26: nowrap (was `wrap`) so action links extend right
+     and trigger horizontal scroll on `.tree-scroll` instead of
+     wrapping to a second line that crashed into folder content. */
+  flex-wrap: nowrap;
   justify-content: flex-end;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .tree-actions a { color: var(--accent); text-decoration: none; }
 .tree-actions a:hover { text-decoration: underline; }
-.tree-actions .link-btn { font-size: 14px; }
+.tree-actions .link-btn { font-size: calc(14px * var(--tree-scale, 1)); }
 
 /* Visible mid-dot separator between name / count and the action list,
  * and between actions inside the action list. Same shade as `.mut`
  * so it doesn't compete with the actual links. */
 .tree-sep {
   color: var(--mut);
-  font-size: 14px;
+  font-size: calc(14px * var(--tree-scale, 1));
   user-select: none;
   margin: 0 2px;
 }

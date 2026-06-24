@@ -454,12 +454,18 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
             <head>
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-                // Stage 11.13: pre-paint theme bootstrap. Reads the user's
-                // last choice from localStorage and sets `data-theme` on
-                // <html> before the CSS paints — no flash on reload.
+                // Stage 11.13 + 11.26: pre-paint bootstrap. Restores the
+                // user's last theme (data-theme attribute on <html>) and
+                // the persisted tree zoom (--tree-scale CSS var) before
+                // any styles paint — avoids a flash of the wrong size
+                // or palette on reload.
                 <script>{
-                    "(function(){try{var t=localStorage.getItem('holofs-theme')||'dark';\
-                    document.documentElement.dataset.theme=t;}catch(e){}})();"
+                    "(function(){try{\
+                    var r=document.documentElement;\
+                    var t=localStorage.getItem('holofs-theme')||'dark';r.dataset.theme=t;\
+                    var s=localStorage.getItem('holofs-tree-scale');\
+                    if(s)r.style.setProperty('--tree-scale',s);\
+                    }catch(e){}})();"
                 }</script>
                 <HydrationScripts options/>
                 <Stylesheet id="leptos" href="/pkg/holofs.css"/>
@@ -614,6 +620,44 @@ fn CatalogFocusView(prefix: String) -> impl IntoView {
                 })
             }}
         </Suspense>
+    }
+}
+
+/// Stage 11.26: shared `−` / `+` zoom buttons for the tree controls
+/// bar. Stores the scale in `localStorage` under `holofs-tree-scale`
+/// and updates the `--tree-scale` CSS variable on `<html>`, which
+/// every tree font-size / spacing rule multiplies into via `calc()`.
+/// A pre-paint script in the `Shell` reads the stored value before
+/// the first paint so reloads keep the user's zoom.
+#[component]
+fn TreeZoomButtons() -> impl IntoView {
+    let onclick_in = "(function(s){var r=document.documentElement;\
+        var c=parseFloat(localStorage.getItem('holofs-tree-scale')||'1')||1;\
+        var n=Math.min(2,Math.max(0.5,Math.round((c+s)*10)/10));\
+        r.style.setProperty('--tree-scale',n);\
+        try{localStorage.setItem('holofs-tree-scale',n);}catch(e){}})(0.1)";
+    let onclick_out = "(function(s){var r=document.documentElement;\
+        var c=parseFloat(localStorage.getItem('holofs-tree-scale')||'1')||1;\
+        var n=Math.min(2,Math.max(0.5,Math.round((c+s)*10)/10));\
+        r.style.setProperty('--tree-scale',n);\
+        try{localStorage.setItem('holofs-tree-scale',n);}catch(e){}})(-0.1)";
+    view! {
+        <button
+            type="button"
+            class="tree-control-btn tree-control-zoom"
+            onclick=onclick_out
+            title={t!("tree.zoom_out")}
+        >
+            <span class="tree-control-icon">"−"</span>
+        </button>
+        <button
+            type="button"
+            class="tree-control-btn tree-control-zoom"
+            onclick=onclick_in
+            title={t!("tree.zoom_in")}
+        >
+            <span class="tree-control-icon">"+"</span>
+        </button>
     }
 }
 
@@ -893,6 +937,7 @@ fn CatalogTreeLazyShell(initial: ListDirPage, sort: TreeSort) -> impl IntoView {
                 <span class="tree-control-icon">"⊖"</span>
                 <span class="tree-control-label">{t!("tree.collapse_all")}</span>
             </button>
+            <TreeZoomButtons/>
             <form class="tree-mkdir" method="POST" action="/api/mkdir">
                 <input type="hidden" name="parent" value=""/>
                 <input type="hidden" name="return_to" value="/"/>
@@ -1376,6 +1421,7 @@ fn CatalogTreeBody(entries: Vec<CatalogEntry>, sort: TreeSort) -> impl IntoView 
                 <span class="tree-control-icon">"⊖"</span>
                 <span class="tree-control-label">{t!("tree.collapse_all")}</span>
             </button>
+            <TreeZoomButtons/>
             <form class="tree-mkdir" method="POST" action="/api/mkdir">
                 <input type="hidden" name="parent" value=""/>
                 <input type="hidden" name="return_to" value="/"/>
