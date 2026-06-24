@@ -1189,7 +1189,10 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
 }
 .tree-actions {
   margin-left: auto;
-  font-size: calc(14px * var(--tree-scale, 1));
+  /* Stage 11.28: bumped 14 → 17px on user feedback — the blue
+     action links (preview / shards / similar / health / ✕) were
+     legibly too small next to the bigger folder/file labels. */
+  font-size: calc(17px * var(--tree-scale, 1));
   color: var(--mut);
   display: flex;
   align-items: center;
@@ -1204,14 +1207,26 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
 }
 .tree-actions a { color: var(--accent); text-decoration: none; }
 .tree-actions a:hover { text-decoration: underline; }
-.tree-actions .link-btn { font-size: calc(14px * var(--tree-scale, 1)); }
+.tree-actions .link-btn { font-size: calc(17px * var(--tree-scale, 1)); }
+
+/* Stage 11.27: per-folder ⊕ / ⊖ expand/collapse subtree buttons.
+   Sized larger than surrounding action links so the iconic toggle
+   reads at a glance. Stage 11.28: bumped 16 → 20 → 24px on
+   successive feedback ("чуть побольше"). */
+.tree-actions .tree-action-zoom {
+  font-size: calc(24px * var(--tree-scale, 1));
+  line-height: 1;
+  color: var(--mut);
+  padding: 0 4px;
+}
+.tree-actions .tree-action-zoom:hover { color: var(--accent); text-decoration: none; }
 
 /* Visible mid-dot separator between name / count and the action list,
  * and between actions inside the action list. Same shade as `.mut`
  * so it doesn't compete with the actual links. */
 .tree-sep {
   color: var(--mut);
-  font-size: calc(14px * var(--tree-scale, 1));
+  font-size: calc(17px * var(--tree-scale, 1));
   user-select: none;
   margin: 0 2px;
 }
@@ -1225,21 +1240,27 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
   align-items: center;
   gap: 6px;
 }
+/* Stage 11.28: scale the per-row mkdir input + button with the rest
+   of the tree. Previously the font-sizes were hard-coded 13px and
+   stayed pinned regardless of `--tree-scale`, so zooming the tree
+   left "new folder" / "+folder" looking tiny next to everything
+   around them. */
 .tree-inline-mkdir input[type="text"] {
-  font: 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: calc(13px * var(--tree-scale, 1));
   color: var(--fg);
   background: var(--surf2);
   border: 1px solid var(--bord);
   border-radius: 999px;
-  padding: 4px 10px;
-  width: 130px;
+  padding: calc(4px * var(--tree-scale, 1)) calc(10px * var(--tree-scale, 1));
+  width: calc(130px * var(--tree-scale, 1));
   outline: none;
   transition: border-color .12s ease;
 }
 .tree-inline-mkdir input[type="text"]:focus { border-color: var(--accent); }
 .tree-inline-mkdir .link-btn {
-  font-size: 13px;
-  padding: 4px 10px;
+  font-size: calc(13px * var(--tree-scale, 1));
+  padding: calc(4px * var(--tree-scale, 1)) calc(10px * var(--tree-scale, 1));
   border: 1px solid var(--bord);
   border-radius: 999px;
   background: transparent;

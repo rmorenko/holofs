@@ -467,6 +467,28 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
                     if(s)r.style.setProperty('--tree-scale',s);\
                     }catch(e){}})();"
                 }</script>
+                // Stage 11.27: shared expand / collapse helpers used by
+                // the controls bar (global expand-all) and the per-folder
+                // ⊕ / ⊖ buttons. Expand keeps retrying for a beat after
+                // it stops making progress so lazily-mounted children get
+                // picked up — the LazyDirNode toggle handler fires a
+                // fetch on open, the fresh `<details>` only appear once
+                // that fetch resolves and renders, so a single querySelectorAll
+                // sweep would miss them.
+                <script>{
+                    "window.holofsExpandAll=function(root){\
+                    if(!root)return;var tries=8;function step(){\
+                    var any=false;\
+                    if(root.tagName==='DETAILS'&&!root.open){root.open=true;any=true;}\
+                    root.querySelectorAll('details').forEach(function(d){\
+                    if(!d.open){d.open=true;any=true;}});\
+                    if(any){tries=8;setTimeout(step,200);}\
+                    else if(--tries>0){setTimeout(step,200);}\
+                    }step();};\
+                    window.holofsCollapseAll=function(root){if(!root)return;\
+                    if(root.tagName==='DETAILS')root.open=false;\
+                    root.querySelectorAll('details').forEach(function(d){d.open=false;});};"
+                }</script>
                 <HydrationScripts options/>
                 <Stylesheet id="leptos" href="/pkg/holofs.css"/>
                 <Title text="holofs"/>
@@ -924,7 +946,7 @@ fn CatalogTreeLazyShell(initial: ListDirPage, sort: TreeSort) -> impl IntoView {
             <button
                 type="button"
                 class="tree-control-btn tree-control-expand"
-                onclick="document.querySelectorAll('.tree-root details').forEach(d => d.open = true)"
+                onclick="holofsExpandAll(document.querySelector('.tree-root'))"
             >
                 <span class="tree-control-icon">"⊕"</span>
                 <span class="tree-control-label">{t!("tree.expand_all")}</span>
@@ -932,7 +954,7 @@ fn CatalogTreeLazyShell(initial: ListDirPage, sort: TreeSort) -> impl IntoView {
             <button
                 type="button"
                 class="tree-control-btn tree-control-collapse"
-                onclick="document.querySelectorAll('.tree-root details').forEach(d => d.open = false)"
+                onclick="holofsCollapseAll(document.querySelector('.tree-root'))"
             >
                 <span class="tree-control-icon">"⊖"</span>
                 <span class="tree-control-label">{t!("tree.collapse_all")}</span>
@@ -1297,6 +1319,29 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                     </span>
                     <span class="tree-sep">"·"</span>
                     <span class="tree-actions">
+                        // Stage 11.27: per-folder ⊕ / ⊖ buttons.
+                        // `holofsExpandAll(closest details)` opens
+                        // this folder and every descendant — the
+                        // helper retries until lazy fetches settle.
+                        // `stopPropagation` keeps the click from
+                        // toggling the `<details>` itself.
+                        <button
+                            type="button"
+                            class="link-btn tree-action-zoom"
+                            title={t!("tree.expand_subtree")}
+                            onclick="event.stopPropagation();holofsExpandAll(this.closest('details'))"
+                        >
+                            "⊕"
+                        </button>
+                        <button
+                            type="button"
+                            class="link-btn tree-action-zoom"
+                            title={t!("tree.collapse_subtree")}
+                            onclick="event.stopPropagation();holofsCollapseAll(this.closest('details'))"
+                        >
+                            "⊖"
+                        </button>
+                        <span class="tree-sep">"·"</span>
                         <form
                             method="POST"
                             action="/api/mkdir"
@@ -1408,7 +1453,7 @@ fn CatalogTreeBody(entries: Vec<CatalogEntry>, sort: TreeSort) -> impl IntoView 
             <button
                 type="button"
                 class="tree-control-btn tree-control-expand"
-                onclick="document.querySelectorAll('.tree-root details').forEach(d => d.open = true)"
+                onclick="holofsExpandAll(document.querySelector('.tree-root'))"
             >
                 <span class="tree-control-icon">"⊕"</span>
                 <span class="tree-control-label">{t!("tree.expand_all")}</span>
@@ -1416,7 +1461,7 @@ fn CatalogTreeBody(entries: Vec<CatalogEntry>, sort: TreeSort) -> impl IntoView 
             <button
                 type="button"
                 class="tree-control-btn tree-control-collapse"
-                onclick="document.querySelectorAll('.tree-root details').forEach(d => d.open = false)"
+                onclick="holofsCollapseAll(document.querySelector('.tree-root'))"
             >
                 <span class="tree-control-icon">"⊖"</span>
                 <span class="tree-control-label">{t!("tree.collapse_all")}</span>
@@ -1697,6 +1742,28 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                         </span>
                         <span class="tree-sep">"·"</span>
                         <span class="tree-actions">
+                            // Stage 11.27: same per-folder ⊕ / ⊖ as
+                            // the lazy view. Eager mode just lets the
+                            // helper walk an in-DOM tree — no fetch
+                            // retries actually fire because all
+                            // descendants are already rendered.
+                            <button
+                                type="button"
+                                class="link-btn tree-action-zoom"
+                                title={t!("tree.expand_subtree")}
+                                onclick="event.stopPropagation();holofsExpandAll(this.closest('details'))"
+                            >
+                                "⊕"
+                            </button>
+                            <button
+                                type="button"
+                                class="link-btn tree-action-zoom"
+                                title={t!("tree.collapse_subtree")}
+                                onclick="event.stopPropagation();holofsCollapseAll(this.closest('details'))"
+                            >
+                                "⊖"
+                            </button>
+                            <span class="tree-sep">"·"</span>
                             <form
                                 method="POST"
                                 action="/api/mkdir"
