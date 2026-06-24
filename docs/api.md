@@ -10,6 +10,7 @@ Three external interfaces: **HTTP gateway**, **node wire protocol**, and
 3. [On-disk formats](#3-on-disk-formats)
 4. [Response header conventions](#4-response-header-conventions)
 5. [MCP server (Stage 12)](#5-mcp-server-stage-12)
+6. [Wavelet operations (Stage 12.5)](#6-wavelet-operations-stage-125)
 
 ---
 
@@ -491,3 +492,88 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
     "name":"find_similar","arguments":{
       "path":"photos/2026/mandala.png","scope":"folder"}}}'
 ```
+
+---
+
+## 6. Wavelet operations (Stage 12.5)
+
+These two operations take advantage of the fact that holofs stores
+each image/audio object in the wavelet (DWT) domain split across
+`(channel, layer)` shard buckets. Manipulating shards at the layer
+granularity lets us *transform* an object without ever decoding,
+re-encoding, or storing a second copy of the source data.
+
+Both operations are exposed only through MCP today (Stage 12.5) —
+HTTP routes can be added later, but `claude mcp` + curl already cover
+the same use cases.
+
+### 6.1 Wavelet mix
+
+Builds a hybrid image by partitioning DWT layers between two
+compatible source images: layers `0..=split` come from source A,
+layers `>split` come from source B. The same IDWT that decodes a
+normal object runs on the hybrid coefficient plane, so the result is
+a real PNG indistinguishable on the wire from a regular GET.
+
+Compatibility requirements (else `BadRequest`): both objects must be
+`Image` kind, share `width / height / channels / k / nlayers /
+levels`, and have identical per-layer `sym_len` and `layer_positions`
+tables. In practice that means: ingested with the same cluster's
+DWT configuration.
+
+MCP tool — `wavelet_mix`:
+
+| Param      | Type             | Notes |
+|------------|------------------|-------|
+| `a`        | string           | catalog path, owner of layers `0..=split` |
+| `b`        | string           | catalog path, owner of layers `>split` |
+| `split`    | u8               | DWT split. `0` = only L0 from A, rest from B; `nlayers-1` = entirely A |
+| `save_as?` | string           | catalog path to ingest the result at; requires `HOLOFS_MCP_TOKEN`. Omit to get inline bytes. |
+
+Returns `{a, b, split, width, height, channels, bytes_downloaded,
+decode_ms, saved_as, bytes_len, content_type, blob_base64}`.
+`blob_base64` is empty when `save_as` was used.
+
+Visual rule of thumb: low layers carry coarse structure (silhouette,
+shading), high layers carry fine detail (edges, texture). A small
+`split` ⇒ "skeleton of A clothed in B"; a large `split` ⇒ "A with
+B's grain texture only".
+
+### 6.2 Audio layer filter
+
+Renders an audio object with only the listed layers contributing —
+everything else is zero-filled before the inverse Haar. Each layer
+roughly maps to a frequency band (L0 = bass envelope, ascending), so
+the tool gives you single-band cuts and selective EQ without
+rebuilding the file.
+
+MCP tool — `audio_filter`:
+
+| Param          | Type      | Notes |
+|----------------|-----------|-------|
+| `path`         | string    | catalog path, must be `Audio` |
+| `keep_layers`  | `u8[]`    | layer indices to keep (e.g. `[0]` = bass only) |
+| `save_as?`     | string    | catalog path to ingest as new audio; requires token |
+
+Returns `{source, kept_layers, nlayers, sample_rate, channels,
+bytes_downloaded, decode_ms, saved_as, bytes_len, content_type,
+blob_base64}`.
+
+Errors: empty `keep_layers` or all-false mask ⇒ `BadRequest` (the
+output would be silence). Non-audio object ⇒ `BadRequest`.
+
+### 6.3 Why this is interesting
+
+Both operations work *in the frequency domain*, on shards. Compared
+with the obvious approach (download source, decode, transform,
+re-encode):
+
+* **No second copy by default** — the result streams back inline; the
+  source's shards on the cluster are untouched.
+* **Saved hybrids are first-class objects** — when `save_as` is set,
+  the result goes through the normal ingest path (RLNC, dedup, DWT
+  decomposition, manifest), so it gets graceful degradation + similar
+  search + everything else.
+* **Cheap to explore** — the LLM can sweep `split` from 0..nlayers-1
+  to find the most visually interesting hybrid, only paying for the
+  shard fetches needed for each layer.

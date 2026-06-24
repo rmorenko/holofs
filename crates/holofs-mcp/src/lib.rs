@@ -230,6 +230,76 @@ pub struct MoveIn {
     pub to: String,
 }
 
+// ===== wavelet_mix + audio_filter (Stage 12.5) ===========================
+
+/// Input for `wavelet_mix`.
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct WaveletMixIn {
+    /// Catalog path of source A (provides layers `0..=split`).
+    pub a: String,
+    /// Catalog path of source B (provides layers `>split`).
+    pub b: String,
+    /// DWT split layer. `0` ⇒ only L0 comes from A and everything else
+    /// from B (heavy structural transfer); `nlayers-1` ⇒ entirely A.
+    pub split: u8,
+    /// Optional catalog path to ingest the result at. Requires
+    /// `HOLOFS_MCP_TOKEN`; with no token the call falls through and
+    /// just returns the bytes inline.
+    #[serde(default)]
+    pub save_as: Option<String>,
+}
+
+/// Output for `wavelet_mix`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct WaveletMixOut {
+    pub a: String,
+    pub b: String,
+    pub split: u8,
+    pub width: u32,
+    pub height: u32,
+    pub channels: u8,
+    pub bytes_downloaded: u64,
+    pub decode_ms: u64,
+    /// Set when the result was ingested at the requested `save_as`
+    /// path. `None` ⇒ the bytes were returned inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_as: Option<String>,
+    pub bytes_len: u64,
+    pub content_type: String,
+    /// Base64-encoded PNG payload. Empty when `save_as` was used.
+    pub blob_base64: String,
+}
+
+/// Input for `audio_filter`.
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct AudioFilterIn {
+    /// Catalog path of the audio object.
+    pub path: String,
+    /// Layer indices to keep (e.g. `[0]` for bass-only). Other layers
+    /// are zero-filled before the inverse Haar.
+    pub keep_layers: Vec<u8>,
+    #[serde(default)]
+    pub save_as: Option<String>,
+}
+
+/// Output for `audio_filter`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct AudioFilterOut {
+    pub source: String,
+    pub kept_layers: Vec<u8>,
+    pub nlayers: u8,
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub bytes_downloaded: u64,
+    pub decode_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_as: Option<String>,
+    pub bytes_len: u64,
+    pub content_type: String,
+    /// Base64-encoded WAV payload. Empty when `save_as` was used.
+    pub blob_base64: String,
+}
+
 // ===== diff_objects (Stage 12.2) ========================================
 
 /// Input for `diff_objects`.
@@ -766,6 +836,113 @@ impl HolofsHandler {
             note: Some(format!("from {from}")),
         }))
     }
+
+    // ===== Wavelet operations (Stage 12.5) ===============================
+    //
+    // Both tools operate at the shard level, so the work happens
+    // entirely in the frequency domain — no rebuild of the source. By
+    // default they return the result inline as a base64-encoded blob
+    // (good for "preview through Claude"). Setting `save_as` ingests
+    // the bytes back into the catalog as a new object so the result
+    // is durable.
+
+    /// Wavelet mix: blend two images at a DWT split point.
+    #[tool(description = "Combine two compatible images at a DWT split layer. Layers 0..=split \
+                          come from `a`, layers above from `b`. Result is a PNG. Pass \
+                          `save_as` to ingest it as a new catalog object; otherwise the bytes \
+                          are returned base64-encoded.")]
+    pub async fn wavelet_mix(
+        &self,
+        Parameters(WaveletMixIn {
+            a,
+            b,
+            split,
+            save_as,
+        }): Parameters<WaveletMixIn>,
+    ) -> Result<Json<WaveletMixOut>, ErrorData> {
+        let mix = self
+            .gateway
+            .mix_objects(&a, &b, split)
+            .await
+            .map_err(gw_err)?;
+        wrap_artifact_result(
+            self,
+            mix.bytes,
+            "image/png",
+            save_as,
+            |bytes, saved| WaveletMixOut {
+                a: a.clone(),
+                b: b.clone(),
+                split,
+                width: mix.width,
+                height: mix.height,
+                channels: mix.channels,
+                bytes_downloaded: mix.bytes_downloaded,
+                decode_ms: mix.decode_ms as u64,
+                saved_as: saved,
+                bytes_len: bytes.len() as u64,
+                content_type: "image/png".into(),
+                blob_base64: bytes,
+            },
+        )
+        .await
+    }
+
+    /// Audio layer filter: render audio with only the selected layers.
+    #[tool(description = "Render an audio object with only the listed layers contributing — \
+                          everything else is zero-filled before the inverse Haar (selective \
+                          frequency-band cut). L0 is the bass envelope, the highest layer is \
+                          treble. Result is a WAV. Pass `save_as` to ingest as a new catalog \
+                          object.")]
+    pub async fn audio_filter(
+        &self,
+        Parameters(AudioFilterIn {
+            path,
+            keep_layers,
+            save_as,
+        }): Parameters<AudioFilterIn>,
+    ) -> Result<Json<AudioFilterOut>, ErrorData> {
+        if keep_layers.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "keep_layers is empty — would yield silence",
+                None,
+            ));
+        }
+        // Build the boolean mask. Highest layer index in `keep_layers`
+        // sets the mask size; anything beyond that defaults to false.
+        let max_layer = keep_layers.iter().copied().max().unwrap_or(0);
+        let mut keep = vec![false; usize::from(max_layer) + 1];
+        for l in &keep_layers {
+            if let Some(slot) = keep.get_mut(usize::from(*l)) {
+                *slot = true;
+            }
+        }
+        let out = self
+            .gateway
+            .filter_audio(&path, &keep)
+            .await
+            .map_err(gw_err)?;
+        wrap_artifact_result(
+            self,
+            out.bytes,
+            "audio/wav",
+            save_as,
+            |bytes, saved| AudioFilterOut {
+                source: path.clone(),
+                kept_layers: out.kept_layers.clone(),
+                nlayers: out.nlayers,
+                sample_rate: out.sample_rate,
+                channels: out.channels,
+                bytes_downloaded: out.bytes_downloaded,
+                decode_ms: out.decode_ms as u64,
+                saved_as: saved,
+                bytes_len: bytes.len() as u64,
+                content_type: "audio/wav".into(),
+                blob_base64: bytes,
+            },
+        )
+        .await
+    }
 }
 
 // ===== ServerHandler ======================================================
@@ -798,6 +975,9 @@ impl ServerHandler for HolofsHandler {
              Read tools: list_catalog, read_object_text, find_similar, \
              get_cluster_health, get_object_health, diff_objects, \
              inspect_object, inspect_shard.\n\
+             Transform tools (return bytes inline or save to catalog via \
+             save_as; writes gated by HOLOFS_MCP_TOKEN): wavelet_mix, \
+             audio_filter.\n\
              Write tools (gated by HOLOFS_MCP_TOKEN): put_object_text, mkdir, \
              rmdir, mv_object.\n\
              Resources: every catalog entry at `holofs:///<path>` (text → \
@@ -982,6 +1162,43 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+/// Stage 12.5: shared "either return bytes inline as base64, or
+/// ingest them to the catalog under `save_as`" helper used by
+/// `wavelet_mix` / `audio_filter`. When `save_as` is set:
+///   * if writes are enabled and the ingest succeeds → `saved_as` is
+///     populated, `blob_base64` is empty
+///   * if writes are disabled → caller gets `invalid_request` so they
+///     know they need a token
+/// When `save_as` is `None` → bytes go back base64-encoded with the
+/// matching `content_type`. The closure receives `(bytes_b64, saved)`
+/// and builds the typed output struct.
+async fn wrap_artifact_result<T, F>(
+    h: &HolofsHandler,
+    bytes: Vec<u8>,
+    _content_type: &str,
+    save_as: Option<String>,
+    build: F,
+) -> Result<Json<T>, ErrorData>
+where
+    T: Serialize + schemars::JsonSchema + 'static,
+    F: FnOnce(String, Option<String>) -> T,
+{
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    if let Some(dest) = save_as {
+        h.require_writes()?;
+        let res = h
+            .gateway
+            .ingest_bytes(&dest, &bytes)
+            .await
+            .map_err(gw_err)?;
+        // Return an empty blob — the durable copy is the catalog entry.
+        Ok(Json(build(String::new(), Some(res.name))))
+    } else {
+        let b64 = STANDARD.encode(&bytes);
+        Ok(Json(build(b64, None)))
+    }
 }
 
 fn gw_err(e: holofs_gateway::GatewayError) -> ErrorData {

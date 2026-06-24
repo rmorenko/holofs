@@ -26,6 +26,10 @@ pub enum ClientError {
     Io(io::Error),
     Protocol(String),
     LayerLost { channel: u8, layer: u8 },
+    /// Two manifests handed to a mix/blend operation don't agree on
+    /// the fields the DWT-aware decoder needs to interleave their
+    /// shards (dimensions, channel count, layer count, k, etc.).
+    Incompatible(String),
 }
 
 impl From<io::Error> for ClientError {
@@ -41,6 +45,7 @@ impl std::fmt::Display for ClientError {
             ClientError::LayerLost { channel, layer } => {
                 write!(f, "layer (c={channel}, l={layer}) is not decodable")
             }
+            ClientError::Incompatible(s) => write!(f, "incompatible manifests: {s}"),
         }
     }
 }
@@ -179,6 +184,86 @@ pub async fn get_object_up_to_layer(
                 layer: l as u8,
             })?;
             for (idx, &p) in manifest.layer_positions[l].iter().enumerate() {
+                let off = idx * 4;
+                let arr = [bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]];
+                plane[p as usize] = f32::from_le_bytes(arr);
+            }
+        }
+        haar_inverse(&mut plane, w, h, levels);
+        out[c] = plane;
+    }
+    Ok((out, bytes_used))
+}
+
+/// Stage 12.5: wavelet mix. For each `(channel, layer)`, pull shards from
+/// manifest `a` when `layer <= split`, from manifest `b` otherwise. The
+/// IDWT runs on the hybrid coefficient plane so structure (low layers)
+/// comes from one source and detail (high layers) from the other.
+///
+/// Both manifests must agree on the fields the decoder interleaves
+/// (`width`, `height`, `channels`, `nlayers`, `levels`, `k`, plus the
+/// per-layer `sym_len` and `layer_positions`). Mismatch returns
+/// `ClientError::Incompatible` without touching the network.
+pub async fn mix_images_at_split(
+    gf: &Gf,
+    a: &Manifest,
+    b: &Manifest,
+    live: &LiveNodes,
+    split: u8,
+) -> Result<(Vec<Vec<f32>>, u64), ClientError> {
+    if a.width != b.width
+        || a.height != b.height
+        || a.channels != b.channels
+        || a.nlayers != b.nlayers
+        || a.levels != b.levels
+        || a.k != b.k
+    {
+        return Err(ClientError::Incompatible(format!(
+            "shape mismatch: a={}×{} ch={} layers={} levels={} k={}, \
+             b={}×{} ch={} layers={} levels={} k={}",
+            a.width, a.height, a.channels, a.nlayers, a.levels, a.k,
+            b.width, b.height, b.channels, b.nlayers, b.levels, b.k,
+        )));
+    }
+    if a.sym_len != b.sym_len {
+        return Err(ClientError::Incompatible(
+            "per-layer sym_len differs between manifests".into(),
+        ));
+    }
+    if a.layer_positions != b.layer_positions {
+        return Err(ClientError::Incompatible(
+            "per-layer position maps differ between manifests".into(),
+        ));
+    }
+
+    let w = a.width as usize;
+    let h = a.height as usize;
+    let levels = a.levels as usize;
+    let nlayers = a.nlayers as usize;
+    let mut out = vec![vec![0f32; w * h]; a.channels as usize];
+    let mut bytes_used: u64 = 0;
+
+    for c in 0..a.channels as usize {
+        let mut plane = vec![0f32; w * h];
+        for l in 0..nlayers {
+            // Which source owns this layer? Layers `0..=split` from `a`,
+            // strictly higher from `b`. Each layer's hashes / nodes /
+            // sym_len are taken from the chosen manifest.
+            let from = if (l as u8) <= split { a } else { b };
+            let raw = gather_layer(from, live, c as u8, l as u8).await?;
+            let expected: HashSet<Hash> = from.shard_hashes[c][l].iter().copied().collect();
+            let verified: Vec<Shard> = raw
+                .into_iter()
+                .filter(|s| expected.contains(&shard_hash(s)))
+                .collect();
+            let sl = from.sym_len[l] as usize;
+            bytes_used += verified.len() as u64 * (from.k as u64 + sl as u64);
+            let refs: Vec<&Shard> = verified.iter().collect();
+            let bytes = decode_layer(gf, &refs, sl).ok_or(ClientError::LayerLost {
+                channel: c as u8,
+                layer: l as u8,
+            })?;
+            for (idx, &p) in from.layer_positions[l].iter().enumerate() {
                 let off = idx * 4;
                 let arr = [bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]];
                 plane[p as usize] = f32::from_le_bytes(arr);
@@ -448,6 +533,60 @@ pub async fn get_audio_object_up_to_layer(
         let mut plane = vec![0f32; n_samples];
         for l in 0..nlayers {
             if (l as u8) > max_layer {
+                continue;
+            }
+            let raw = gather_layer(manifest, live, c as u8, l as u8).await?;
+            let expected: HashSet<Hash> = manifest.shard_hashes[c][l].iter().copied().collect();
+            let verified: Vec<Shard> = raw
+                .into_iter()
+                .filter(|s| expected.contains(&shard_hash(s)))
+                .collect();
+            let sl = manifest.sym_len[l] as usize;
+            bytes_used += verified.len() as u64 * (manifest.k as u64 + sl as u64);
+            let refs: Vec<&Shard> = verified.iter().collect();
+            let bytes = decode_layer(gf, &refs, sl).ok_or(ClientError::LayerLost {
+                channel: c as u8,
+                layer: l as u8,
+            })?;
+            for (idx, &p) in manifest.layer_positions[l].iter().enumerate() {
+                let off = idx * 4;
+                let arr = [bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]];
+                plane[p as usize] = f32::from_le_bytes(arr);
+            }
+        }
+        haar_inverse_1d(&mut plane, levels);
+        out[c] = plane;
+    }
+    Ok((out, bytes_used))
+}
+
+/// Stage 12.5: audio layer filtering. Decode an audio object but only
+/// place coefficients from layers where `keep[layer] == true` —
+/// dropped layers contribute zero before the inverse Haar. Each layer
+/// roughly maps to a frequency band (L0 = bass envelope, ascending),
+/// so `keep=[true,false,...]` is a low-pass / "underwater" filter,
+/// `keep=[false,...,true]` keeps only highs, etc.
+pub async fn get_audio_filtered(
+    gf: &Gf,
+    manifest: &Manifest,
+    live: &LiveNodes,
+    keep: &[bool],
+) -> Result<(Vec<Vec<f32>>, u64), ClientError> {
+    use holofs_model::manifest::ObjectKind;
+    assert_eq!(manifest.kind, ObjectKind::Audio);
+    let levels = manifest.levels as usize;
+    let nlayers = manifest.nlayers as usize;
+    let n_samples = manifest.width as usize;
+    let mut out = vec![vec![0f32; n_samples]; manifest.channels as usize];
+    let mut bytes_used: u64 = 0;
+
+    for c in 0..manifest.channels as usize {
+        let mut plane = vec![0f32; n_samples];
+        for l in 0..nlayers {
+            // Layer outside the keep mask: skip the fetch entirely
+            // and leave its coefficients at zero in the plane.
+            let kept = keep.get(l).copied().unwrap_or(false);
+            if !kept {
                 continue;
             }
             let raw = gather_layer(manifest, live, c as u8, l as u8).await?;

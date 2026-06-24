@@ -10,6 +10,7 @@ Tres interfaces externas: **gateway HTTP**, **protocolo de cable del node** y
 3. [Formatos en disco](#3-on-disk-formats)
 4. [Convenciones de cabeceras de respuesta](#4-response-header-conventions)
 5. [Servidor MCP (Etapa 12)](#5-servidor-mcp-etapa-12)
+6. [Operaciones wavelet (Etapa 12.5)](#6-operaciones-wavelet-etapa-125)
 
 ---
 
@@ -484,3 +485,88 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
     "name":"find_similar","arguments":{
       "path":"photos/2026/mandala.png","scope":"folder"}}}'
 ```
+
+---
+
+## 6. Operaciones wavelet (Etapa 12.5)
+
+Estas dos operaciones aprovechan que holofs almacena cada objeto
+imagen/audio en el dominio wavelet (DWT), distribuido entre cubos de
+shards `(channel, layer)`. Manipular shards a granularidad de layer
+permite *transformar* un objeto sin decodificarlo, re-codificarlo ni
+guardar una segunda copia.
+
+En la etapa 12.5 ambas operaciones están expuestas solo por MCP —
+las rutas HTTP pueden añadirse luego, pero `claude mcp` + curl ya
+cubren los mismos usos.
+
+### 6.1 Mezcla wavelet
+
+Construye un PNG híbrido partiendo las capas DWT entre dos imágenes
+compatibles: las capas `0..=split` vienen de la fuente A, las capas
+`>split` de B. El mismo IDWT que decodifica un objeto normal corre
+sobre el plano de coeficientes híbrido — el resultado es un PNG real
+indistinguible en la red de un GET ordinario.
+
+Requisitos de compatibilidad (si no, `BadRequest`): ambos objetos
+deben ser `Image`, compartir `width / height / channels / k /
+nlayers / levels` y los `sym_len` / `layer_positions` por capa
+idénticos. En la práctica: ingestados con la misma configuración DWT
+del clúster.
+
+Herramienta MCP `wavelet_mix`:
+
+| Parámetro  | Tipo      | Notas |
+|------------|-----------|-------|
+| `a`        | string    | ruta de catálogo, aporta capas `0..=split` |
+| `b`        | string    | ruta de catálogo, aporta capas `>split` |
+| `split`    | u8        | split DWT. `0` ⇒ solo L0 de A, resto de B; `nlayers-1` ⇒ enteramente A |
+| `save_as?` | string    | ruta para ingestar el resultado; requiere `HOLOFS_MCP_TOKEN`. Sin ello, los bytes vuelven inline. |
+
+Devuelve `{a, b, split, width, height, channels, bytes_downloaded,
+decode_ms, saved_as, bytes_len, content_type, blob_base64}`.
+`blob_base64` queda vacío cuando se usó `save_as`.
+
+Regla visual: las capas bajas llevan estructura gruesa (silueta,
+tonos), las altas los detalles finos (bordes, textura). `split`
+pequeño ⇒ "esqueleto de A vestido de B"; grande ⇒ "A con la
+textura/grano de B".
+
+### 6.2 Filtro por capa de audio
+
+Renderiza un objeto audio dejando contribuir solo las capas
+listadas — el resto se llena con ceros antes del Haar inverso. Cada
+capa corresponde grosso modo a una banda de frecuencia (L0 =
+envolvente de bajos, ascendiendo), así que la herramienta produce
+cortes por banda y EQ selectivo sin reconstruir el archivo.
+
+Herramienta MCP `audio_filter`:
+
+| Parámetro      | Tipo      | Notas |
+|----------------|-----------|-------|
+| `path`         | string    | ruta de catálogo, debe ser `Audio` |
+| `keep_layers`  | `u8[]`    | índices a conservar (p. ej. `[0]` = solo graves) |
+| `save_as?`     | string    | ruta para guardar como nuevo audio; requiere token |
+
+Devuelve `{source, kept_layers, nlayers, sample_rate, channels,
+bytes_downloaded, decode_ms, saved_as, bytes_len, content_type,
+blob_base64}`.
+
+Errores: `keep_layers` vacío o máscara toda `false` ⇒ `BadRequest`
+(el resultado sería silencio). Objeto no audio ⇒ `BadRequest`.
+
+### 6.3 Por qué es interesante
+
+Ambas operaciones trabajan *en el dominio frecuencial*, sobre los
+shards. Comparado con el enfoque obvio (descargar la fuente,
+decodificar, transformar, re-codificar):
+
+* **Sin segunda copia por defecto** — el resultado vuelve inline;
+  los shards de la fuente en el clúster no se tocan.
+* **Los híbridos guardados son objetos de pleno derecho** — con
+  `save_as` el resultado pasa por el ingest normal (RLNC, dedup,
+  DWT, manifiesto), así que también obtiene degradación grácil,
+  similar search, etc.
+* **Exploración barata** — el LLM puede recorrer `split` de
+  0..nlayers-1 buscando el híbrido visualmente más interesante,
+  pagando solo los shard-fetches necesarios por capa.

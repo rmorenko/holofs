@@ -10,6 +10,7 @@ Trois interfaces externes : **gateway HTTP**, **protocole filaire du node**, et
 3. [Formats sur disque](#3-on-disk-formats)
 4. [Conventions d'en-têtes de réponse](#4-response-header-conventions)
 5. [Serveur MCP (Étape 12)](#5-serveur-mcp-etape-12)
+6. [Opérations wavelet (Étape 12.5)](#6-operations-wavelet-etape-125)
 
 ---
 
@@ -484,3 +485,89 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
     "name":"find_similar","arguments":{
       "path":"photos/2026/mandala.png","scope":"folder"}}}'
 ```
+
+---
+
+## 6. Opérations wavelet (Étape 12.5)
+
+Ces deux opérations exploitent le fait que holofs stocke chaque image
+et chaque objet audio dans le domaine wavelet (DWT), réparti entre
+des seaux de shards `(channel, layer)`. Manipuler les shards à la
+granularité d'un layer permet de *transformer* un objet sans le
+décoder, sans le ré-encoder, sans stocker une seconde copie.
+
+À l'étape 12.5 ces deux opérations ne sont accessibles que via MCP —
+des routes HTTP peuvent être ajoutées plus tard, mais `claude mcp` +
+curl couvrent déjà les mêmes cas.
+
+### 6.1 Mix wavelet
+
+Construit un PNG hybride en partitionnant les layers DWT entre deux
+images sources compatibles : les layers `0..=split` viennent de A,
+les layers `>split` de B. Le même IDWT qui décode un objet normal
+tourne sur le plan de coefficients hybride — le résultat est un vrai
+PNG indistinguable d'un GET ordinaire sur le réseau.
+
+Conditions de compatibilité (sinon `BadRequest`) : les deux objets
+doivent être `Image`, partager `width / height / channels / k /
+nlayers / levels` et avoir les mêmes `sym_len` / `layer_positions`
+par layer. En pratique : ingéré avec la même configuration DWT du
+cluster.
+
+Outil MCP `wavelet_mix` :
+
+| Param      | Type       | Notes |
+|------------|------------|-------|
+| `a`        | string     | chemin catalogue, fournit les layers `0..=split` |
+| `b`        | string     | chemin catalogue, fournit les layers `>split` |
+| `split`    | u8         | split DWT. `0` ⇒ seul L0 vient de A, le reste de B ; `nlayers-1` ⇒ entièrement A |
+| `save_as?` | string     | chemin pour ingérer le résultat ; nécessite `HOLOFS_MCP_TOKEN`. Sans ce paramètre, les bytes reviennent inline. |
+
+Retourne `{a, b, split, width, height, channels, bytes_downloaded,
+decode_ms, saved_as, bytes_len, content_type, blob_base64}`.
+`blob_base64` est vide quand `save_as` a été utilisé.
+
+Règle visuelle : les layers bas portent la structure grossière
+(silhouette, tons), les layers hauts les détails fins (bords,
+texture). Petit `split` ⇒ « squelette de A habillé en B » ; grand
+`split` ⇒ « A avec la texture/grain de B ».
+
+### 6.2 Filtre par layer audio
+
+Rend un objet audio en ne laissant contribuer que les layers
+listés — tout le reste est mis à zéro avant le Haar inverse. Chaque
+layer correspond grossièrement à une bande de fréquence (L0 =
+enveloppe basse, en montant), donc l'outil produit des coupures par
+bande et un EQ sélectif sans reconstruire le fichier.
+
+Outil MCP `audio_filter` :
+
+| Param          | Type       | Notes |
+|----------------|------------|-------|
+| `path`         | string     | chemin catalogue, doit être `Audio` |
+| `keep_layers`  | `u8[]`     | indices à conserver (ex. `[0]` = basses seules) |
+| `save_as?`     | string     | chemin pour stocker comme nouvel audio ; nécessite token |
+
+Retourne `{source, kept_layers, nlayers, sample_rate, channels,
+bytes_downloaded, decode_ms, saved_as, bytes_len, content_type,
+blob_base64}`.
+
+Erreurs : `keep_layers` vide ou masque entièrement à `false` ⇒
+`BadRequest` (le résultat serait du silence). Objet non audio ⇒
+`BadRequest`.
+
+### 6.3 Pourquoi c'est intéressant
+
+Les deux opérations travaillent *dans le domaine fréquentiel*, sur
+les shards. Comparé à l'approche évidente (télécharger la source,
+décoder, transformer, ré-encoder) :
+
+* **Pas de copie par défaut** — le résultat revient inline ; les
+  shards de la source dans le cluster ne sont pas touchés.
+* **Les hybrides sauvegardés sont des objets de plein droit** —
+  avec `save_as`, le résultat passe par l'ingest normal (RLNC, dédup,
+  DWT, manifest), donc il bénéficie de la dégradation gracieuse, du
+  similar search, etc.
+* **Exploration peu coûteuse** — le LLM peut balayer `split` de
+  0..nlayers-1 pour trouver l'hybride le plus intéressant, en payant
+  seulement les shard-fetches nécessaires par layer.

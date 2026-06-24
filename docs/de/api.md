@@ -10,6 +10,7 @@ Drei externe Schnittstellen: **HTTP-gateway**, **node-Wire-Protokoll** und
 3. [On-Disk-Formate](#3-on-disk-formats)
 4. [Konventionen der Antwortheader](#4-response-header-conventions)
 5. [MCP-Server (Stage 12)](#5-mcp-server-stage-12)
+6. [Wavelet-Operationen (Stage 12.5)](#6-wavelet-operationen-stage-125)
 
 ---
 
@@ -487,3 +488,89 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
     "name":"find_similar","arguments":{
       "path":"photos/2026/mandala.png","scope":"folder"}}}'
 ```
+
+---
+
+## 6. Wavelet-Operationen (Stage 12.5)
+
+Diese beiden Operationen nutzen aus, dass holofs jedes Bild- und
+Audio-Objekt im Wavelet- (DWT-) Bereich speichert, aufgeteilt nach
+`(channel, layer)`-Shard-Buckets. Auf Layer-Granularität an den Shards
+zu drehen erlaubt es, ein Objekt zu *transformieren*, ohne zu
+dekodieren, neu zu kodieren oder eine zweite Kopie der Quelldaten
+abzulegen.
+
+Beide Operationen sind in Stage 12.5 nur über MCP zugänglich — HTTP-
+Routen lassen sich später nachreichen, aber `claude mcp` + curl decken
+dieselben Anwendungsfälle ab.
+
+### 6.1 Wavelet-Mischung
+
+Baut ein hybrides PNG, indem DWT-Layer zwischen zwei kompatiblen
+Quellbildern aufgeteilt werden: Layer `0..=split` aus Quelle A,
+Layer `>split` aus Quelle B. Derselbe IDWT, der ein normales Objekt
+dekodiert, läuft auf dem hybriden Koeffizienten-Plane — das Ergebnis
+ist ein echtes PNG, übers Netz nicht von einem regulären GET zu
+unterscheiden.
+
+Kompatibilitätsanforderungen (sonst `BadRequest`): beide Objekte
+müssen vom Typ `Image` sein und sich `width / height / channels / k
+/ nlayers / levels` sowie die per-Layer `sym_len` und
+`layer_positions` teilen. Praktisch: mit der gleichen DWT-Konfiguration
+des Clusters eingespeist.
+
+MCP-Tool `wavelet_mix`:
+
+| Parameter  | Typ        | Hinweise |
+|------------|------------|----------|
+| `a`        | string     | Katalogpfad, liefert Layer `0..=split` |
+| `b`        | string     | Katalogpfad, liefert Layer `>split` |
+| `split`    | u8         | DWT-Split. `0` ⇒ nur L0 aus A, Rest aus B; `nlayers-1` ⇒ komplett A |
+| `save_as?` | string     | Katalogpfad zum Speichern des Resultats; benötigt `HOLOFS_MCP_TOKEN`. Weglassen ⇒ Bytes kommen inline zurück. |
+
+Liefert `{a, b, split, width, height, channels, bytes_downloaded,
+decode_ms, saved_as, bytes_len, content_type, blob_base64}`.
+`blob_base64` ist leer, wenn `save_as` genutzt wurde.
+
+Visuelle Faustregel: tiefe Layer tragen grobe Struktur (Silhouette,
+Tonwerte), hohe Layer die feinen Details (Kanten, Textur). Kleiner
+`split` ⇒ „Skelett von A in der Haut von B"; großer `split` ⇒ „A mit
+Textur/Korn aus B".
+
+### 6.2 Audio-Layer-Filter
+
+Rendert ein Audio-Objekt so, dass nur die aufgeführten Layer
+beitragen — alles andere wird vor dem inversen Haar mit Nullen
+gefüllt. Jeder Layer entspricht grob einem Frequenzband (L0 = Bass-
+Hüllkurve, aufsteigend), daher liefert das Tool Single-Band-Cuts und
+selektives EQ ohne die Datei neu aufzubauen.
+
+MCP-Tool `audio_filter`:
+
+| Parameter      | Typ       | Hinweise |
+|----------------|-----------|----------|
+| `path`         | string    | Katalogpfad, muss `Audio` sein |
+| `keep_layers`  | `u8[]`    | Layer-Indizes (z. B. `[0]` = nur Bass) |
+| `save_as?`     | string    | Katalogpfad als neues Audio; benötigt Token |
+
+Liefert `{source, kept_layers, nlayers, sample_rate, channels,
+bytes_downloaded, decode_ms, saved_as, bytes_len, content_type,
+blob_base64}`.
+
+Fehler: leeres `keep_layers` oder vollständig `false` ⇒ `BadRequest`
+(Ergebnis wäre Stille). Nicht-Audio-Objekt ⇒ `BadRequest`.
+
+### 6.3 Warum das interessant ist
+
+Beide Operationen arbeiten *im Frequenzbereich*, auf Shards. Im
+Vergleich zum naheliegenden Weg (Quelle herunterladen, dekodieren,
+transformieren, neu kodieren):
+
+* **Standardmäßig keine zweite Kopie** — das Ergebnis kommt inline
+  zurück; die Shards der Quelle im Cluster bleiben unberührt.
+* **Gespeicherte Hybride sind vollwertige Objekte** — mit `save_as`
+  geht das Resultat durch den üblichen Ingest-Pfad (RLNC, Dedup, DWT,
+  Manifest), also auch mit Graceful Degradation, Similar Search usw.
+* **Billiger Explorer** — das LLM kann `split` von 0..nlayers-1
+  durchprobieren, um den visuell spannendsten Hybriden zu finden, und
+  bezahlt nur die Shard-Fetches pro Layer.

@@ -753,6 +753,93 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
 
 ---
 
+## 17. Wavelet-операции (Stage 12.5)
+
+Обе операции работают через тот же MCP-эндпоинт (`/mcp`) — оставайся
+в той же сессии что и в §16.4. Перед стартом кластера задай
+`HOLOFS_MCP_TOKEN` чтобы заработал `save_as`.
+
+### 17.1 Wavelet mix
+
+Построить гибридный PNG из двух совместимых изображений и сохранить
+в каталог как `hybrid.png`:
+
+```sh
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{
+    "name":"wavelet_mix","arguments":{
+      "a":"photo.png","b":"photo_gray.png","split":2,
+      "save_as":"hybrid.png"}}}' \
+  | grep -oE '"saved_as":"[^"]*"|"width":[0-9]+|"height":[0-9]+'
+
+# Скачать гибрид — обычный PNG.
+curl -s -o /tmp/hybrid.png 'http://127.0.0.1:8787/hybrid.png'
+file /tmp/hybrid.png
+```
+
+`file /tmp/hybrid.png` должен показать настоящий PNG с ожидаемыми
+размерами.
+
+Ошибки совместимости — несовпадение формы / k / per-layer параметров
+дают `BadRequest`:
+
+```sh
+# Смешать image с text → BadRequest от проверки kind.
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{
+    "name":"wavelet_mix","arguments":{
+      "a":"photo.png","b":"check.txt","split":0}}}' \
+  | grep -oE '"message":"[^"]*"' | head -1
+```
+
+### 17.2 Audio layer filter
+
+Отрендерить аудио с одной только басовой компонентой (L0) и
+сохранить как новую запись каталога:
+
+```sh
+# Предполагает что какой-то `track.wav` уже загружен.
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{
+    "name":"audio_filter","arguments":{
+      "path":"track.wav","keep_layers":[0],
+      "save_as":"track_bass_only.wav"}}}' \
+  | grep -oE '"saved_as":"[^"]*"|"kept_layers":\[[^]]*\]'
+```
+
+`keep_layers:[]` или маска со всеми false → `BadRequest` (выход был
+бы тишиной).
+
+### 17.3 Inline-режим "без копии"
+
+Опусти `save_as` чтобы получить байты обратно как base64-блоб —
+удобно когда хочешь чтобы LLM посмотрел на результат, не оставляя
+артефактов в каталоге:
+
+```sh
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{
+    "name":"wavelet_mix","arguments":{
+      "a":"photo.png","b":"photo_blurry.png","split":1}}}' \
+  | grep -oE '"bytes_len":[0-9]+|"saved_as":"[^"]*"' | head -2
+```
+
+`bytes_len` показывает размер PNG; `saved_as` должно отсутствовать.
+
+---
+
 ## Завершение
 
 Чистый стоп:

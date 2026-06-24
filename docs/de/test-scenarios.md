@@ -774,6 +774,93 @@ Einbindung in Claude Code — siehe [api.md §5](./api.md#5-mcp-server-stage-12)
 
 ---
 
+## 17. Wavelet-Operationen (Stage 12.5)
+
+Beide Operationen laufen über denselben MCP-Endpoint (`/mcp`) — die
+Session aus §16.4 weiter nutzen. Vor dem Cluster-Start `HOLOFS_MCP_TOKEN`
+setzen, damit `save_as` arbeitet.
+
+### 17.1 Wavelet-Mischung
+
+Hybrides PNG aus zwei kompatiblen Bildern bauen und als `hybrid.png`
+in den Katalog speichern:
+
+```sh
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{
+    "name":"wavelet_mix","arguments":{
+      "a":"photo.png","b":"photo_gray.png","split":2,
+      "save_as":"hybrid.png"}}}' \
+  | grep -oE '"saved_as":"[^"]*"|"width":[0-9]+|"height":[0-9]+'
+
+# Hybrid herunterladen — sollte ein echtes PNG sein.
+curl -s -o /tmp/hybrid.png 'http://127.0.0.1:8787/hybrid.png'
+file /tmp/hybrid.png
+```
+
+`file /tmp/hybrid.png` sollte ein echtes PNG mit den erwarteten Maßen
+melden.
+
+Kompatibilitätsfehler — abweichende Form / k / per-Layer-Parameter
+liefern `BadRequest`:
+
+```sh
+# Bild + Text mischen → BadRequest aus dem Kind-Check.
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{
+    "name":"wavelet_mix","arguments":{
+      "a":"photo.png","b":"check.txt","split":0}}}' \
+  | grep -oE '"message":"[^"]*"' | head -1
+```
+
+### 17.2 Audio-Layer-Filter
+
+Audio nur mit Bass (L0) rendern und als neuen Katalogeintrag
+speichern:
+
+```sh
+# Voraussetzung: ein `track.wav` wurde vorher eingespeist.
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{
+    "name":"audio_filter","arguments":{
+      "path":"track.wav","keep_layers":[0],
+      "save_as":"track_bass_only.wav"}}}' \
+  | grep -oE '"saved_as":"[^"]*"|"kept_layers":\[[^]]*\]'
+```
+
+`keep_layers:[]` oder eine durchgehend-false-Maske → `BadRequest`
+(Ergebnis wäre Stille).
+
+### 17.3 Inline-Modus "ohne Kopie"
+
+`save_as` weglassen, um die Bytes als base64-Blob inline zu erhalten —
+praktisch, wenn das LLM nur einen Blick auf das Ergebnis werfen soll,
+ohne ein Katalog-Artefakt zu hinterlassen:
+
+```sh
+curl -s -X POST http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{
+    "name":"wavelet_mix","arguments":{
+      "a":"photo.png","b":"photo_blurry.png","split":1}}}' \
+  | grep -oE '"bytes_len":[0-9]+|"saved_as":"[^"]*"' | head -2
+```
+
+`bytes_len` zeigt die PNG-Größe; `saved_as` sollte fehlen.
+
+---
+
 ## Abschluss
 
 Sauberes Stoppen:
