@@ -123,6 +123,12 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("catalog.back_to_tree",
         ["back to tree", "к дереву", "zurück zur Baumansicht",
          "retour à l'arbre", "volver al árbol"]),
+    // Stage 11.21 / 11.22 — lazy tree
+    ("tree.load_more",
+        ["load more", "загрузить ещё", "mehr laden",
+         "charger plus", "cargar más"]),
+    ("tree.empty_folder",
+        ["(empty)", "(пусто)", "(leer)", "(vide)", "(vacío)"]),
     ("tree.expand_all",
         ["expand all", "раскрыть всё", "alle öffnen",
          "tout déplier", "expandir todo"]),

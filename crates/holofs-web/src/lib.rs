@@ -132,6 +132,94 @@ pub async fn list_dir(
     Ok(out)
 }
 
+/// Stage 11.21 / 11.22: a single page of a directory listing. `entries`
+/// is `[offset..offset+limit]` slice of the children, sorted with the
+/// same key the rest of the tree view uses (dirs first, then by
+/// `TreeSort`). `has_more` is `true` when there are more entries past
+/// the slice; the client uses it to decide whether to render a
+/// load-more sentinel.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ListDirPage {
+    pub entries: Vec<CatalogEntry>,
+    pub has_more: bool,
+    /// Total number of children in the directory (across all pages),
+    /// for "1234 entries" counters in the UI.
+    pub total: u32,
+}
+
+/// `GET /api/list_dir_page?prefix=&offset=&limit=&sort=` — paginated
+/// children for the lazy tree view (Stage 11.21 / 11.22). Distinct
+/// from [`list_dir`] which returns the whole directory at once for the
+/// focus view — when filters are active the lazy tree falls back to
+/// the eager `get_catalog` path so prefix-less pagination would
+/// duplicate work.
+#[server(
+    name = ListDirPageFn,
+    prefix = "/api",
+    endpoint = "list_dir_page",
+)]
+pub async fn list_dir_page(
+    prefix: String,
+    offset: u32,
+    limit: u32,
+    sort: String,
+) -> Result<ListDirPage, ServerFnError> {
+    use std::sync::Arc;
+
+    let gw = expect_context::<Arc<holofs_gateway::Gateway>>();
+    let children = gw
+        .list_dir(&prefix)
+        .await
+        .map_err(|e| ServerFnError::<server_fn::error::NoCustomError>::ServerError(e.to_string()))?;
+    let mut all: Vec<CatalogEntry> = children
+        .into_iter()
+        .map(|(name, m)| CatalogEntry::from_manifest(&name, &m))
+        .collect();
+    // Directories always group first; inside each group, apply the
+    // user-selected sort (matches the eager tree's behaviour).
+    let sort_key = TreeSort::from_param(&sort);
+    all.sort_by(|a, b| {
+        let a_dir = a.kind == "directory";
+        let b_dir = b.kind == "directory";
+        b_dir
+            .cmp(&a_dir)
+            .then_with(|| compare_entries(a, b, sort_key))
+    });
+    let total = all.len() as u32;
+    let off = offset.min(total) as usize;
+    let lim = limit.max(1) as usize;
+    let slice: Vec<CatalogEntry> = all.into_iter().skip(off).take(lim).collect();
+    let has_more = (off + slice.len()) < total as usize;
+    Ok(ListDirPage {
+        entries: slice,
+        has_more,
+        total,
+    })
+}
+
+/// Comparator for catalog entries within a (directory or file) group.
+/// Centralised so [`list_dir_page`] and the eager [`build_tree`] use
+/// the same orderings for each `TreeSort`.
+#[cfg(feature = "ssr")]
+fn compare_entries(a: &CatalogEntry, b: &CatalogEntry, sort: TreeSort) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match sort {
+        TreeSort::Name => a.name.cmp(&b.name),
+        TreeSort::Size => b.n_shards.cmp(&a.n_shards).then(a.name.cmp(&b.name)),
+        TreeSort::Kind => a.kind.cmp(&b.kind).then(a.name.cmp(&b.name)),
+        TreeSort::Date => {
+            // Newest first; zero (legacy / unknown) sinks to the bottom.
+            let ord = match (a.created_at_unix, b.created_at_unix) {
+                (0, 0) => Ordering::Equal,
+                (0, _) => Ordering::Greater,
+                (_, 0) => Ordering::Less,
+                (x, y) => y.cmp(&x),
+            };
+            ord.then(a.name.cmp(&b.name))
+        }
+    }
+}
+
 /// Server-side filter shared by `get_catalog` + `list_dir`. Built from
 /// three URL params: `q` (name glob with `*`), `from` and `to` (date
 /// range, `YYYY-MM-DD`).
@@ -630,12 +718,18 @@ impl TreeSort {
     }
 }
 
-/// Full-catalog tree view. Fetches every entry, groups by parent path,
-/// and emits a nested `<details>` / `<summary>` tree. The native
-/// browser element handles expand / collapse — no JS, no hydration
-/// dance, no client state. Each folder summary shows the child count
-/// and an `[open]` link back to the focus view for create / manage
-/// actions. Sort key comes from `?sort=name|size|kind`.
+/// Full-catalog tree view. Two paths share this component:
+///
+/// - **Filter active** (`?q=*` / `?from=*` / `?to=*`): eager —
+///   `get_catalog` returns every matching entry plus ancestor
+///   directories so the surviving tree paths stay navigable. Same
+///   behaviour as Stage 11.17.
+/// - **No filter**: lazy (Stage 11.21 / 11.22). Initial fetch is
+///   `list_dir_page("", 0, PAGE_SIZE)`; folders render closed and load
+///   their children only when the user opens the `<details>`. Each
+///   level paginates with an IntersectionObserver-driven sentinel.
+///
+/// Sort key (`?sort=name|size|kind|date`) applies to both paths.
 #[component]
 fn CatalogTreeView() -> impl IntoView {
     use leptos_router::hooks::use_query_map;
@@ -652,16 +746,45 @@ fn CatalogTreeView() -> impl IntoView {
             )
         })
     };
-    let all = Resource::new(filter_signal, |(q, f, t)| async move {
-        get_catalog(q, f, t).await
-    });
+    let filter_active = move || {
+        let (q, f, t) = filter_signal();
+        !q.is_empty() || !f.is_empty() || !t.is_empty()
+    };
+    let filter_sig = Signal::derive(filter_signal);
+    let sort_sig = Signal::derive(sort_signal);
 
     view! {
         <p class="mut tree-intro">{t!("catalog.tree_intro")}</p>
         <FilterBar prefix=String::new()/>
+        {move || {
+            if filter_active() {
+                view! { <CatalogTreeEager
+                    filter=filter_sig
+                    sort=sort_sig
+                /> }.into_any()
+            } else {
+                view! { <CatalogTreeLazy sort=sort_sig/> }.into_any()
+            }
+        }}
+    }
+}
+
+/// Eager tree: pulls the entire (filtered) catalog and builds the
+/// tree client-side. Preserves Stage 11.17 behaviour for filter mode
+/// — when the user types `q=*.png` we need to walk the whole catalog
+/// to find matches, so paginated lazy loading buys us nothing.
+#[component]
+fn CatalogTreeEager(
+    #[prop(into)] filter: Signal<(String, String, String)>,
+    #[prop(into)] sort: Signal<TreeSort>,
+) -> impl IntoView {
+    let all = Resource::new(move || filter.get(), |(q, f, t)| async move {
+        get_catalog(q, f, t).await
+    });
+    view! {
         <Suspense fallback=move || view! { <p class="mut">{t!("catalog.loading")}</p> }>
             {move || {
-                let sort = sort_signal();
+                let s = sort.get();
                 all.get().map(|res| match res {
                     Ok(list) if list.is_empty() => view! {
                         <p class="empty-state">
@@ -669,13 +792,457 @@ fn CatalogTreeView() -> impl IntoView {
                             <code>"curl -X PUT http://<host>/<name>"</code>
                         </p>
                     }.into_any(),
-                    Ok(list) => view! { <CatalogTreeBody entries=list sort=sort/> }.into_any(),
+                    Ok(list) => view! { <CatalogTreeBody entries=list sort=s/> }.into_any(),
                     Err(e) => view! {
                         <p class="bad">{t!("catalog.load_failed")} " " {e.to_string()}</p>
                     }.into_any(),
                 })
             }}
         </Suspense>
+    }
+}
+
+/// Page size for `list_dir_page`. Tuned so a typical folder renders
+/// in one shot but a 10 000-entry root paginates instead of blocking.
+const LAZY_PAGE_SIZE: u32 = 200;
+
+/// Lazy tree (Stage 11.21 / 11.22). Only the root level is fetched
+/// upfront via `list_dir_page("", 0, PAGE_SIZE)`; every directory
+/// `<details>` triggers its own `list_dir_page(path, …)` the first
+/// time it opens. The same controls bar (expand-all / sort / mkdir)
+/// is shared with the eager path.
+#[component]
+fn CatalogTreeLazy(#[prop(into)] sort: Signal<TreeSort>) -> impl IntoView {
+    // Reload the root level when the sort changes — deeper opened
+    // folders re-mount their resource when their own sort context
+    // changes, see `LazyDirNode`.
+    let root = Resource::new(
+        move || sort.get().as_str(),
+        move |s| async move {
+            list_dir_page(String::new(), 0, LAZY_PAGE_SIZE, s.to_string()).await
+        },
+    );
+    view! {
+        <Suspense fallback=move || view! { <p class="mut">{t!("catalog.loading")}</p> }>
+            {move || {
+                let s = sort.get();
+                root.get().map(|res| match res {
+                    Ok(page) if page.entries.is_empty() && !page.has_more => view! {
+                        <p class="empty-state">
+                            {t!("catalog.empty")} " " {t!("catalog.empty_hint")} " "
+                            <code>"curl -X PUT http://<host>/<name>"</code>
+                        </p>
+                    }.into_any(),
+                    Ok(page) => view! {
+                        <CatalogTreeLazyShell initial=page sort=s/>
+                    }.into_any(),
+                    Err(e) => view! {
+                        <p class="bad">{t!("catalog.load_failed")} " " {e.to_string()}</p>
+                    }.into_any(),
+                })
+            }}
+        </Suspense>
+    }
+}
+
+/// Lazy-tree shell: replicates the controls bar (expand / collapse /
+/// mkdir / sort) the eager `CatalogTreeBody` renders, and mounts the
+/// root `LazyLevel` for the actual entries.
+#[component]
+fn CatalogTreeLazyShell(initial: ListDirPage, sort: TreeSort) -> impl IntoView {
+    let sort_link = |k: TreeSort| {
+        if k == sort {
+            "tree-sort-link active".to_string()
+        } else {
+            "tree-sort-link".to_string()
+        }
+    };
+    let s_name = sort_link(TreeSort::Name);
+    let s_size = sort_link(TreeSort::Size);
+    let s_kind = sort_link(TreeSort::Kind);
+    let s_date = sort_link(TreeSort::Date);
+    view! {
+        <div class="tree-controls">
+            <button
+                type="button"
+                class="tree-control-btn tree-control-expand"
+                onclick="document.querySelectorAll('.tree-root details').forEach(d => d.open = true)"
+            >
+                <span class="tree-control-icon">"⊕"</span>
+                <span class="tree-control-label">{t!("tree.expand_all")}</span>
+            </button>
+            <button
+                type="button"
+                class="tree-control-btn tree-control-collapse"
+                onclick="document.querySelectorAll('.tree-root details').forEach(d => d.open = false)"
+            >
+                <span class="tree-control-icon">"⊖"</span>
+                <span class="tree-control-label">{t!("tree.collapse_all")}</span>
+            </button>
+            <form class="tree-mkdir" method="POST" action="/api/mkdir">
+                <input type="hidden" name="parent" value=""/>
+                <input type="hidden" name="return_to" value="/"/>
+                <input
+                    type="text"
+                    name="name"
+                    placeholder={t!("tree.new_folder")}
+                    required=true
+                    minlength="1"
+                />
+                <button type="submit" class="tree-control-btn">
+                    <span class="tree-control-icon">"📁"</span>
+                    <span class="tree-control-label">{t!("mkdir.submit")}</span>
+                </button>
+            </form>
+            <div class="tree-sort">
+                <span class="tree-sort-label">{t!("tree.sort_by")} ":"</span>
+                <a class=s_name href="/?sort=name">{t!("tree.sort.name")}</a>
+                <span class="tree-sep">"·"</span>
+                <a class=s_size href="/?sort=size">{t!("tree.sort.size")}</a>
+                <span class="tree-sep">"·"</span>
+                <a class=s_kind href="/?sort=kind">{t!("tree.sort.kind")}</a>
+                <span class="tree-sep">"·"</span>
+                <a class=s_date href="/?sort=date">{t!("tree.sort.date")}</a>
+            </div>
+        </div>
+        <div class="tree-scroll">
+            <ul class="tree-root">
+                <LazyLevel
+                    path=String::new()
+                    initial=initial
+                    sort=sort
+                    depth=0
+                />
+            </ul>
+        </div>
+    }
+}
+
+/// One paginated, scrollable level inside the lazy tree.
+///
+/// Holds an `RwSignal<Vec<CatalogEntry>>` of accumulated rows plus a
+/// `has_more` / `offset` pair. When `has_more` is true a sentinel
+/// `<li>` is rendered at the bottom; an `IntersectionObserver`
+/// installed on hydrate fires `load_more()` when the user scrolls it
+/// into view. Without JS the sentinel acts as a click-to-load button.
+#[component]
+fn LazyLevel(
+    path: String,
+    initial: ListDirPage,
+    sort: TreeSort,
+    depth: usize,
+) -> impl IntoView {
+    let initial_len = initial.entries.len() as u32;
+    let entries: RwSignal<Vec<CatalogEntry>> = RwSignal::new(initial.entries);
+    let has_more: RwSignal<bool> = RwSignal::new(initial.has_more);
+    let offset: RwSignal<u32> = RwSignal::new(initial_len);
+    let is_loading: RwSignal<bool> = RwSignal::new(false);
+
+    let path_for_load = path.clone();
+    let sort_str = sort.as_str().to_string();
+    let load_more = move || {
+        if !has_more.get_untracked() || is_loading.get_untracked() {
+            return;
+        }
+        is_loading.set(true);
+        let p = path_for_load.clone();
+        let off = offset.get_untracked();
+        let srt = sort_str.clone();
+        leptos::task::spawn_local(async move {
+            match list_dir_page(p, off, LAZY_PAGE_SIZE, srt).await {
+                Ok(page) => {
+                    let n = page.entries.len() as u32;
+                    entries.update(|v| v.extend(page.entries));
+                    offset.set(off + n);
+                    has_more.set(page.has_more);
+                }
+                Err(_) => { /* leave state intact; user can click sentinel to retry */ }
+            }
+            is_loading.set(false);
+        });
+    };
+    let load_more_for_click = load_more.clone();
+    let on_sentinel_click = move |_| load_more_for_click();
+
+    let sentinel_ref: NodeRef<leptos::html::Li> = NodeRef::new();
+    let _ = sentinel_ref;
+    let _ = load_more;
+    #[cfg(feature = "hydrate")]
+    {
+        Effect::new(move |_| {
+            use wasm_bindgen::{closure::Closure, JsCast};
+            let Some(el) = sentinel_ref.get() else { return; };
+            // Once the sentinel scrolls into view (any pixel
+            // visible), fire load_more. The observer keeps watching
+            // — when the next batch arrives the sentinel may still
+            // be in view (e.g. user scrolled past it) and we'll
+            // fetch again.
+            let load = load_more.clone();
+            let cb = Closure::<dyn FnMut(js_sys::Array)>::new(
+                move |entries: js_sys::Array| {
+                    for i in 0..entries.length() {
+                        let Ok(entry): Result<web_sys::IntersectionObserverEntry, _> =
+                            entries.get(i).dyn_into() else { continue };
+                        if entry.is_intersecting() {
+                            load();
+                            break;
+                        }
+                    }
+                },
+            );
+            if let Ok(obs) = web_sys::IntersectionObserver::new(cb.as_ref().unchecked_ref()) {
+                let el_ref: &web_sys::Element = el.as_ref();
+                obs.observe(el_ref);
+                cb.forget();
+                std::mem::forget(obs);
+            }
+        });
+    }
+
+    // Sort moves into the For body. RwSignal is Copy; sort + depth
+    // also Copy, so the children closure can read them freely.
+    view! {
+        <For
+            each=move || entries.get()
+            key=|e: &CatalogEntry| e.name.clone()
+            children=move |e: CatalogEntry| {
+                if e.kind == "directory" {
+                    view! {
+                        <LazyDirNode entry=e sort=sort depth=depth/>
+                    }.into_any()
+                } else {
+                    lazy_file_leaf(&e).into_any()
+                }
+            }
+        />
+        {move || {
+            if has_more.get() {
+                view! {
+                    <li
+                        node_ref=sentinel_ref
+                        class="tree-sentinel mut"
+                        on:click=on_sentinel_click.clone()
+                        title="load more"
+                    >
+                        {move || if is_loading.get() {
+                            t!("catalog.loading")
+                        } else {
+                            t!("tree.load_more")
+                        }}
+                    </li>
+                }.into_any()
+            } else {
+                ().into_any()
+            }
+        }}
+    }
+}
+
+/// One file row inside the lazy tree. Standalone helper so the markup
+/// stays in lock-step with the eager `TreeNodeView` leaf branch.
+#[cfg(feature = "ssr")]
+fn lazy_file_leaf(entry: &CatalogEntry) -> impl IntoView {
+    lazy_file_leaf_inner(entry.clone())
+}
+#[cfg(not(feature = "ssr"))]
+fn lazy_file_leaf(entry: &CatalogEntry) -> impl IntoView {
+    lazy_file_leaf_inner(entry.clone())
+}
+fn lazy_file_leaf_inner(entry: CatalogEntry) -> impl IntoView {
+    let enc_full = url_encode(&entry.name);
+    let kind = entry.kind.clone();
+    let basename = entry
+        .name
+        .rsplit_once('/')
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_else(|| entry.name.clone());
+    let size_str = format_shards(entry.n_shards);
+    let date_str = format_unix_utc(entry.created_at_unix);
+    let icon: &'static str = match kind.as_str() {
+        "image" => "🖼",
+        "audio" => "🎵",
+        "text" => "📝",
+        _ => "📦",
+    };
+    let file_confirm_js = format!(
+        "return confirm('{}');",
+        t!("file.delete_confirm").replace('\'', "\\'")
+    );
+    view! {
+        <li class={format!("tree-leaf kind-{kind}")}>
+            <span class="tree-icon">{icon}</span>
+            <a class="tree-name" href={format!("/{enc_full}")}>{basename}</a>
+            <span class="tree-meta">
+                <span class="tree-meta-size" title="shard count">{size_str}</span>
+                <span class="tree-meta-date" title="created (UTC)">{date_str}</span>
+            </span>
+            <span class="tree-sep">"·"</span>
+            <span class="tree-actions">
+                {(kind == "image" || kind == "audio").then(|| view! {
+                    <a href={format!("/preview/{}", enc_full.clone())}>"preview"</a>
+                    <span class="tree-sep">"·"</span>
+                })}
+                <a href={format!("/inspect/{}", enc_full.clone())}>"shards"</a>
+                <span class="tree-sep">"·"</span>
+                <a href={format!("/similar/{}", enc_full.clone())}>{t!("card.action.similar")}</a>
+                <span class="tree-sep">"·"</span>
+                <a href={format!("/health/{}", enc_full.clone())}>{t!("card.action.health")}</a>
+                <span class="tree-sep">"·"</span>
+                <form
+                    method="POST"
+                    action="/api/rm"
+                    class="inline-form"
+                    onsubmit=file_confirm_js
+                >
+                    <input type="hidden" name="path" value=entry.name.clone()/>
+                    <input type="hidden" name="return_to" value="/"/>
+                    <button
+                        type="submit"
+                        class="link-btn link-btn-danger"
+                        title={t!("file.delete")}
+                    >
+                        "✕"
+                    </button>
+                </form>
+            </span>
+        </li>
+    }
+}
+
+/// One folder row inside the lazy tree — `<details>` whose children
+/// only fetch on the first `open`. Folder summary contents (icon /
+/// name / mkdir / open / delete actions) mirror the eager branch.
+#[component]
+fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoView {
+    let path = entry.name.clone();
+    let basename = path
+        .rsplit_once('/')
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_else(|| path.clone());
+    let enc_path = url_encode(&path);
+    let created_str = format_unix_utc(entry.created_at_unix);
+    let confirm_js = format!(
+        "return confirm('{}');",
+        t!("folder.confirm_delete").replace('\'', "\\'")
+    );
+
+    // Open state — top-level folders start open like the eager view;
+    // deeper levels stay closed until the user expands them. The
+    // `on:toggle` listener mirrors the `<details>` DOM state back
+    // into this signal so the children resource fetches on demand.
+    let initial_open = depth == 0;
+    let open_sig = RwSignal::new(initial_open);
+    let path_for_resource = path.clone();
+    let children = Resource::new(
+        move || (open_sig.get(), sort.as_str()),
+        move |(is_open, srt)| {
+            let p = path_for_resource.clone();
+            async move {
+                if !is_open {
+                    return Ok(ListDirPage::default());
+                }
+                list_dir_page(p, 0, LAZY_PAGE_SIZE, srt.to_string()).await
+            }
+        },
+    );
+
+    let on_toggle = move |ev: leptos::ev::Event| {
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::JsCast;
+            if let Some(target) = ev.target() {
+                if let Ok(d) = target.dyn_into::<web_sys::HtmlDetailsElement>() {
+                    open_sig.set(d.open());
+                }
+            }
+        }
+        #[cfg(not(feature = "hydrate"))]
+        {
+            let _ = ev;
+        }
+    };
+
+    let path_for_form = path.clone();
+    let path_for_rmdir = path.clone();
+    let inner_path = path.clone();
+    view! {
+        <li class="tree-branch">
+            // `open` is set as a plain HTML attribute (not reactive) so
+            // SSR renders top-level folders expanded just like the
+            // eager path. The native browser flips it on click; our
+            // `on:toggle` listener mirrors that flip back into
+            // `open_sig`, which triggers the lazy children fetch the
+            // first time the user opens a deeper level.
+            <details open=initial_open on:toggle=on_toggle>
+                <summary class="tree-summary">
+                    <span class="tree-icon">"📁"</span>
+                    <span class="tree-name">{basename}</span>
+                    <span class="tree-meta">
+                        <span class="tree-meta-date" title="created (UTC)">{created_str}</span>
+                    </span>
+                    <span class="tree-sep">"·"</span>
+                    <span class="tree-actions">
+                        <form
+                            method="POST"
+                            action="/api/mkdir"
+                            class="inline-form tree-inline-mkdir"
+                            onclick="event.stopPropagation()"
+                        >
+                            <input type="hidden" name="parent" value=path_for_form/>
+                            <input type="hidden" name="return_to" value="/"/>
+                            <input
+                                type="text"
+                                name="name"
+                                placeholder={t!("tree.new_folder")}
+                                required=true
+                                minlength="1"
+                            />
+                            <button type="submit" class="link-btn">"+ " {t!("folder.kind_label")}</button>
+                        </form>
+                        <span class="tree-sep">"·"</span>
+                        <a href={format!("/?p={enc_path}")}>{t!("folder.open")} " →"</a>
+                        <span class="tree-sep">"·"</span>
+                        <form
+                            method="POST"
+                            action="/api/rmdir"
+                            class="inline-form"
+                            onsubmit=confirm_js
+                        >
+                            <input type="hidden" name="path" value=path_for_rmdir/>
+                            <input type="hidden" name="return_to" value="/"/>
+                            <button type="submit" class="link-btn">{t!("folder.delete")}</button>
+                        </form>
+                    </span>
+                </summary>
+                <ul class="tree-children">
+                    <Suspense fallback=move || view! { <li class="mut">{t!("catalog.loading")}</li> }>
+                        {move || {
+                            let p = inner_path.clone();
+                            children.get().map(|res| match res {
+                                Ok(page) if page.entries.is_empty() && !page.has_more && !open_sig.get() => {
+                                    // Closed and never opened — nothing to render.
+                                    ().into_any()
+                                }
+                                Ok(page) if page.entries.is_empty() && !page.has_more => {
+                                    view! { <li class="mut">{t!("tree.empty_folder")}</li> }.into_any()
+                                }
+                                Ok(page) => view! {
+                                    <LazyLevel
+                                        path=p
+                                        initial=page
+                                        sort=sort
+                                        depth=depth + 1
+                                    />
+                                }.into_any(),
+                                Err(e) => view! {
+                                    <li class="bad">{t!("catalog.load_failed")} " " {e.to_string()}</li>
+                                }.into_any(),
+                            })
+                        }}
+                    </Suspense>
+                </ul>
+            </details>
+        </li>
     }
 }
 

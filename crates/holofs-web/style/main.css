@@ -1070,6 +1070,23 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
   line-height: 1.5;
 }
 
+/* Stage 11.22: load-more sentinel inside a paginated level. Rendered
+   when `has_more=true`; an IntersectionObserver fires `load_more`
+   when the user scrolls it into view. Click-to-load is the no-JS
+   fallback, so the cursor and hover state hint at interactivity. */
+.tree-sentinel {
+  list-style: none;
+  margin: 10px 0 16px 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--surf2);
+  cursor: pointer;
+  font-size: 13px;
+  text-align: center;
+  user-select: none;
+}
+.tree-sentinel:hover { background: var(--surf); }
+
 .tree-branch > details > summary {
   list-style: none;
   cursor: pointer;

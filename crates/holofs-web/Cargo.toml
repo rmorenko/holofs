@@ -115,7 +115,18 @@ wasm-bindgen = { workspace = true, optional = true }
 # carries it transitively. Keep `web-sys`/`js-sys` direct so we can opt
 # into the EventSource/MessageEvent features the live `/health` SSE
 # consumer needs.
-web-sys = { workspace = true, features = ["EventSource", "MessageEvent", "Window"] }
+web-sys = { workspace = true, features = [
+    "EventSource",
+    "MessageEvent",
+    "Window",
+    # Stage 11.21 / 11.22: lazy folder expansion via <details>/toggle
+    # listener + IntersectionObserver-based scroll pagination.
+    "HtmlDetailsElement",
+    "IntersectionObserver",
+    "IntersectionObserverInit",
+    "IntersectionObserverEntry",
+    "Element",
+] }
 js-sys = { workspace = true }
 
 [lints]

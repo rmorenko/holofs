@@ -35,7 +35,7 @@ use holofs_web::health::{GetHealthIndex, GetObjectHealth};
 use holofs_web::inspect::{GetInspect, GetInspectZoom};
 use holofs_web::help::{GetDoc, ListDocs};
 use holofs_web::similar::GetSimilar;
-use holofs_web::{App, GetCatalog, ListDir};
+use holofs_web::{App, GetCatalog, ListDir, ListDirPageFn};
 
 /// Per-request body cap for upload routes (PUT and the two `/escrow/*`
 /// multipart endpoints). axum's default is 2 MiB which rejects realistic
@@ -78,6 +78,7 @@ async fn main() {
     // Explicit server_fn registration (inventory fails on Apple Silicon).
     server_fn::axum::register_explicit::<GetCatalog>();
     server_fn::axum::register_explicit::<ListDir>();
+    server_fn::axum::register_explicit::<ListDirPageFn>();
     server_fn::axum::register_explicit::<GetHealthIndex>();
     server_fn::axum::register_explicit::<GetObjectHealth>();
     server_fn::axum::register_explicit::<GetInspect>();
