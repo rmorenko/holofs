@@ -1214,6 +1214,56 @@ body.catalog-page .tree-scroll {
 }
 .tree-sentinel:hover { background: var(--surf); }
 
+/* Stage 12.6: /mix wavelet-mix composer page — pick-B + split form,
+   live preview, save-to-catalog form. Visual mirrors the escrow
+   forms; nothing fancy, just legible. */
+.mix-form, .mix-save {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  margin: 16px 0;
+  padding: 12px 16px;
+  border: 1px solid var(--bord);
+  border-radius: 8px;
+  background: var(--surf);
+}
+.mix-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+}
+.mix-field .lbl {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--mut);
+}
+.mix-field input, .mix-field select {
+  font: inherit;
+  padding: 6px 10px;
+  background: var(--surf2);
+  border: 1px solid var(--bord);
+  border-radius: 6px;
+  color: var(--fg);
+}
+.mix-field input:focus, .mix-field select:focus { border-color: var(--accent); outline: none; }
+.mix-result h3 { margin: 24px 0 8px 0; }
+.mix-preview {
+  border: 1px solid var(--bord);
+  border-radius: 8px;
+  background: var(--surf);
+  padding: 8px;
+  display: inline-block;
+  max-width: 100%;
+}
+.mix-preview img {
+  max-width: 100%;
+  display: block;
+  border-radius: 4px;
+}
+
 .tree-branch > details > summary {
   list-style: none;
   cursor: pointer;

@@ -355,6 +355,104 @@ pub async fn rm_form(
     }
 }
 
+/// Stage 12.6: `GET /api/mix.png?a=&b=&split=` — stream the
+/// wavelet-mix hybrid PNG. Used by the `/mix` page as the preview
+/// `<img src>`; the gateway does the actual decode + IDWT + PNG
+/// encode. Returns `400` with a plain-text body on parameter or
+/// compatibility errors so the preview can render an inline message.
+pub async fn mix_preview(
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+    Extension(gw): Extension<Arc<Gateway>>,
+) -> Response {
+    let qs = raw_query.unwrap_or_default();
+    let a = parse_urlencoded_field(&qs, "a").unwrap_or_default();
+    let b = parse_urlencoded_field(&qs, "b").unwrap_or_default();
+    let split: u8 = parse_urlencoded_field(&qs, "split")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if a.is_empty() {
+        return bad_request("missing 'a'");
+    }
+    if b.is_empty() {
+        return bad_request("missing 'b'");
+    }
+    match gw.mix_objects(&a, &b, split).await {
+        Ok(out) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            out.bytes,
+        )
+            .into_response(),
+        Err(e) => error_to_response(e),
+    }
+}
+
+/// Stage 12.6: `POST /api/mix-save` (form: a, b, split, dest) —
+/// builds the hybrid and ingests it into the catalog at `dest`,
+/// then 303-redirects to the catalog with `?open=<parent>` so the
+/// new entry is visible.
+pub async fn mix_save(
+    Extension(gw): Extension<Arc<Gateway>>,
+    body: Bytes,
+) -> Response {
+    let body_str = match std::str::from_utf8(&body) {
+        Ok(s) => s,
+        Err(_) => return bad_request("non-utf8 body"),
+    };
+    let Some(a) = parse_urlencoded_field(body_str, "a") else {
+        return bad_request("missing 'a'");
+    };
+    let Some(b) = parse_urlencoded_field(body_str, "b") else {
+        return bad_request("missing 'b'");
+    };
+    let split: u8 = match parse_urlencoded_field(body_str, "split")
+        .and_then(|s| s.parse().ok())
+    {
+        Some(n) => n,
+        None => return bad_request("missing or invalid 'split'"),
+    };
+    let Some(dest) = parse_urlencoded_field(body_str, "dest") else {
+        return bad_request("missing 'dest'");
+    };
+    if !is_valid_put_name(&dest) {
+        return bad_request("invalid 'dest' (reserved or empty top segment)");
+    }
+    let out = match gw.mix_objects(&a, &b, split).await {
+        Ok(o) => o,
+        Err(e) => return error_to_response(e),
+    };
+    if let Err(e) = gw.ingest_bytes(&dest, &out.bytes).await {
+        return error_to_response(e);
+    }
+    // Land the user on the tree view with the destination's parent
+    // expanded — same pattern as mkdir form.
+    let parent = dest.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+    let target = if parent.is_empty() {
+        format!("/?open={}", url_encode_simple(&dest))
+    } else {
+        format!("/?open={}", url_encode_simple(&parent))
+    };
+    redirect_to(&target)
+}
+
+/// Tiny URL-encode for redirect targets — only escapes the few
+/// characters that mangle a `/?open=` query value. Kept local to
+/// avoid pulling another crate.
+fn url_encode_simple(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// `POST /api/rmdir` (form-urlencoded `path=`) — form-friendly variant for
 /// the delete button on directory cards. Redirects back to the parent
 /// directory on success.

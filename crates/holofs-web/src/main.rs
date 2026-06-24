@@ -133,6 +133,9 @@ async fn main() {
         // Stage 11.17: form-friendly file delete (mirror of rmdir_form
         // for non-directory entries).
         .route("/api/rm", post(handlers::rm_form))
+        // Stage 12.6: wavelet mix UI plumbing.
+        .route("/api/mix.png", get(handlers::mix_preview))
+        .route("/api/mix-save", post(handlers::mix_save))
         .route("/api/mv", post(handlers::mv))
         // Stage 11.4: form-friendly file upload from the catalog page.
         .route(

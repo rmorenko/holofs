@@ -425,6 +425,67 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("generic.not_found",
         ["not found", "не найдено", "nicht gefunden",
          "introuvable", "no encontrado"]),
+
+    // ---- /mix page (Stage 12.6) -----------------------------------------
+    ("mix.link_label",
+        ["mix →", "микс →", "Mix →", "mix →", "mix →"]),
+    ("mix.title_prefix",
+        ["wavelet mix from", "wavelet-микс от",
+         "Wavelet-Mischung von", "mix wavelet à partir de",
+         "mezcla wavelet desde"]),
+    ("mix.intro",
+        ["Pick a second image and a DWT split layer. Layers 0..=split come \
+          from the source on the left; layers above the split come from the \
+          one you pick. Low layers carry structure, high layers carry fine \
+          detail — the smaller the split, the more of B you see.",
+         "Выбери второе изображение и DWT split-слой. Слои 0..=split берутся \
+          из источника слева; слои выше split — из того, что ты выбрал. \
+          Низкие слои несут структуру, высокие — мелкие детали — чем меньше \
+          split, тем больше виден B.",
+         "Wähle ein zweites Bild und einen DWT-Split-Layer. Layer 0..=split \
+          kommen von der Quelle links; Layer über dem Split aus der \
+          gewählten. Tiefe Layer tragen Struktur, hohe die feinen Details — \
+          je kleiner der Split, desto mehr von B ist sichtbar.",
+         "Choisissez une seconde image et un layer DWT de split. Les layers \
+          0..=split viennent de la source de gauche ; les layers au-dessus \
+          viennent de celle que vous choisissez. Bas layers = structure, \
+          hauts = détails — plus le split est petit, plus on voit B.",
+         "Elige una segunda imagen y una capa DWT de split. Las capas \
+          0..=split vienen del origen de la izquierda; las superiores vienen \
+          de la que elijas. Las capas bajas llevan estructura, las altas \
+          detalle — cuanto menor el split, más se ve B."]),
+    ("mix.field.b",
+        ["partner (B)", "партнёр (B)", "Partner (B)",
+         "partenaire (B)", "compañero (B)"]),
+    ("mix.field.split",
+        ["split layer", "split-слой", "Split-Layer",
+         "layer de split", "capa de split"]),
+    ("mix.field.dest",
+        ["save as", "сохранить как", "speichern als",
+         "enregistrer sous", "guardar como"]),
+    ("mix.pick_b",
+        ["— pick an image —", "— выбери изображение —",
+         "— Bild auswählen —", "— choisir une image —",
+         "— elegir imagen —"]),
+    ("mix.apply",
+        ["preview", "превью", "Vorschau", "aperçu", "vista previa"]),
+    ("mix.save",
+        ["save to catalog", "сохранить в каталог",
+         "in den Katalog speichern", "enregistrer dans le catalogue",
+         "guardar en el catálogo"]),
+    ("mix.preview_h",
+        ["result preview", "превью результата", "Vorschau des Ergebnisses",
+         "aperçu du résultat", "vista previa del resultado"]),
+    ("mix.preview_alt",
+        ["wavelet mix preview", "превью wavelet-микса",
+         "Wavelet-Mix-Vorschau", "aperçu mix wavelet",
+         "vista previa mezcla wavelet"]),
+    ("mix.missing_a",
+        ["No source A — open this page via the `mix →` link on an image row.",
+         "Источник A не задан — открой эту страницу через ссылку `mix →` на строке картинки.",
+         "Keine Quelle A — diese Seite über den `mix →`-Link einer Bildzeile öffnen.",
+         "Source A absente — ouvrir cette page depuis le lien `mix →` sur une ligne image.",
+         "Sin origen A — abre esta página desde el enlace `mix →` de una fila de imagen."]),
     ("generic.load_failed",
         ["failed to load:", "не удалось загрузить:", "Laden fehlgeschlagen:",
          "échec du chargement :", "no se pudo cargar:"]),

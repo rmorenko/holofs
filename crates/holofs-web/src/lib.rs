@@ -28,6 +28,7 @@ pub mod health;
 pub mod help;
 pub mod i18n;
 pub mod inspect;
+pub mod mix;
 #[cfg(feature = "ssr")]
 pub mod range;
 pub mod similar;
@@ -554,6 +555,8 @@ fn RoutedApp() -> impl IntoView {
             // Stage 9: two object paths don't fit a single routable
             // pattern; diff reads them from the query.
             <Route path=path!("/diff") view=diff::DiffPage/>
+            // Stage 12.6: wavelet-mix composer.
+            <Route path=path!("/mix") view=mix::MixPage/>
             <Route path=path!("/escrow") view=escrow::EscrowPage/>
             <Route path=path!("/help") view=help::HelpIndexPage/>
             <Route path=path!("/help/:slug") view=help::HelpDocPage/>
@@ -1179,7 +1182,7 @@ fn lazy_file_leaf_inner(entry: CatalogEntry) -> impl IntoView {
     view! {
         <li class={format!("tree-leaf kind-{kind}")}>
             <span class="tree-icon">{icon}</span>
-            <a class="tree-name" href={format!("/{enc_full}")}>{basename}</a>
+            <a class="tree-name" href={format!("/{enc_full}")} rel="external">{basename}</a>
             <span class="tree-meta">
                 <span class="tree-meta-size" title="shard count">{size_str}</span>
                 <span class="tree-meta-date" title="created (UTC)">{date_str}</span>
@@ -1187,14 +1190,18 @@ fn lazy_file_leaf_inner(entry: CatalogEntry) -> impl IntoView {
             <span class="tree-sep">"·"</span>
             <span class="tree-actions">
                 {(kind == "image" || kind == "audio").then(|| view! {
-                    <a href={format!("/preview/{}", enc_full.clone())}>"preview"</a>
+                    <a href={format!("/preview/{}", enc_full.clone())} rel="external">"preview"</a>
                     <span class="tree-sep">"·"</span>
                 })}
-                <a href={format!("/inspect/{}", enc_full.clone())}>"shards"</a>
+                <a href={format!("/inspect/{}", enc_full.clone())} rel="external">"shards"</a>
                 <span class="tree-sep">"·"</span>
-                <a href={format!("/similar/{}", enc_full.clone())}>{t!("card.action.similar")}</a>
+                <a href={format!("/similar/{}", enc_full.clone())} rel="external">{t!("card.action.similar")}</a>
                 <span class="tree-sep">"·"</span>
-                <a href={format!("/health/{}", enc_full.clone())}>{t!("card.action.health")}</a>
+                <a href={format!("/health/{}", enc_full.clone())} rel="external">{t!("card.action.health")}</a>
+                {(kind == "image").then(|| view! {
+                    <span class="tree-sep">"·"</span>
+                    <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
+                })}
                 <span class="tree-sep">"·"</span>
                 <form
                     method="POST"
@@ -1710,7 +1717,7 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
         view! {
             <li class={format!("tree-leaf kind-{kind}")}>
                 <span class="tree-icon">{icon}</span>
-                <a class="tree-name" href={format!("/{enc_full}")}>{basename}</a>
+                <a class="tree-name" href={format!("/{enc_full}")} rel="external">{basename}</a>
                 <span class="tree-meta">
                     <span class="tree-meta-size" title="shard count">{size_str}</span>
                     <span class="tree-meta-date" title="created (UTC)">{date_str}</span>
@@ -1718,14 +1725,18 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                 <span class="tree-sep">"·"</span>
                 <span class="tree-actions">
                     {(kind == "image" || kind == "audio").then(|| view! {
-                        <a href={format!("/preview/{}", enc_full.clone())}>"preview"</a>
+                        <a href={format!("/preview/{}", enc_full.clone())} rel="external">"preview"</a>
                         <span class="tree-sep">"·"</span>
                     })}
-                    <a href={format!("/inspect/{}", enc_full.clone())}>"shards"</a>
+                    <a href={format!("/inspect/{}", enc_full.clone())} rel="external">"shards"</a>
                     <span class="tree-sep">"·"</span>
-                    <a href={format!("/similar/{}", enc_full.clone())}>{t!("card.action.similar")}</a>
+                    <a href={format!("/similar/{}", enc_full.clone())} rel="external">{t!("card.action.similar")}</a>
                     <span class="tree-sep">"·"</span>
-                    <a href={format!("/health/{}", enc_full.clone())}>{t!("card.action.health")}</a>
+                    <a href={format!("/health/{}", enc_full.clone())} rel="external">{t!("card.action.health")}</a>
+                    {(kind == "image").then(|| view! {
+                        <span class="tree-sep">"·"</span>
+                        <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
+                    })}
                     <span class="tree-sep">"·"</span>
                     <form
                         method="POST"
@@ -2043,13 +2054,22 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
                 <div class="row mut cid"><code>{cid_short}</code></div>
             </div>
             <div class="actions">
-                <a href={format!("/{enc_full}")}>{primary_label(&kind)}</a>
+                // Stage 11.29: rel=external bypasses Leptos Router
+                // interception. The primary link and preview hit
+                // axum-only routes (raw bytes / image preview); the
+                // rest are real Leptos pages but SPA navigation
+                // broke too — full-reload via rel=external is the
+                // reliable path until the SPA story gets sorted.
+                <a href={format!("/{enc_full}")} rel="external">{primary_label(&kind)}</a>
                 {(kind == "image" || kind == "audio").then(|| view! {
-                    " · " <a href={format!("/preview/{}", enc_full.clone())}>{preview_label(&kind)}</a>
+                    " · " <a href={format!("/preview/{}", enc_full.clone())} rel="external">{preview_label(&kind)}</a>
                 })}
-                " · " <a href={format!("/inspect/{}", enc_full.clone())}>{t!("card.action.shards_link")}</a>
-                " · " <a href={format!("/similar/{}", enc_full.clone())}>{t!("card.action.similar")}</a>
-                " · " <a href={format!("/health/{}", enc_full.clone())}>{t!("card.action.health")}</a>
+                " · " <a href={format!("/inspect/{}", enc_full.clone())} rel="external">{t!("card.action.shards_link")}</a>
+                " · " <a href={format!("/similar/{}", enc_full.clone())} rel="external">{t!("card.action.similar")}</a>
+                " · " <a href={format!("/health/{}", enc_full.clone())} rel="external">{t!("card.action.health")}</a>
+                {(kind == "image").then(|| view! {
+                    " · " <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
+                })}
                 " · "
                 <form
                     method="POST"
