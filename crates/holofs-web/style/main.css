@@ -512,7 +512,6 @@ h4.inspect-layer {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
-.escrow-form input[type="file"],
 .escrow-form input[type="number"] {
   font: inherit;
   color: var(--fg);
@@ -521,6 +520,54 @@ h4.inspect-layer {
   border-radius: 6px;
   padding: 6px 10px;
 }
+
+/* Stage 11.20: extend the upload-form's custom file-input chrome
+   (visually-hidden native input + styled button + filename label +
+   drop-zone hover state) to the two escrow forms. The escrow-section
+   acts as the drop target, same dashed-border feedback as on /. */
+.escrow-section input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+.escrow-section .file-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  flex-direction: row;
+}
+.escrow-section .file-button {
+  display: inline-block;
+  background: var(--surf2);
+  border: 1px solid var(--bord);
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-weight: 500;
+  user-select: none;
+}
+.escrow-section .file-label:hover .file-button,
+.escrow-section input[type="file"]:focus + .file-button {
+  border-color: var(--accent);
+  background: var(--surf);
+}
+.escrow-section .file-name { font-size: 13px; }
+.escrow-section .drop-prompt {
+  margin: 0 0 10px 0;
+  font-size: 12px;
+  text-align: left;
+}
+.escrow-section .hint { font-size: 11px; margin: 0; }
+.escrow-section.drag-active {
+  border-color: var(--accent);
+  background: var(--surf2);
+}
+.escrow-section { transition: border-color 0.1s, background 0.1s; }
 .escrow-form button {
   font: inherit;
   background: var(--accent);

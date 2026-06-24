@@ -29,8 +29,14 @@ pub fn EscrowPage() -> impl IntoView {
             <p>{t!("escrow.intro_p1")}</p>
             <p class="mut">{t!("escrow.intro_p2")}</p>
 
+            // Stage 11.20: custom-styled file inputs replace the native
+            // controls so the "Choose file" button text follows the page
+            // locale (native picker uses the OS language) and the form
+            // accepts drag-and-drop. Without JS the visually-hidden
+            // input still works — `<label>` opens the picker natively.
             <section class="escrow-section">
                 <h3>{t!("escrow.split_h")}</h3>
+                <p class="drop-prompt mut">{t!("escrow.drop_file")}</p>
                 <form
                     method="POST"
                     action="/escrow/split"
@@ -38,9 +44,10 @@ pub fn EscrowPage() -> impl IntoView {
                     class="escrow-form"
                 >
                     <input type="hidden" name="lang" value=lang_split/>
-                    <label>
-                        <span class="lbl">{t!("escrow.label.file")}</span>
+                    <label class="file-label">
                         <input type="file" name="file" required=true/>
+                        <span class="file-button">{t!("escrow.choose_file")}</span>
+                        <span class="file-name mut">{t!("escrow.no_file")}</span>
                     </label>
                     <label>
                         <span class="lbl">{t!("escrow.label.k")}</span>
@@ -56,6 +63,7 @@ pub fn EscrowPage() -> impl IntoView {
 
             <section class="escrow-section">
                 <h3>{t!("escrow.recover_h")}</h3>
+                <p class="drop-prompt mut">{t!("escrow.drop_shares")}</p>
                 <form
                     method="POST"
                     action="/escrow/recover"
@@ -63,13 +71,22 @@ pub fn EscrowPage() -> impl IntoView {
                     class="escrow-form"
                 >
                     <input type="hidden" name="lang" value=lang_recover/>
-                    <label>
-                        <span class="lbl">{t!("escrow.label.shares")}</span>
+                    <label class="file-label">
                         <input type="file" name="shares" multiple=true required=true/>
+                        <span class="file-button">{t!("escrow.choose_shares")}</span>
+                        <span
+                            class="file-name mut"
+                            data-multi-template={t!("escrow.files_chosen")}
+                        >
+                            {t!("escrow.no_shares")}
+                        </span>
                     </label>
+                    <p class="hint mut">{t!("escrow.label.shares")}</p>
                     <button type="submit">{t!("escrow.btn.recover")}</button>
                 </form>
             </section>
+
+            <script defer="defer" src="/assets/escrow-init.js"></script>
         </main>
     }
 }
