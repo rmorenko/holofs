@@ -32,6 +32,10 @@ pub struct SearchHitView {
     /// 0.2-0.35 for strong matches; the UI scales them into a 0..100
     /// confidence bar.
     pub score: f32,
+    /// Stage 13.3: layer band that produced the winning score for this
+    /// file. UI badges results with it so the user can tell apart "the
+    /// match was on silhouette" from "the match was on texture".
+    pub band: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -43,6 +47,8 @@ pub struct SearchResultsView {
     /// renders an explanatory empty state instead of pretending no
     /// images matched.
     pub embed_enabled: bool,
+    /// Active band filter (`coarse` / `mid` / `full` / `any`).
+    pub band: String,
 }
 
 // ===== Server function =====================================================
@@ -52,19 +58,31 @@ pub struct SearchResultsView {
     prefix = "/api",
     endpoint = "search_view",
 )]
-pub async fn semantic_search(query: String) -> Result<SearchResultsView, ServerFnError> {
+pub async fn semantic_search(
+    query: String,
+    band: String,
+) -> Result<SearchResultsView, ServerFnError> {
     use std::sync::Arc;
     let gw = expect_context::<Arc<holofs_gateway::Gateway>>();
     let enabled = gw.embed_enabled().await;
+    let parsed_band = holofs_gateway::SearchBand::parse(&band);
+    let band_str = match parsed_band {
+        holofs_gateway::SearchBand::Coarse => "coarse",
+        holofs_gateway::SearchBand::Mid => "mid",
+        holofs_gateway::SearchBand::Full => "full",
+        holofs_gateway::SearchBand::Any => "any",
+    }
+    .to_string();
     if !enabled || query.trim().is_empty() {
         return Ok(SearchResultsView {
             query,
             hits: Vec::new(),
             embed_enabled: enabled,
+            band: band_str,
         });
     }
     let raw = gw
-        .semantic_search(&query, 50)
+        .semantic_search(&query, 50, parsed_band)
         .await
         .map_err(|e| ServerFnError::<server_fn::error::NoCustomError>::ServerError(e.to_string()))?;
     Ok(SearchResultsView {
@@ -74,9 +92,16 @@ pub async fn semantic_search(query: String) -> Result<SearchResultsView, ServerF
             .map(|h| SearchHitView {
                 name: h.name,
                 score: h.score,
+                band: match h.band {
+                    holofs_gateway::SearchBand::Coarse => "coarse".into(),
+                    holofs_gateway::SearchBand::Mid => "mid".into(),
+                    holofs_gateway::SearchBand::Full => "full".into(),
+                    holofs_gateway::SearchBand::Any => "any".into(),
+                },
             })
             .collect(),
         embed_enabled: true,
+        band: band_str,
     })
 }
 
@@ -86,10 +111,17 @@ pub async fn semantic_search(query: String) -> Result<SearchResultsView, ServerF
 #[component]
 pub fn SearchPage() -> impl IntoView {
     let query = use_query_map();
-    let q = move || query.with(|q| q.get("q").unwrap_or_default());
+    let inputs = move || {
+        query.with(|q| {
+            (
+                q.get("q").unwrap_or_default(),
+                q.get("band").unwrap_or_else(|| "any".to_string()),
+            )
+        })
+    };
 
-    let data = Resource::new(q, |query| async move {
-        semantic_search(query).await
+    let data = Resource::new(inputs, |(query, band)| async move {
+        semantic_search(query, band).await
     });
 
     view! {
@@ -98,7 +130,13 @@ pub fn SearchPage() -> impl IntoView {
             <h2 class="search-h">{t!("search.title")}</h2>
             <p class="mut search-intro">{t!("search.intro")}</p>
 
-            <SearchForm initial=q()/>
+            {move || {
+                let (q, band) = inputs();
+                view! {
+                    <SearchForm initial=q.clone() band=band.clone()/>
+                    <BandPicker active=band q=q.clone()/>
+                }
+            }}
 
             <Suspense fallback=move || view! {
                 <p class="mut">{t!("search.loading")}</p>
@@ -115,7 +153,7 @@ pub fn SearchPage() -> impl IntoView {
 }
 
 #[component]
-fn SearchForm(initial: String) -> impl IntoView {
+fn SearchForm(initial: String, band: String) -> impl IntoView {
     let lang_hidden = {
         let lang = current_locale();
         (lang != "en").then_some(lang)
@@ -131,6 +169,7 @@ fn SearchForm(initial: String) -> impl IntoView {
                 autocomplete="off"
                 autofocus=true
             />
+            <input type="hidden" name="band" value=band/>
             {lang_hidden.map(|l| view! {
                 <input type="hidden" name="lang" value=l/>
             })}
@@ -142,11 +181,44 @@ fn SearchForm(initial: String) -> impl IntoView {
 }
 
 #[component]
+fn BandPicker(active: String, q: String) -> impl IntoView {
+    let opts = [
+        ("any", "search.band.any"),
+        ("coarse", "search.band.coarse"),
+        ("mid", "search.band.mid"),
+        ("full", "search.band.full"),
+    ];
+    let enc_q = crate::url_encode(&q);
+    let pills = opts.iter().map(|(slug, key)| {
+        let slug = *slug;
+        let label = crate::i18n::translate(key, &crate::i18n::current_locale());
+        let is_active = slug == active;
+        let href = if q.is_empty() {
+            format!("/search?band={slug}")
+        } else {
+            format!("/search?q={enc_q}&band={slug}")
+        };
+        if is_active {
+            view! { <span class="scope-pill scope-active">{label}</span> }.into_any()
+        } else {
+            view! { <a class="scope-pill" href=href rel="external">{label}</a> }.into_any()
+        }
+    }).collect_view();
+    view! {
+        <p class="scope-picker mut search-band">
+            <span class="scope-label">{t!("search.band_label")}</span>
+            {pills}
+        </p>
+    }
+}
+
+#[component]
 fn SearchBody(data: SearchResultsView) -> impl IntoView {
     let SearchResultsView {
         query,
         hits,
         embed_enabled,
+        band: _,
     } = data;
 
     if !embed_enabled {
@@ -215,6 +287,7 @@ fn SearchBody(data: SearchResultsView) -> impl IntoView {
                                     <div class="search-score-fill" style=format!("width:{pct:.1}%")></div>
                                 </div>
                                 <code class="mut">{raw_score}</code>
+                                <code class={format!("search-band-badge band-{}", h.band)}>{h.band.clone()}</code>
                             </div>
                         </div>
                     </a>

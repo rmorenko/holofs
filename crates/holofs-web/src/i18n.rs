@@ -1483,6 +1483,23 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
         ["why holofs", "зачем holofs", "warum holofs",
          "pourquoi holofs", "por qué holofs"]),
 
+    // ---- Stage 13.3: hierarchical layer-band index ---------------------
+    ("search.band_label",
+        ["search band:", "слой поиска:", "Suchschicht:",
+         "couche de recherche :", "capa de búsqueda:"]),
+    ("search.band.any",
+        ["all bands", "все слои", "alle Schichten",
+         "toutes les couches", "todas las capas"]),
+    ("search.band.coarse",
+        ["structure (L0)", "структура (L0)", "Struktur (L0)",
+         "structure (L0)", "estructura (L0)"]),
+    ("search.band.mid",
+        ["mid (L0-L2)", "средние (L0-L2)", "Mitte (L0-L2)",
+         "moyen (L0-L2)", "medio (L0-L2)"]),
+    ("search.band.full",
+        ["texture (full)", "фактура (full)", "Textur (full)",
+         "texture (full)", "textura (full)"]),
+
     ("search.disabled",
         ["Semantic search is disabled on this server. Restart with --enable-embed to turn it on (the first query downloads ~155 MiB of CLIP weights).",
          "Семантический поиск выключен. Перезапустите сервер с --enable-embed (первый запрос скачает ~155 МиБ весов CLIP).",

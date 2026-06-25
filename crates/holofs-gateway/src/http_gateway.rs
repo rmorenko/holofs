@@ -1931,6 +1931,34 @@ struct EmbedState {
     embedder: Option<Arc<holofs_embed::Embedder>>,
 }
 
+/// Layer-band selector for [`Gateway::semantic_search`]. `Any` (the
+/// default) takes the best score across all bands per file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchBand {
+    /// L0 reconstruction — silhouette / colour blob.
+    Coarse,
+    /// L0-L2 reconstruction — silhouette + low-freq detail.
+    Mid,
+    /// All layers — texture / fine detail.
+    Full,
+    /// Search all three bands and keep the best score per file.
+    Any,
+}
+
+impl SearchBand {
+    /// Parse from URL string (`coarse` / `mid` / `full` / `any`).
+    /// Unknown / empty values map to `Any`.
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "coarse" | "structure" => Self::Coarse,
+            "mid" => Self::Mid,
+            "full" | "texture" | "detail" => Self::Full,
+            _ => Self::Any,
+        }
+    }
+}
+
 /// One row of [`Gateway::semantic_search`] output. The gateway returns
 /// catalog names + scores; the frontend renders them as a card grid.
 #[derive(Debug, Clone)]
@@ -1942,6 +1970,10 @@ pub struct SemanticHit {
     /// so the UI usually shows them as 0..100 percentiles instead of
     /// raw values.
     pub score: f32,
+    /// Stage 13.3: which layer band produced the winning score. For
+    /// queries filtered to one band this is always that band; for
+    /// `SearchBand::Any` it's whichever of the three scored best.
+    pub band: SearchBand,
 }
 
 impl Gateway {
@@ -2008,87 +2040,98 @@ impl Gateway {
             return Ok(false);
         }
 
-        // Open / create the index up front so we can short-circuit on
-        // dedup without paying for the decode.
+        // Stage 13.3: embed three layer bands per image so the
+        // /search page can route queries by abstraction level.
+        // Coarse = L0 (silhouette / colour blob), Mid = L0-L2
+        // (silhouette + low-freq detail), Full = all layers
+        // (full-resolution texture). Each band lives as a distinct
+        // record in `embeddings.bin` keyed by (data_cid, band) and is
+        // independently dedup-able — re-running embed_object on an
+        // already-indexed file is cheap because every band short-
+        // circuits at the `Index::has` check.
         let data_cid = manifest.data_cid;
-        let band = holofs_embed::LayerBand::Coarse;
-        {
-            let index_path = index_path.clone();
-            let already = tokio::task::spawn_blocking(move || -> Result<bool, GatewayError> {
-                let idx = holofs_embed::Index::open(&index_path)
-                    .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
-                idx.has(&data_cid, band)
-                    .map_err(|e| GatewayError::BadRequest(format!("embed has: {e}")))
-            })
-            .await
-            .map_err(|e| GatewayError::BadRequest(format!("embed has join: {e}")))??;
-            if already {
-                return Ok(false);
-            }
-        }
+        let last_layer = manifest.nlayers.saturating_sub(1);
+        let bands: &[(holofs_embed::LayerBand, u8)] = &[
+            (holofs_embed::LayerBand::Coarse, 0),
+            (holofs_embed::LayerBand::Mid, 2u8.min(last_layer)),
+            (holofs_embed::LayerBand::Full, last_layer),
+        ];
 
-        // Decode coarse layers — L0..=L2 inclusive. For a 256×256
-        // image with nlayers=8 that's the bottom three frequency
-        // bands; the reconstruction is heavily blurred but CLIP
-        // still picks subject / colour / silhouette reliably.
+        let mut any_new = false;
         let live = self.effective_live().await;
-        let max_layer = (manifest.nlayers - 1).min(2);
-        let (channels, _bytes_dl) =
-            get_object_up_to_layer(&self.gf, &manifest, &live, max_layer)
-                .await
-                .map_err(|e| GatewayError::Decode(format!("embed decode: {e}")))?;
-        // Channels are `Vec<f32>` per RGB channel, row-major over
-        // width × height. CLIP wants packed RGB bytes — interleave
-        // and clamp.
         let width = manifest.width;
         let height = manifest.height;
         let n = (width as usize) * (height as usize);
-        if channels.len() < 3 || channels.iter().any(|c| c.len() != n) {
-            return Err(GatewayError::Decode(
-                "embed decode: unexpected channel shape".into(),
-            ));
-        }
-        let mut rgb = vec![0u8; 3 * n];
-        for i in 0..n {
-            let r = channels[0][i].clamp(0.0, 255.0).round() as u8;
-            let g = channels[1][i].clamp(0.0, 255.0).round() as u8;
-            let b = channels[2][i].clamp(0.0, 255.0).round() as u8;
-            rgb[3 * i] = r;
-            rgb[3 * i + 1] = g;
-            rgb[3 * i + 2] = b;
-        }
-        let name_owned = name.to_string();
-        let embedder = Arc::clone(&embedder);
-        let result = tokio::task::spawn_blocking(move || -> Result<(), GatewayError> {
-            let vec = embedder
-                .embed_image(&rgb, width, height)
-                .map_err(|e| GatewayError::Decode(format!("clip image: {e}")))?;
-            let idx = holofs_embed::Index::open(&index_path)
-                .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
-            let rec = holofs_embed::EmbedRecord {
-                data_cid,
-                band,
-                name: name_owned,
-                vec,
+
+        for &(band, max_layer) in bands {
+            // Per-band dedup check first to skip the decode pass.
+            let already = {
+                let idx_path = index_path.clone();
+                tokio::task::spawn_blocking(move || -> Result<bool, GatewayError> {
+                    let idx = holofs_embed::Index::open(&idx_path)
+                        .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
+                    idx.has(&data_cid, band)
+                        .map_err(|e| GatewayError::BadRequest(format!("embed has: {e}")))
+                })
+                .await
+                .map_err(|e| GatewayError::BadRequest(format!("embed has join: {e}")))??
             };
-            idx.append(&rec)
-                .map_err(|e| GatewayError::BadRequest(format!("embed append: {e}")))?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| GatewayError::BadRequest(format!("embed join: {e}")))?;
-        result?;
-        Ok(true)
+            if already {
+                continue;
+            }
+
+            let (channels, _bytes_dl) =
+                get_object_up_to_layer(&self.gf, &manifest, &live, max_layer)
+                    .await
+                    .map_err(|e| GatewayError::Decode(format!("embed decode: {e}")))?;
+            if channels.len() < 3 || channels.iter().any(|c| c.len() != n) {
+                return Err(GatewayError::Decode(
+                    "embed decode: unexpected channel shape".into(),
+                ));
+            }
+            let mut rgb = vec![0u8; 3 * n];
+            for i in 0..n {
+                rgb[3 * i] = channels[0][i].clamp(0.0, 255.0).round() as u8;
+                rgb[3 * i + 1] = channels[1][i].clamp(0.0, 255.0).round() as u8;
+                rgb[3 * i + 2] = channels[2][i].clamp(0.0, 255.0).round() as u8;
+            }
+            let name_owned = name.to_string();
+            let embedder_h = Arc::clone(&embedder);
+            let idx_path = index_path.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), GatewayError> {
+                let vec = embedder_h
+                    .embed_image(&rgb, width, height)
+                    .map_err(|e| GatewayError::Decode(format!("clip image: {e}")))?;
+                let idx = holofs_embed::Index::open(&idx_path)
+                    .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
+                let rec = holofs_embed::EmbedRecord {
+                    data_cid,
+                    band,
+                    name: name_owned,
+                    vec,
+                };
+                idx.append(&rec)
+                    .map_err(|e| GatewayError::BadRequest(format!("embed append: {e}")))?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| GatewayError::BadRequest(format!("embed join: {e}")))??;
+            any_new = true;
+        }
+        Ok(any_new)
     }
 
     /// Brute-force semantic search. Encodes `query` once, then scans
     /// every record in the index and ranks by cosine similarity.
-    /// `limit` caps the returned list. Returns an empty vector when
-    /// the index is disabled or empty.
+    /// `band` filters which layer band's embeddings to consider —
+    /// `Any` (default) takes the best score across all three bands
+    /// per file. `limit` caps the returned list. Returns an empty
+    /// vector when the index is disabled or empty.
     pub async fn semantic_search(
         &self,
         query: &str,
         limit: usize,
+        band: SearchBand,
     ) -> Result<Vec<SemanticHit>, GatewayError> {
         let Some(embedder) = self.ensure_embedder().await? else {
             return Ok(Vec::new());
@@ -2104,7 +2147,10 @@ impl Gateway {
                 .map_err(|e| GatewayError::Decode(format!("clip text: {e}")))?;
             let idx = holofs_embed::Index::open(&index_path)
                 .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
-            let mut hits: Vec<SemanticHit> = Vec::new();
+            // Bucket scores per (name, band) so we can pick the best
+            // band per file when `band == Any`.
+            use std::collections::HashMap;
+            let mut best_per_name: HashMap<String, (f32, SearchBand)> = HashMap::new();
             for rec in idx
                 .iter()
                 .map_err(|e| GatewayError::BadRequest(format!("embed iter: {e}")))?
@@ -2112,14 +2158,31 @@ impl Gateway {
                 let rec = rec
                     .map_err(|e| GatewayError::BadRequest(format!("embed rec: {e}")))?;
                 if rec.vec.is_empty() {
-                    continue; // tombstone
+                    continue;
+                }
+                let rec_band = match rec.band {
+                    holofs_embed::LayerBand::Coarse => SearchBand::Coarse,
+                    holofs_embed::LayerBand::Mid => SearchBand::Mid,
+                    holofs_embed::LayerBand::Full => SearchBand::Full,
+                };
+                // Filter out bands the caller doesn't want.
+                match band {
+                    SearchBand::Any => {}
+                    other if other == rec_band => {}
+                    _ => continue,
                 }
                 let score = cosine(&q, &rec.vec);
-                hits.push(SemanticHit {
-                    name: rec.name,
-                    score,
-                });
+                let entry = best_per_name
+                    .entry(rec.name.clone())
+                    .or_insert((f32::NEG_INFINITY, rec_band));
+                if score > entry.0 {
+                    *entry = (score, rec_band);
+                }
             }
+            let mut hits: Vec<SemanticHit> = best_per_name
+                .into_iter()
+                .map(|(name, (score, band))| SemanticHit { name, score, band })
+                .collect();
             hits.sort_by(|a, b| {
                 b.score
                     .partial_cmp(&a.score)

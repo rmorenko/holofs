@@ -635,18 +635,26 @@ pub async fn semantic_search(
         )
             .into_response();
     }
-    match gw.semantic_search(&q, limit).await {
+    let band = raw
+        .as_deref()
+        .and_then(|s| parse_urlencoded_field(s, "band"))
+        .map(|s| holofs_gateway::SearchBand::parse(&s))
+        .unwrap_or(holofs_gateway::SearchBand::Any);
+    match gw.semantic_search(&q, limit, band).await {
         Ok(hits) => {
             let mut body = String::from("{\"hits\":[");
             for (i, h) in hits.iter().enumerate() {
                 if i > 0 {
                     body.push(',');
                 }
-                // Manual JSON escape of the name: gateway-stored catalog
-                // paths use `[A-Za-z0-9._/-]` per `catalog_path::validate`,
-                // so plain stringify is safe.
+                let band_str = match h.band {
+                    holofs_gateway::SearchBand::Coarse => "coarse",
+                    holofs_gateway::SearchBand::Mid => "mid",
+                    holofs_gateway::SearchBand::Full => "full",
+                    holofs_gateway::SearchBand::Any => "any",
+                };
                 body.push_str(&format!(
-                    "{{\"name\":\"{}\",\"score\":{:.6}}}",
+                    "{{\"name\":\"{}\",\"score\":{:.6},\"band\":\"{band_str}\"}}",
                     h.name.replace('\\', "\\\\").replace('"', "\\\""),
                     h.score
                 ));

@@ -1908,6 +1908,23 @@ body.catalog-page .tree-scroll {
   background: var(--accent);
   opacity: 0.75;
 }
+.search-band {
+  margin: -10px 0 16px;
+}
+.search-band-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  background: var(--surf2);
+  border: 1px solid var(--bord);
+  color: var(--mut);
+}
+.search-band-badge.band-coarse { color: #8fb8ff; border-color: #4a6da5; }
+.search-band-badge.band-mid    { color: #c89bff; border-color: #74559e; }
+.search-band-badge.band-full   { color: #f2a4d2; border-color: #9a4f74; }
+.search-band-badge.band-any    { color: var(--mut); }
 
 /* ============================================================
  * Stage 13.1: /holo/<name> streaming-hologram demo.
