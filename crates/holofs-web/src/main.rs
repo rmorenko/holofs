@@ -207,14 +207,20 @@ async fn main() {
                 move || view! { <Shell options=opts.clone()/> }
             },
         )
-        // Stage 13.5: force the browser to revalidate the leptos
-        // wasm/js bundle on every load. Without this the default
-        // ServeDir response has no Cache-Control, so the browser
-        // caches `holofs_bg.wasm` aggressively against the last
-        // PUT/GET pair — and a soft-reloaded tab after `cargo leptos
-        // build` keeps running the old WASM against the new SSR
-        // markup, which silently breaks hydration. `no-cache` keeps
-        // the resource cached but forces a 304/200 revalidation.
+        // Stage 13.5: serve the leptos wasm/js bundle.
+        // - `Cache-Control: no-cache` forces a 304/200 revalidation
+        //   on every page load so a `cargo leptos build` rebuild
+        //   isn't shadowed by a stale browser-cached copy.
+        // - The dedicated `/pkg/holofs_bg.wasm` route papers over a
+        //   cargo-leptos 0.3.6 ↔ wasm-bindgen filename mismatch:
+        //   wasm-bindgen's JS glue hardcodes `import('holofs_bg.wasm')`
+        //   but cargo-leptos saves the binary as `holofs.wasm`. We
+        //   serve the same bytes under either name so the browser
+        //   stops 404-ing the wasm fetch and hydrate actually runs.
+        .route(
+            "/pkg/holofs_bg.wasm",
+            get(handlers::serve_wasm_alias),
+        )
         .nest_service(
             "/pkg",
             tower::ServiceBuilder::new()

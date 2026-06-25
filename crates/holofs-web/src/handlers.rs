@@ -586,6 +586,33 @@ pub async fn spotlight_png(
     }
 }
 
+/// Stage 13.5: alias `/pkg/holofs_bg.wasm` → the on-disk
+/// `target/site/pkg/holofs.wasm`. wasm-bindgen's generated JS glue
+/// hardcodes the `_bg.wasm` suffix in its `import.meta.url` fetch,
+/// but cargo-leptos 0.3.6 writes the binary out as plain
+/// `<output-name>.wasm`. Without this alias the wasm fetch 404s and
+/// hydrate silently never runs (visible symptom: lazy folders stay
+/// stuck on "loading catalog…").
+pub async fn serve_wasm_alias() -> Response {
+    let path = std::path::PathBuf::from("target/site/pkg/holofs.wasm");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let mut resp = Response::new(axum::body::Body::from(bytes));
+            let h = resp.headers_mut();
+            h.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/wasm"),
+            );
+            h.insert(
+                http::header::CACHE_CONTROL,
+                http::HeaderValue::from_static("no-cache"),
+            );
+            resp
+        }
+        Err(_) => not_found(),
+    }
+}
+
 /// Stage 13.4: `POST /api/restore` — form-friendly version restore.
 /// Body: `name=<path>&id=<version_id>&return_to=<url>`. On success
 /// 303-redirects to `return_to` (defaults to `/versions/<name>`).
