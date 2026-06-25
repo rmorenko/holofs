@@ -539,6 +539,53 @@ pub async fn mix_save(
     redirect_to(&target)
 }
 
+/// Stage 13.2: `GET /api/spotlight.png?name=...&x=N&y=N&w=N&h=N` —
+/// composited PNG (L0 blur outside the ROI, full resolution inside).
+/// All ROI params are floats in `[0, 1]` normalised against the image
+/// width / height.
+pub async fn spotlight_png(
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
+    Extension(gw): Extension<Arc<Gateway>>,
+) -> Response {
+    let Some(name) = raw.as_deref().and_then(|s| parse_urlencoded_field(s, "name")) else {
+        return bad_request("missing 'name'");
+    };
+    let parse = |k: &str, dflt: f32| -> f32 {
+        raw.as_deref()
+            .and_then(|s| parse_urlencoded_field(s, k))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(dflt)
+    };
+    let roi = holofs_gateway::SpotlightRoi {
+        x: parse("x", 0.35),
+        y: parse("y", 0.35),
+        w: parse("w", 0.3),
+        h: parse("h", 0.3),
+    };
+    match gw.spotlight(&name, roi).await {
+        Ok(out) => {
+            let mut resp = Response::new(axum::body::Body::from(out.bytes));
+            let h = resp.headers_mut();
+            h.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+            h.insert(
+                HeaderName::from_static("x-holofs-roi-px"),
+                HeaderValue::from_str(&format!(
+                    "{},{},{},{}",
+                    out.roi_px.0, out.roi_px.1, out.roi_px.2, out.roi_px.3
+                ))
+                .unwrap_or(HeaderValue::from_static("0,0,0,0")),
+            );
+            h.insert(
+                HeaderName::from_static("x-holofs-decode-ms"),
+                HeaderValue::from_str(&out.decode_ms.to_string())
+                    .unwrap_or(HeaderValue::from_static("0")),
+            );
+            resp
+        }
+        Err(e) => error_to_response(e),
+    }
+}
+
 /// `POST /api/embed_all` — kick off a one-shot bulk embed of every
 /// image in the catalog that isn't in `embeddings.bin` yet. Synchronous
 /// — the request hangs until the walk finishes — because the typical
@@ -1152,6 +1199,8 @@ const RESERVED_TOP_SEGMENTS: &[&str] = &[
     "search",
     // Stage 13.1: streaming hologram demo page.
     "holo",
+    // Stage 13.2: ROI spotlight composite page.
+    "spotlight",
 ];
 
 fn top_segment(path: &str) -> &str {

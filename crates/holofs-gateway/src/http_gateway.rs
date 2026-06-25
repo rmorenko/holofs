@@ -2149,6 +2149,98 @@ impl Gateway {
         });
     }
 
+    /// Stage 13.2: holographic spotlight — decode the image twice (L0
+    /// only and full quality), then composite per-pixel so the rectangle
+    /// `(x_pct, y_pct, w_pct, h_pct)` inside the image is sharp while
+    /// everything else stays at L0 blur. The architectural pitch from
+    /// `/about` made concrete: detail layers selectively rendered to
+    /// the spatial region the user cares about, no re-encoding of
+    /// anything.
+    ///
+    /// `roi` is normalised: each coordinate is `0.0..=1.0` of the image
+    /// width / height. Clamped to image bounds.
+    pub async fn spotlight(
+        &self,
+        name: &str,
+        roi: SpotlightRoi,
+    ) -> Result<SpotlightImage, GatewayError> {
+        let manifest = self
+            .catalog
+            .lock()
+            .await
+            .get(name)
+            .cloned()
+            .ok_or(GatewayError::NotFound)?;
+        if manifest.kind != ObjectKind::Image {
+            return Err(GatewayError::BadRequest(
+                "spotlight: not applicable to non-image objects".into(),
+            ));
+        }
+        let live = self.effective_live().await;
+        let t0 = Instant::now();
+        let max_layer = manifest.nlayers.saturating_sub(1);
+
+        // Coarse pass (L0). Cheap — typically a tenth of the bytes of
+        // the full decode.
+        let (lo_channels, lo_bytes) =
+            get_object_up_to_layer(&self.gf, &manifest, &live, 0)
+                .await
+                .map_err(|e| GatewayError::Decode(format!("spotlight L0: {e}")))?;
+        // Full pass.
+        let (hi_channels, hi_bytes) =
+            get_object_up_to_layer(&self.gf, &manifest, &live, max_layer)
+                .await
+                .map_err(|e| GatewayError::Decode(format!("spotlight full: {e}")))?;
+
+        let w = manifest.width as usize;
+        let h = manifest.height as usize;
+        let n_pixels = w * h;
+        if lo_channels.len() != hi_channels.len()
+            || lo_channels.iter().any(|c| c.len() != n_pixels)
+            || hi_channels.iter().any(|c| c.len() != n_pixels)
+        {
+            return Err(GatewayError::Decode(
+                "spotlight: channel shape mismatch".into(),
+            ));
+        }
+        // Translate normalised ROI to pixel coords, clamped to image
+        // bounds. `roi.w == 0 || roi.h == 0` produces an all-blurry
+        // image — same behaviour as "no spotlight requested".
+        let x0 = (roi.x.clamp(0.0, 1.0) * w as f32).round() as usize;
+        let y0 = (roi.y.clamp(0.0, 1.0) * h as f32).round() as usize;
+        let x1 = ((roi.x + roi.w).clamp(0.0, 1.0) * w as f32).round() as usize;
+        let y1 = ((roi.y + roi.h).clamp(0.0, 1.0) * h as f32).round() as usize;
+        let n_channels = lo_channels.len();
+        let mut composed: Vec<Vec<f32>> = vec![Vec::with_capacity(n_pixels); n_channels];
+        for c in 0..n_channels {
+            composed[c].resize(n_pixels, 0.0);
+            for y in 0..h {
+                let inside_y = y >= y0 && y < y1;
+                let row_off = y * w;
+                for x in 0..w {
+                    let inside = inside_y && x >= x0 && x < x1;
+                    let idx = row_off + x;
+                    composed[c][idx] = if inside {
+                        hi_channels[c][idx]
+                    } else {
+                        lo_channels[c][idx]
+                    };
+                }
+            }
+        }
+        let png = encode_png(&composed, manifest.width, manifest.height);
+        Ok(SpotlightImage {
+            bytes: png,
+            width: manifest.width,
+            height: manifest.height,
+            channels: manifest.channels,
+            nlayers: manifest.nlayers,
+            bytes_downloaded: lo_bytes + hi_bytes,
+            decode_ms: t0.elapsed().as_millis(),
+            roi_px: (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32),
+        })
+    }
+
     /// Walk the catalog and embed every image that isn't in the index
     /// yet. Returns `(newly_embedded, skipped)`. Used by the
     /// `holofs embed-all` CLI command.
@@ -2608,6 +2700,35 @@ pub struct FileMetrics {
     pub layer_energy: Option<Vec<f64>>,
     /// Audio-only: three-band energy split derived from `layer_energy`.
     pub audio_bands: Option<AudioBandEnergy>,
+}
+
+/// Stage 13.2: region-of-interest for [`Gateway::spotlight`]. All four
+/// coordinates are normalised image-relative (`0.0..=1.0`). `x`/`y` is
+/// the top-left corner; `w`/`h` is the rectangle's extent.
+#[derive(Debug, Clone, Copy)]
+pub struct SpotlightRoi {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// Result of [`Gateway::spotlight`].
+#[derive(Debug, Clone)]
+pub struct SpotlightImage {
+    /// PNG bytes of the composited image: full-quality inside the ROI,
+    /// L0 (coarse) blur outside.
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub channels: u8,
+    pub nlayers: u8,
+    /// Sum of both decode passes' bandwidth.
+    pub bytes_downloaded: u64,
+    pub decode_ms: u128,
+    /// `(x, y, w, h)` of the ROI in actual pixels after clamping —
+    /// echoed back so the UI can draw a frame on top of the image.
+    pub roi_px: (u32, u32, u32, u32),
 }
 
 /// Three-band audio energy split returned in [`FileMetrics::audio_bands`].

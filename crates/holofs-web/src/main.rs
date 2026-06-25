@@ -142,6 +142,10 @@ async fn main() {
         // Stage 13.1: streaming hologram — multipart/x-mixed-replace
         // body re-rendered for every layer from L0 to full.
         .route("/preview/stream/*name", get(handlers::preview_stream))
+        // Stage 13.2: holographic spotlight — coarse outside, sharp
+        // inside the ROI. Both pixel space coords (`x_px`/`y_px`/…) and
+        // normalised coords (`x`/`y`/…) accepted via query.
+        .route("/api/spotlight.png", get(handlers::spotlight_png))
         .route("/api/mv", post(handlers::mv))
         // Stage 11.4: form-friendly file upload from the catalog page.
         .route(

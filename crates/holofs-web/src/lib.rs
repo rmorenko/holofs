@@ -34,6 +34,7 @@ pub mod mix;
 pub mod range;
 pub mod search;
 pub mod similar;
+pub mod spotlight;
 pub mod ui;
 
 /// Catalog view-model carried over the wire by the [`get_catalog`] server
@@ -565,6 +566,7 @@ fn RoutedApp() -> impl IntoView {
             <Route path=path!("/about") view=about::AboutPage/>
             <Route path=path!("/search") view=search::SearchPage/>
             <Route path=path!("/holo/*name") view=holo::HoloPage/>
+            <Route path=path!("/spotlight") view=spotlight::SpotlightPage/>
         </Routes>
     }
 }
@@ -1208,6 +1210,8 @@ fn lazy_file_leaf_inner(entry: CatalogEntry) -> impl IntoView {
                     <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
                     <span class="tree-sep">"·"</span>
                     <a href={format!("/holo/{}", enc_full.clone())} rel="external">{t!("holo.link_label")}</a>
+                    <span class="tree-sep">"·"</span>
+                    <a href={format!("/spotlight?a={}", enc_full.clone())} rel="external">{t!("spotlight.link_label")}</a>
                 })}
                 <span class="tree-sep">"·"</span>
                 <form
@@ -2077,6 +2081,7 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
                 {(kind == "image").then(|| view! {
                     " · " <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
                     " · " <a href={format!("/holo/{}", enc_full.clone())} rel="external">{t!("holo.link_label")}</a>
+                    " · " <a href={format!("/spotlight?a={}", enc_full.clone())} rel="external">{t!("spotlight.link_label")}</a>
                 })}
                 " · "
                 <form
