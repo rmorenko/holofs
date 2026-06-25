@@ -184,6 +184,42 @@ pub fn fingerprint_hex(fp: &Fingerprint) -> String {
 
 // === Cross-object analytics ===============================================
 
+/// Stage 13.0: per-layer shard overlap. Returns, for every layer in
+/// the target manifest `a`, the number of `a`'s hashes that also live
+/// in `b` (across any layer of `b`). The split lets the caller tell
+/// "shares coarse structure" (overlap concentrated in low layers)
+/// apart from "shares fine detail" (concentrated in high layers); the
+/// difference is the robust-copy signal: watermarks / re-encodes
+/// preserve low-layer hashes while perturbing the high ones.
+pub fn shard_overlap_per_layer(a: &Manifest, b: &Manifest) -> Vec<u32> {
+    use std::collections::HashSet;
+    if a.nlayers == 0 {
+        return Vec::new();
+    }
+    let mut set_b: HashSet<Hash> = HashSet::new();
+    for per_c in &b.shard_hashes {
+        for per_l in per_c {
+            for h in per_l {
+                set_b.insert(*h);
+            }
+        }
+    }
+    let mut per_layer = vec![0u32; a.nlayers as usize];
+    for per_c in &a.shard_hashes {
+        for (l, per_l) in per_c.iter().enumerate() {
+            if l >= per_layer.len() {
+                break;
+            }
+            for h in per_l {
+                if set_b.contains(h) {
+                    per_layer[l] += 1;
+                }
+            }
+        }
+    }
+    per_layer
+}
+
 /// How many shard hashes overlap between two manifests. Returns
 /// (common, total_a, total_b). For identical objects (same CID, deterministic
 /// PUT) common = total_a = total_b.

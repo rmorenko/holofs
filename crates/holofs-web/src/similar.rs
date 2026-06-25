@@ -34,6 +34,14 @@ pub struct ShardOverlapView {
     pub name: String,
     pub common: usize,
     pub overlap_pct: f32,
+    /// Stage 13.0: low-layer overlap %.
+    pub low_layer_overlap_pct: f32,
+    /// Stage 13.0: high-layer overlap %.
+    pub high_layer_overlap_pct: f32,
+    /// Stage 13.0: low - high. >30 flags robust copies (watermark /
+    /// recompress / light retouch — structure intact, detail
+    /// perturbed).
+    pub robust_copy_score: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -105,6 +113,9 @@ fn report_to_view(rep: holofs_gateway::SimilarReport) -> SimilarReportView {
                 name: o.name,
                 common: o.common,
                 overlap_pct: o.overlap_pct,
+                low_layer_overlap_pct: o.low_layer_overlap_pct,
+                high_layer_overlap_pct: o.high_layer_overlap_pct,
+                robust_copy_score: o.robust_copy_score,
             })
             .collect(),
     }
@@ -294,16 +305,36 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
         } else {
             view! {
                 <p class="mut">{t!("similar.overlaps_blurb")}</p>
+                <p class="mut">{t!("similar.robust_copy_blurb")}</p>
                 <table>
                     <tr>
                         <th class="name">{t!("similar.col.name")}</th>
                         <th class="name">{t!("similar.col.common")}</th>
                         <th class="name">{t!("similar.col.overlap_pct")}</th>
+                        <th class="name">{t!("similar.col.low_band")}</th>
+                        <th class="name">{t!("similar.col.high_band")}</th>
+                        <th class="name">{t!("similar.col.robust_copy")}</th>
                     </tr>
                     {overlaps.into_iter().map(|o| {
                         let nenc = crate::url_encode(&o.name);
                         let pct = format!("{:.1}%", o.overlap_pct);
+                        let low = format!("{:.1}%", o.low_layer_overlap_pct);
+                        let high = format!("{:.1}%", o.high_layer_overlap_pct);
                         let href = similar_href(&nenc, &scope_for_links);
+                        let robust_score = o.robust_copy_score;
+                        let robust_cls = if robust_score >= 30.0 { "partial" }
+                                          else if robust_score >= 10.0 { "mut" }
+                                          else { "mut" };
+                        let robust_label = if robust_score >= 30.0 {
+                            format!("⚠ {robust_score:+.1}")
+                        } else {
+                            format!("{robust_score:+.1}")
+                        };
+                        let robust_title: String = if robust_score >= 30.0 {
+                            t!("similar.robust_copy_warn").to_string()
+                        } else {
+                            String::new()
+                        };
                         view! {
                             <tr>
                                 <td class="name">
@@ -311,6 +342,11 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
                                 </td>
                                 <td class="name"><code>{o.common}</code></td>
                                 <td class="name"><b>{pct}</b></td>
+                                <td class="name"><code>{low}</code></td>
+                                <td class="name"><code>{high}</code></td>
+                                <td class={format!("name {robust_cls}")} title=robust_title>
+                                    <code>{robust_label}</code>
+                                </td>
                             </tr>
                         }
                     }).collect_view()}

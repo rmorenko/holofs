@@ -1429,10 +1429,47 @@ impl Gateway {
                 } else {
                     0.0
                 };
+                // Stage 13.0: compute low / high band overlaps so the
+                // UI can surface a "robust copy?" warning. Split point
+                // is the midpoint of `nlayers` — for `nlayers=8` that's
+                // L0..=L3 vs L4..=L7. For files with `nlayers < 2`
+                // (text / opaque) both bands collapse to zero, which
+                // the UI treats as "n/a".
+                let per_layer =
+                    holofs_analytics::fingerprint::shard_overlap_per_layer(&manifest, other);
+                let nlayers = per_layer.len();
+                let mid = nlayers / 2;
+                let low_shared: u32 = per_layer.iter().take(mid).sum();
+                let high_shared: u32 = per_layer.iter().skip(mid).sum();
+                let low_total: usize = manifest
+                    .shard_hashes
+                    .iter()
+                    .flat_map(|chan| chan.iter().take(mid))
+                    .map(|hs| hs.len())
+                    .sum();
+                let high_total: usize = manifest
+                    .shard_hashes
+                    .iter()
+                    .flat_map(|chan| chan.iter().skip(mid))
+                    .map(|hs| hs.len())
+                    .sum();
+                let low_pct = if low_total > 0 {
+                    low_shared as f32 * 100.0 / low_total as f32
+                } else {
+                    0.0
+                };
+                let high_pct = if high_total > 0 {
+                    high_shared as f32 * 100.0 / high_total as f32
+                } else {
+                    0.0
+                };
                 overlaps.push(ShardOverlap {
                     name: n,
                     common,
                     overlap_pct: pct,
+                    low_layer_overlap_pct: low_pct,
+                    high_layer_overlap_pct: high_pct,
+                    robust_copy_score: low_pct - high_pct,
                 });
             }
         }
@@ -2388,6 +2425,19 @@ pub struct ShardOverlap {
     pub common: usize,
     /// `common / total_target * 100`.
     pub overlap_pct: f32,
+    /// Stage 13.0: percentage of *low-layer* (structure / silhouette)
+    /// shards of the target that this neighbour also carries. Computed
+    /// over the bottom half of layers — for the typical `nlayers=8`
+    /// image that's L0..=L3.
+    pub low_layer_overlap_pct: f32,
+    /// Percentage of *high-layer* (detail / texture) shards shared.
+    /// Top half of layers.
+    pub high_layer_overlap_pct: f32,
+    /// `low - high` percentage points. Positive values flag "robust
+    /// copies": files where the structure is preserved (low layers
+    /// hash-identical) but detail differs — exactly what a watermark,
+    /// recompression, or light retouch produces.
+    pub robust_copy_score: f32,
 }
 
 /// Result of [`Gateway::similar_to`].
