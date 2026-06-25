@@ -117,9 +117,19 @@ pub async fn collect_layer_stats(
                 .iter()
                 .filter(|s| expected.contains(&shard_hash(s)))
                 .count() as u32;
+            // Guard the empty-live case: the monitor's first tick can
+            // legitimately race cluster startup and see no live nodes.
+            // place_shard → place_layer_zone_aware panics on an empty
+            // slice, so short-circuit to "no hosting nodes" instead.
+            // n_alive is already zero (no shards came back from the
+            // gather), so the margin / decodability picture stays
+            // honest — we just don't claim placement for a cluster
+            // that isn't there.
             let mut hosting: HashSet<usize> = HashSet::new();
-            for idx in 0..manifest.n_per_layer[l as usize] {
-                hosting.insert(manifest.place_shard(c, l, idx, &live_sorted));
+            if !live_sorted.is_empty() {
+                for idx in 0..manifest.n_per_layer[l as usize] {
+                    hosting.insert(manifest.place_shard(c, l, idx, &live_sorted));
+                }
             }
             out.push(LayerStats {
                 channel: c,
@@ -308,7 +318,19 @@ fn sorted(live: &LiveNodes) -> Vec<usize> {
 
 /// For each (channel, layer) — the list of nodes shards would land on via
 /// HRW over `live_sorted`. Inner list length = `n_per_layer[layer]`.
+///
+/// **Empty `live_sorted` returns an empty layout** — the same shape
+/// the rest of `object_health` happily ignores. Without this guard
+/// `manifest.place_shard` panics ("live node set is empty") whenever
+/// a zone-aware placement runs against a cluster that's transiently
+/// fully down (e.g. monitor's first tick racing node boot).
 fn build_layout(manifest: &Manifest, live_sorted: &[usize]) -> Vec<Vec<Vec<usize>>> {
+    if live_sorted.is_empty() {
+        return vec![
+            vec![Vec::new(); manifest.nlayers as usize];
+            manifest.channels as usize
+        ];
+    }
     let mut layout = vec![vec![Vec::new(); manifest.nlayers as usize]; manifest.channels as usize];
     for c in 0..manifest.channels {
         for l in 0..manifest.nlayers {
@@ -540,5 +562,35 @@ mod tests {
         let p = scen[0].pmf();
         let sum: f32 = p.iter().sum();
         assert!((sum - 1.0).abs() < 1e-5, "pmf does not sum to 1: {sum}");
+    }
+
+    /// Regression test for the "live node set is empty" panic — the
+    /// monitor's first tick legitimately sees an empty `live` slice
+    /// during cluster startup; we must NOT panic from inside
+    /// place_shard, just return an empty/all-zero layout.
+    #[test]
+    fn build_layout_empty_live_returns_empty() {
+        let m = manifest_2x2(&[12, 8]);
+        let layout = build_layout(&m, &[]);
+        assert_eq!(layout.len(), m.channels as usize);
+        for chan in &layout {
+            assert_eq!(chan.len(), m.nlayers as usize);
+            for lay in chan {
+                assert!(lay.is_empty(), "empty live ⇒ empty per-layer layout");
+            }
+        }
+    }
+
+    #[test]
+    fn simulate_zone_failures_empty_live_does_not_panic() {
+        let m = manifest_2x2(&[12, 8]);
+        let rows = simulate_zone_failures(&m, &Vec::new());
+        // Every zone is "dead" — none of the manifest's nodes survive
+        // the "kill this zone" scenario when the live set was already
+        // empty to start with. The function should report each
+        // observed zone with resolution == None, no panic.
+        for r in &rows {
+            assert!(r.resolution.is_none());
+        }
     }
 }

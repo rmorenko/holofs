@@ -142,10 +142,18 @@ pub async fn tick_once(
     let mut events = Vec::new();
 
     // Snapshot the catalog so we do not hold the lock across network RPCs.
+    // Directory markers are filtered out — they carry zero nodes and
+    // zero shards, so they're never auditable. Including them as the
+    // canonical "first entry" used to derive `live_all` would yield an
+    // empty live set and panic inside `place_shard`'s zone-aware
+    // placement (see holofs-cluster issue tracker; pre-Stage 14.3
+    // bug).
     let snapshot: Vec<(String, holofs_model::manifest::Manifest)> = {
+        use holofs_model::manifest::ObjectKind;
         let cat = catalog.lock().await;
         cat.entries
             .iter()
+            .filter(|(_, m)| m.kind != ObjectKind::Directory && !m.nodes.is_empty())
             .map(|(n, m)| (n.clone(), m.clone()))
             .collect()
     };

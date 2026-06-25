@@ -123,12 +123,23 @@ pub async fn tick_once(
     state.ticks += 1;
     let mut events = Vec::new();
 
-    // 1. Node addresses come from the first manifest in the catalog.
+    // 1. Node addresses come from the first non-directory manifest in
+    //    the catalog. Directory markers carry zero nodes; if we
+    //    picked one here we'd end up with `live = []`, which floods
+    //    the log with bogus "n_alive = 0, margin = -K" warnings AND
+    //    triggers a downstream panic on place_shard inside the
+    //    auditor (the directory entry yields an empty live set —
+    //    see audit::tick_once for the same fix).
     let nodes_addrs: Vec<String> = {
+        use holofs_model::manifest::ObjectKind;
         let cat = catalog.lock().await;
-        match cat.entries.values().next() {
+        match cat
+            .entries
+            .values()
+            .find(|m| m.kind != ObjectKind::Directory && !m.nodes.is_empty())
+        {
             Some(m) => m.nodes.clone(),
-            None => return events, // empty catalog — nothing to scan
+            None => return events, // empty catalog / only directories — nothing to scan
         }
     };
     let total_nodes = nodes_addrs.len();
