@@ -154,6 +154,51 @@ impl Index {
         }
         Ok(n)
     }
+
+    /// Stage 14.3: rewrite the index keeping only records for which
+    /// `keep(data_cid)` returns `true`. Atomic-on-success: writes to
+    /// `<path>.tmp` first, then renames over the original. Returns
+    /// `(kept, dropped)` counts. Tombstones (`vec.is_empty()`) are
+    /// always dropped — they're already-deleted records.
+    pub fn rewrite_keep<F>(&self, mut keep: F) -> Result<(usize, usize), EmbedError>
+    where
+        F: FnMut(&[u8; 32]) -> bool,
+    {
+        let tmp = self.path.with_extension("bin.tmp");
+        // Start a fresh file (magic header) at the temp path.
+        if let Some(parent) = tmp.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut tmp_f = std::fs::File::create(&tmp)?;
+        tmp_f.write_all(MAGIC)?;
+        tmp_f.sync_all()?;
+        drop(tmp_f);
+
+        let mut kept = 0usize;
+        let mut dropped = 0usize;
+        {
+            // Reopen the tmp file in append mode through Index for
+            // the append API uniformity.
+            let tmp_idx = Self {
+                path: tmp.clone(),
+            };
+            for rec in self.iter()? {
+                let rec = rec?;
+                if rec.vec.is_empty() {
+                    dropped += 1;
+                    continue;
+                }
+                if keep(&rec.data_cid) {
+                    tmp_idx.append(&rec)?;
+                    kept += 1;
+                } else {
+                    dropped += 1;
+                }
+            }
+        }
+        std::fs::rename(&tmp, &self.path)?;
+        Ok((kept, dropped))
+    }
 }
 
 struct IndexIter<R: Read + Seek> {

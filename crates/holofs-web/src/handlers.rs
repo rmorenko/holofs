@@ -606,9 +606,17 @@ pub async fn spotlight_png(
 pub async fn gc_orphans(Extension(gw): Extension<Arc<Gateway>>) -> Response {
     match gw.gc_orphaned_shards().await {
         Ok(rep) => {
-            let mut body = String::with_capacity(256 + rep.nodes.len() * 96);
+            let mut body = String::with_capacity(320 + rep.nodes.len() * 96);
+            let emb_kept = rep
+                .embeddings_kept
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "null".into());
+            let emb_dropped = rep
+                .embeddings_dropped
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "null".into());
             body.push_str(&format!(
-                "{{\"live_hashes\":{},\"manifests_scanned\":{},\"held_total\":{},\"purged_total\":{},\"duration_ms\":{},\"nodes\":[",
+                "{{\"live_hashes\":{},\"manifests_scanned\":{},\"held_total\":{},\"purged_total\":{},\"embeddings_kept\":{emb_kept},\"embeddings_dropped\":{emb_dropped},\"duration_ms\":{},\"nodes\":[",
                 rep.live_hashes,
                 rep.manifests_scanned,
                 rep.held_total,

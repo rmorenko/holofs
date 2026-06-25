@@ -2737,6 +2737,12 @@ pub struct GcReport {
     pub purged_total: u64,
     /// Per-node breakdown.
     pub nodes: Vec<GcNodeReport>,
+    /// Stage 14.3: embedding records kept after rewriting
+    /// embeddings.bin. `None` when the embed feature is off.
+    pub embeddings_kept: Option<u64>,
+    /// Stage 14.3: embedding records dropped (orphan data_cid +
+    /// tombstones). `None` when the embed feature is off.
+    pub embeddings_dropped: Option<u64>,
     /// Wall-clock duration in ms.
     pub duration_ms: u128,
 }
@@ -2772,7 +2778,13 @@ impl Gateway {
         let t0 = Instant::now();
 
         // 1. Snapshot the live catalog hashes.
+        //
+        // Stage 14.3: alongside the shard-hash set we also build the
+        // set of live `data_cid`s — used at the end of the pass to
+        // tombstone embeddings whose owning object no longer exists
+        // anywhere (catalog + version archives).
         let mut live: HashSet<[u8; 32]> = HashSet::new();
+        let mut live_cids: HashSet<[u8; 32]> = HashSet::new();
         let mut manifests_scanned: u64 = 0;
         {
             let cat = self.catalog.lock().await;
@@ -2781,6 +2793,7 @@ impl Gateway {
                     continue;
                 }
                 manifests_scanned += 1;
+                live_cids.insert(m.data_cid);
                 for chan in &m.shard_hashes {
                     for per_l in chan {
                         for h in per_l {
@@ -2824,6 +2837,7 @@ impl Gateway {
                                     Err(_) => continue,
                                 };
                                 manifests_scanned += 1;
+                                live_cids.insert(m.data_cid);
                                 for chan in &m.shard_hashes {
                                     for per_l in chan {
                                         for h in per_l {
@@ -2888,12 +2902,66 @@ impl Gateway {
             });
         }
 
+        // Stage 14.3: embedding GC — rewrite embeddings.bin keeping
+        // only records whose data_cid is still in `live_cids`. Also
+        // strips tombstones for free (rewrite_keep drops empty-vec
+        // records unconditionally). Bumps ann_generation so the next
+        // semantic_search rebuilds the in-memory ANN index without
+        // stale hits.
+        let (emb_kept, emb_dropped) = {
+            let state = self.embed.lock().await;
+            if !state.enabled {
+                (None, None)
+            } else {
+                match state.index_path.clone() {
+                    None => (None, None),
+                    Some(path) => {
+                        drop(state);
+                        // Off-thread because the rewrite walks the
+                        // whole file and we don't want to block the
+                        // tokio runtime on disk IO.
+                        let cids = live_cids.clone();
+                        let path_for_task = path.clone();
+                        let result = tokio::task::spawn_blocking(
+                            move || -> Result<(usize, usize), GatewayError> {
+                                let idx = holofs_embed::Index::open(&path_for_task)
+                                    .map_err(|e| {
+                                        GatewayError::BadRequest(format!(
+                                            "embed index: {e}"
+                                        ))
+                                    })?;
+                                idx.rewrite_keep(|cid| cids.contains(cid))
+                                    .map_err(|e| {
+                                        GatewayError::BadRequest(format!(
+                                            "embed rewrite: {e}"
+                                        ))
+                                    })
+                            },
+                        )
+                        .await
+                        .map_err(|e| {
+                            GatewayError::BadRequest(format!("embed gc join: {e}"))
+                        })??;
+                        // Invalidate the ANN cache so the next search
+                        // rebuilds against the rewritten file.
+                        let mut s = self.embed.lock().await;
+                        s.ann_generation += 1;
+                        s.ann = None;
+                        s.ann_built_at = None;
+                        (Some(result.0 as u64), Some(result.1 as u64))
+                    }
+                }
+            }
+        };
+
         Ok(GcReport {
             live_hashes: live_count,
             manifests_scanned,
             held_total,
             purged_total,
             nodes,
+            embeddings_kept: emb_kept,
+            embeddings_dropped: emb_dropped,
             duration_ms: t0.elapsed().as_millis(),
         })
     }
