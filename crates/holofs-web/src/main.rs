@@ -139,6 +139,9 @@ async fn main() {
         // Stage 12.8: semantic-search bulk indexer + query endpoint.
         .route("/api/embed_all", post(handlers::embed_all))
         .route("/api/search", get(handlers::semantic_search))
+        // Stage 13.1: streaming hologram — multipart/x-mixed-replace
+        // body re-rendered for every layer from L0 to full.
+        .route("/preview/stream/*name", get(handlers::preview_stream))
         .route("/api/mv", post(handlers::mv))
         // Stage 11.4: form-friendly file upload from the catalog page.
         .route(

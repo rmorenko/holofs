@@ -1908,3 +1908,66 @@ body.catalog-page .tree-scroll {
   background: var(--accent);
   opacity: 0.75;
 }
+
+/* ============================================================
+ * Stage 13.1: /holo/<name> streaming-hologram demo.
+ * ============================================================ */
+
+.holo-page { max-width: 920px; }
+.holo-back { margin: 12px 0 6px; }
+.holo-h {
+  margin: 0 0 8px;
+  font-size: 20px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--fg);
+}
+.holo-intro {
+  margin: 0 0 18px;
+  font-size: 14px;
+  line-height: 1.55;
+  max-width: 760px;
+}
+
+.holo-stage {
+  display: flex;
+  justify-content: center;
+  background: #000;
+  border: 1px solid var(--bord);
+  border-radius: 10px;
+  padding: 14px;
+  margin: 0 0 22px;
+  min-height: 240px;
+}
+.holo-image {
+  max-width: 100%;
+  height: auto;
+  image-rendering: auto;
+  border-radius: 6px;
+}
+
+.holo-notes {
+  background: var(--surf);
+  border: 1px solid var(--bord);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin: 0 0 36px;
+}
+.holo-notes h3 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.holo-steps {
+  padding-left: 22px;
+  margin: 0 0 12px;
+}
+.holo-steps li {
+  margin: 6px 0;
+  font-size: 14px;
+  line-height: 1.5;
+}

@@ -26,6 +26,7 @@ pub mod escrow;
 pub mod handlers;
 pub mod health;
 pub mod help;
+pub mod holo;
 pub mod i18n;
 pub mod inspect;
 pub mod mix;
@@ -563,6 +564,7 @@ fn RoutedApp() -> impl IntoView {
             <Route path=path!("/help/:slug") view=help::HelpDocPage/>
             <Route path=path!("/about") view=about::AboutPage/>
             <Route path=path!("/search") view=search::SearchPage/>
+            <Route path=path!("/holo/*name") view=holo::HoloPage/>
         </Routes>
     }
 }
@@ -1204,6 +1206,8 @@ fn lazy_file_leaf_inner(entry: CatalogEntry) -> impl IntoView {
                 {(kind == "image").then(|| view! {
                     <span class="tree-sep">"·"</span>
                     <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
+                    <span class="tree-sep">"·"</span>
+                    <a href={format!("/holo/{}", enc_full.clone())} rel="external">{t!("holo.link_label")}</a>
                 })}
                 <span class="tree-sep">"·"</span>
                 <form
@@ -2072,6 +2076,7 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
                 " · " <a href={format!("/health/{}", enc_full.clone())} rel="external">{t!("card.action.health")}</a>
                 {(kind == "image").then(|| view! {
                     " · " <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
+                    " · " <a href={format!("/holo/{}", enc_full.clone())} rel="external">{t!("holo.link_label")}</a>
                 })}
                 " · "
                 <form

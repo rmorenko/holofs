@@ -70,6 +70,100 @@ pub async fn get_preview(
     }
 }
 
+/// Stage 13.1: `GET /preview/stream/<name>` — streaming hologram.
+///
+/// Returns a `multipart/x-mixed-replace` body where each part is the
+/// PNG of the object decoded up to a growing layer ceiling
+/// (L0 → L0-L1 → … → full). Browsers display each part in turn,
+/// swapping the visible `<img>` content as new parts arrive — the
+/// image visibly *sharpens* without a single line of JavaScript.
+///
+/// Cache locality: each successive `decode_object(name, Some(layer))`
+/// call reuses the cluster shards the previous call already fetched
+/// for the lower layers, and the on-disk PNG cache means a second
+/// visitor sees instant frames.
+pub async fn preview_stream(
+    Path(name): Path<String>,
+    Extension(gw): Extension<Arc<Gateway>>,
+) -> Response {
+    use axum::body::Body;
+    use http::header::HeaderValue as HHV;
+
+    if is_reserved_name(&name) {
+        return not_found();
+    }
+
+    // Read the manifest once to know how many layers we need to walk.
+    // We do not snapshot the manifest itself — gateway::decode_object
+    // re-reads it from the catalog on each call, which is fine.
+    let nlayers = {
+        let cat = gw.catalog().lock().await;
+        match cat.get(&name) {
+            Some(m) if m.kind == ObjectKind::Image => m.nlayers,
+            Some(_) => {
+                return error_to_response(GatewayError::PreviewUnsupported);
+            }
+            None => return not_found(),
+        }
+    };
+    if nlayers == 0 {
+        return error_to_response(GatewayError::Decode("no layers".into()));
+    }
+
+    // Boundary string must not appear inside any PNG body; the
+    // RFC 2046 alphabet plus a strong random suffix is safer than
+    // a fixed string, but a static boundary works in practice because
+    // PNG bodies have their own framing and never contain CRLF runs
+    // matching `--<token>`.
+    let boundary = "hololayer-2026-06-25";
+    let gw = Arc::clone(&gw);
+    let name_owned = name.clone();
+
+    let body_stream = async_stream::stream! {
+        for layer in 0..nlayers {
+            match gw.decode_object(&name_owned, Some(layer)).await {
+                Ok(obj) => {
+                    let png = obj.bytes;
+                    let mut part = Vec::with_capacity(png.len() + 128);
+                    // Initial CRLF only matters before the very first
+                    // boundary on some clients; we include it for
+                    // safety on every part.
+                    part.extend_from_slice(b"\r\n--");
+                    part.extend_from_slice(boundary.as_bytes());
+                    part.extend_from_slice(b"\r\nContent-Type: image/png\r\nContent-Length: ");
+                    part.extend_from_slice(png.len().to_string().as_bytes());
+                    part.extend_from_slice(b"\r\nX-Holofs-Layer: ");
+                    part.extend_from_slice(layer.to_string().as_bytes());
+                    part.extend_from_slice(b"\r\n\r\n");
+                    part.extend_from_slice(&png);
+                    yield Ok::<_, Infallible>(Bytes::from(part));
+                }
+                Err(_) => {
+                    // A layer failed (e.g. too few live shards). Stop
+                    // the stream — the browser keeps the last good
+                    // frame displayed.
+                    break;
+                }
+            }
+        }
+        // Close the multipart envelope.
+        let tail = format!("\r\n--{boundary}--\r\n");
+        yield Ok::<_, Infallible>(Bytes::from(tail.into_bytes()));
+    };
+
+    let content_type =
+        format!("multipart/x-mixed-replace; boundary={boundary}");
+    let mut resp = Response::new(Body::from_stream(body_stream));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HHV::from_str(&content_type).expect("static content-type"),
+    );
+    // Don't let intermediaries buffer the stream.
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HHV::from_static("no-store"));
+    resp
+}
+
 /// `PUT /<name>` — auto-detect kind and ingest. Returns the JSON IngestResult.
 pub async fn put_object(
     Path(name): Path<String>,
@@ -1056,6 +1150,8 @@ const RESERVED_TOP_SEGMENTS: &[&str] = &[
     "about",
     // Stage 12.9: semantic search page.
     "search",
+    // Stage 13.1: streaming hologram demo page.
+    "holo",
 ];
 
 fn top_segment(path: &str) -> &str {
