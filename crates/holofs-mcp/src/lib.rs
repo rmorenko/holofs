@@ -769,6 +769,7 @@ impl HolofsHandler {
             .ingest_bytes(&path, content.as_bytes())
             .await
             .map_err(gw_err)?;
+        self.gateway.embed_object_in_background(path.clone());
         let note = match content_type {
             Some(ct) => Some(format!(
                 "ingested {} bytes, {} shards (requested content_type='{ct}' ignored — \
@@ -1193,6 +1194,7 @@ where
             .ingest_bytes(&dest, &bytes)
             .await
             .map_err(gw_err)?;
+        h.gateway.embed_object_in_background(dest);
         // Return an empty blob — the durable copy is the catalog entry.
         Ok(Json(build(String::new(), Some(res.name))))
     } else {

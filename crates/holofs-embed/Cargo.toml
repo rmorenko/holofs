@@ -1,0 +1,38 @@
+[package]
+name = "holofs-embed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "CLIP-based image / text embeddings for holofs semantic search."
+
+[dependencies]
+# Pure-Rust tensor + transformer stack. CPU-only — the embedder runs
+# eagerly on whatever the gateway thread has, no CUDA / accelerate / mkl
+# features turned on. Heavy compile-time tradeoff for zero native-lib
+# integration.
+candle-core = { version = "0.8", default-features = false }
+candle-nn = { version = "0.8", default-features = false }
+candle-transformers = { version = "0.8", default-features = false }
+# Weights downloader (HuggingFace Hub). First call to `Embedder::new`
+# pulls `openai/clip-vit-base-patch32` into `~/.cache/huggingface/hub`.
+# Sync API is fine — the gateway only calls it once per process inside
+# `spawn_blocking`, and the rest of the embed path is plain sync work.
+hf-hub = "0.3"
+# Tokenizer for the CLIP text branch. Same vocab the original CLIP ships.
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+# Image preprocessing — CLIP expects 224×224 RGB normalised by its own
+# magic mean/std. We do the resize / normalise here, the gateway hands
+# us decoded f32 channels.
+image = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = "1"
+tracing = { workspace = true }
+# OnceCell for the lazily-initialised model instance.
+once_cell = "1"
+
+[lints]
+workspace = true

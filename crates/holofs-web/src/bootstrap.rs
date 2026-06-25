@@ -52,6 +52,10 @@ pub struct BootstrapConfig {
     pub no_seed: bool,
     /// rustls TLS settings for the node↔gateway wire protocol.
     pub tls: TlsOptions,
+    /// Stage 12.8: enable CLIP-based semantic search. Index lives at
+    /// `<storage>/embeddings.bin`; first inference downloads ~155 MiB
+    /// of model weights into `~/.cache/huggingface/hub`.
+    pub enable_embed: bool,
 }
 
 /// Where to source TLS material for the wire protocol.
@@ -87,6 +91,10 @@ impl BootstrapConfig {
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        let enable_embed = std::env::var("HOLOFS_ENABLE_EMBED")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         Self {
             storage,
             catalog,
@@ -95,6 +103,7 @@ impl BootstrapConfig {
             seed_photo,
             no_seed,
             tls: TlsOptions::default(),
+            enable_embed,
         }
     }
 }
@@ -267,6 +276,14 @@ pub async fn bootstrap_cluster(
         cluster_info,
         catalog_path.clone(),
     );
+    // Stage 12.8: wire the CLIP semantic-search index when the operator
+    // opted in. We don't pre-load the model here — that happens lazily
+    // on first PUT / first search to keep boot cheap.
+    if config.enable_embed {
+        let embed_path = config.storage.join("embeddings.bin");
+        gateway.enable_embed(embed_path.clone()).await;
+        info!(?embed_path, "semantic-search index enabled");
+    }
 
     let interval_secs: u64 = std::env::var("HOLOFS_MONITOR_INTERVAL")
         .ok()

@@ -41,6 +41,11 @@ pub struct Gateway {
     /// Optional path to the catalog file. If set, the catalog is saved
     /// atomically on each change (PUT/DELETE).
     catalog_path: Option<std::path::PathBuf>,
+    /// Stage 12.8: optional semantic-search embeddings index. `None`
+    /// when the server was started without `--enable-embed`. When set,
+    /// every PUT fires a fire-and-forget background task that embeds
+    /// the new object via CLIP and appends to the on-disk index.
+    embed: Arc<Mutex<EmbedState>>,
     gf: Arc<Gf>,
     /// Baseline list of "actually live" cluster nodes. `admin_kills` flags
     /// (set via the UI) are layered on top of it.
@@ -86,6 +91,7 @@ impl Gateway {
         Arc::new(Self {
             catalog,
             catalog_path: None,
+            embed: Arc::new(Mutex::new(EmbedState::default())),
             gf,
             live,
             admin_kills: Arc::new(Mutex::new(vec![false; n])),
@@ -108,6 +114,7 @@ impl Gateway {
         Arc::new(Self {
             catalog,
             catalog_path: Some(catalog_path),
+            embed: Arc::new(Mutex::new(EmbedState::default())),
             gf,
             live,
             admin_kills: Arc::new(Mutex::new(vec![false; n])),
@@ -116,6 +123,23 @@ impl Gateway {
             shard_cache: Mutex::new(HashMap::new()),
             escrow_cache: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Stage 12.8: turn on the CLIP-based semantic-search index. Pass
+    /// the on-disk path for the append-only `embeddings.bin` file.
+    /// Idempotent; calling twice with different paths swaps the active
+    /// index (any pre-existing embedder handle is dropped).
+    pub async fn enable_embed(&self, index_path: std::path::PathBuf) {
+        let mut s = self.embed.lock().await;
+        s.enabled = true;
+        s.index_path = Some(index_path);
+        s.embedder = None;
+    }
+
+    /// Whether the embeddings index is wired up. Cheap — just reads the
+    /// state mutex.
+    pub async fn embed_enabled(&self) -> bool {
+        self.embed.lock().await.enabled
     }
 
     /// Snapshot of admin_kills flags (for reads outside Gateway, e.g. auditor).
@@ -1855,6 +1879,283 @@ impl Gateway {
             audio_bands,
         })
     }
+}
+
+// === Stage 12.8: CLIP-based semantic search =================================
+
+/// Lazy embedder state shared across the gateway. `enabled` is set via
+/// [`Gateway::enable_embed`]; the [`Embedder`](holofs_embed::Embedder)
+/// itself is constructed on the first PUT or query after that, so a
+/// server that never gets asked to embed pays nothing.
+#[derive(Default)]
+struct EmbedState {
+    enabled: bool,
+    index_path: Option<std::path::PathBuf>,
+    embedder: Option<Arc<holofs_embed::Embedder>>,
+}
+
+/// One row of [`Gateway::semantic_search`] output. The gateway returns
+/// catalog names + scores; the frontend renders them as a card grid.
+#[derive(Debug, Clone)]
+pub struct SemanticHit {
+    /// Catalog name of the matching object.
+    pub name: String,
+    /// Cosine similarity to the query in `[-1.0, 1.0]`. CLIP-base
+    /// scores cluster narrowly around 0.2-0.35 even for strong matches,
+    /// so the UI usually shows them as 0..100 percentiles instead of
+    /// raw values.
+    pub score: f32,
+}
+
+impl Gateway {
+    /// Lazily build the [`Embedder`](holofs_embed::Embedder) handle.
+    /// The first call downloads ~155 MiB of CLIP weights from
+    /// HuggingFace into `~/.cache/huggingface/hub`; the next process
+    /// boot reads from the cache in milliseconds. Returns `None` when
+    /// the embed feature is disabled.
+    async fn ensure_embedder(
+        &self,
+    ) -> Result<Option<Arc<holofs_embed::Embedder>>, GatewayError> {
+        // Fast path — already initialised.
+        {
+            let s = self.embed.lock().await;
+            if !s.enabled {
+                return Ok(None);
+            }
+            if let Some(e) = &s.embedder {
+                return Ok(Some(Arc::clone(e)));
+            }
+        }
+        // Slow path: spawn_blocking around the candle init.
+        let built = tokio::task::spawn_blocking(holofs_embed::Embedder::new)
+            .await
+            .map_err(|e| GatewayError::BadRequest(format!("embed init join: {e}")))?
+            .map_err(|e| GatewayError::BadRequest(format!("embed init: {e}")))?;
+        let arc = Arc::new(built);
+        let mut s = self.embed.lock().await;
+        // Another task may have raced us.
+        if let Some(e) = &s.embedder {
+            return Ok(Some(Arc::clone(e)));
+        }
+        s.embedder = Some(Arc::clone(&arc));
+        Ok(Some(arc))
+    }
+
+    /// Decode the coarse layers of an image-kind object, run CLIP, and
+    /// append the embedding to the on-disk index. Idempotent —
+    /// `data_cid` re-uploads / duplicates are skipped via
+    /// `Index::has`. Returns:
+    ///   * `Ok(true)` — newly embedded,
+    ///   * `Ok(false)` — already in the index (or embed disabled, or
+    ///     wrong kind),
+    ///   * `Err(...)` — decode / inference failure.
+    pub async fn embed_object(&self, name: &str) -> Result<bool, GatewayError> {
+        let Some(embedder) = self.ensure_embedder().await? else {
+            return Ok(false);
+        };
+        let index_path = match self.embed.lock().await.index_path.clone() {
+            Some(p) => p,
+            None => return Ok(false),
+        };
+
+        let manifest = self
+            .catalog
+            .lock()
+            .await
+            .get(name)
+            .cloned()
+            .ok_or(GatewayError::NotFound)?;
+        // Stage 12.8 only embeds images. Audio / text get their own
+        // embedding pipeline in a future stage.
+        if manifest.kind != ObjectKind::Image {
+            return Ok(false);
+        }
+
+        // Open / create the index up front so we can short-circuit on
+        // dedup without paying for the decode.
+        let data_cid = manifest.data_cid;
+        let band = holofs_embed::LayerBand::Coarse;
+        {
+            let index_path = index_path.clone();
+            let already = tokio::task::spawn_blocking(move || -> Result<bool, GatewayError> {
+                let idx = holofs_embed::Index::open(&index_path)
+                    .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
+                idx.has(&data_cid, band)
+                    .map_err(|e| GatewayError::BadRequest(format!("embed has: {e}")))
+            })
+            .await
+            .map_err(|e| GatewayError::BadRequest(format!("embed has join: {e}")))??;
+            if already {
+                return Ok(false);
+            }
+        }
+
+        // Decode coarse layers — L0..=L2 inclusive. For a 256×256
+        // image with nlayers=8 that's the bottom three frequency
+        // bands; the reconstruction is heavily blurred but CLIP
+        // still picks subject / colour / silhouette reliably.
+        let live = self.effective_live().await;
+        let max_layer = (manifest.nlayers - 1).min(2);
+        let (channels, _bytes_dl) =
+            get_object_up_to_layer(&self.gf, &manifest, &live, max_layer)
+                .await
+                .map_err(|e| GatewayError::Decode(format!("embed decode: {e}")))?;
+        // Channels are `Vec<f32>` per RGB channel, row-major over
+        // width × height. CLIP wants packed RGB bytes — interleave
+        // and clamp.
+        let width = manifest.width;
+        let height = manifest.height;
+        let n = (width as usize) * (height as usize);
+        if channels.len() < 3 || channels.iter().any(|c| c.len() != n) {
+            return Err(GatewayError::Decode(
+                "embed decode: unexpected channel shape".into(),
+            ));
+        }
+        let mut rgb = vec![0u8; 3 * n];
+        for i in 0..n {
+            let r = channels[0][i].clamp(0.0, 255.0).round() as u8;
+            let g = channels[1][i].clamp(0.0, 255.0).round() as u8;
+            let b = channels[2][i].clamp(0.0, 255.0).round() as u8;
+            rgb[3 * i] = r;
+            rgb[3 * i + 1] = g;
+            rgb[3 * i + 2] = b;
+        }
+        let name_owned = name.to_string();
+        let embedder = Arc::clone(&embedder);
+        let result = tokio::task::spawn_blocking(move || -> Result<(), GatewayError> {
+            let vec = embedder
+                .embed_image(&rgb, width, height)
+                .map_err(|e| GatewayError::Decode(format!("clip image: {e}")))?;
+            let idx = holofs_embed::Index::open(&index_path)
+                .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
+            let rec = holofs_embed::EmbedRecord {
+                data_cid,
+                band,
+                name: name_owned,
+                vec,
+            };
+            idx.append(&rec)
+                .map_err(|e| GatewayError::BadRequest(format!("embed append: {e}")))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| GatewayError::BadRequest(format!("embed join: {e}")))?;
+        result?;
+        Ok(true)
+    }
+
+    /// Brute-force semantic search. Encodes `query` once, then scans
+    /// every record in the index and ranks by cosine similarity.
+    /// `limit` caps the returned list. Returns an empty vector when
+    /// the index is disabled or empty.
+    pub async fn semantic_search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SemanticHit>, GatewayError> {
+        let Some(embedder) = self.ensure_embedder().await? else {
+            return Ok(Vec::new());
+        };
+        let index_path = match self.embed.lock().await.index_path.clone() {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+        let query = query.to_string();
+        let result = tokio::task::spawn_blocking(move || -> Result<Vec<SemanticHit>, GatewayError> {
+            let q = embedder
+                .embed_text(&query)
+                .map_err(|e| GatewayError::Decode(format!("clip text: {e}")))?;
+            let idx = holofs_embed::Index::open(&index_path)
+                .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
+            let mut hits: Vec<SemanticHit> = Vec::new();
+            for rec in idx
+                .iter()
+                .map_err(|e| GatewayError::BadRequest(format!("embed iter: {e}")))?
+            {
+                let rec = rec
+                    .map_err(|e| GatewayError::BadRequest(format!("embed rec: {e}")))?;
+                if rec.vec.is_empty() {
+                    continue; // tombstone
+                }
+                let score = cosine(&q, &rec.vec);
+                hits.push(SemanticHit {
+                    name: rec.name,
+                    score,
+                });
+            }
+            hits.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            hits.truncate(limit);
+            Ok(hits)
+        })
+        .await
+        .map_err(|e| GatewayError::BadRequest(format!("search join: {e}")))?;
+        result
+    }
+
+    /// Fire-and-forget embedding for a freshly-PUT object. Called
+    /// from the web / MCP ingest handlers right after `ingest_bytes`
+    /// succeeds. Returns immediately; failures land in stderr. No-op
+    /// when the embed feature is disabled.
+    pub fn embed_object_in_background(self: &Arc<Self>, name: String) {
+        let gw = Arc::clone(self);
+        tokio::spawn(async move {
+            if !gw.embed_enabled().await {
+                return;
+            }
+            if let Err(e) = gw.embed_object(&name).await {
+                eprintln!("embed bg {name}: {e}");
+            }
+        });
+    }
+
+    /// Walk the catalog and embed every image that isn't in the index
+    /// yet. Returns `(newly_embedded, skipped)`. Used by the
+    /// `holofs embed-all` CLI command.
+    pub async fn embed_all_pending(&self) -> Result<(usize, usize), GatewayError> {
+        let names: Vec<String> = {
+            let cat = self.catalog.lock().await;
+            cat.entries
+                .iter()
+                .filter_map(|(name, m)| {
+                    if m.kind == ObjectKind::Image {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let mut new_n = 0;
+        let mut skip_n = 0;
+        for name in names {
+            match self.embed_object(&name).await {
+                Ok(true) => new_n += 1,
+                Ok(false) => skip_n += 1,
+                Err(e) => {
+                    // Continue on per-file failure — one broken object
+                    // shouldn't stall the whole catalog index.
+                    eprintln!("embed {name}: {e}");
+                }
+            }
+        }
+        Ok((new_n, skip_n))
+    }
+}
+
+/// Cosine similarity for two L2-normalised vectors == dot product.
+/// `holofs-embed` always normalises before storing, so this is a plain
+/// hot loop with no normalisation work.
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    let mut acc = 0.0f32;
+    for i in 0..n {
+        acc += a[i] * b[i];
+    }
+    acc
 }
 
 /// Per-kind object counts inside [`ApiStats`].

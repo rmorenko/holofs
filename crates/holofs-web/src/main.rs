@@ -136,6 +136,9 @@ async fn main() {
         // Stage 12.6: wavelet mix UI plumbing.
         .route("/api/mix.png", get(handlers::mix_preview))
         .route("/api/mix-save", post(handlers::mix_save))
+        // Stage 12.8: semantic-search bulk indexer + query endpoint.
+        .route("/api/embed_all", post(handlers::embed_all))
+        .route("/api/search", get(handlers::semantic_search))
         .route("/api/mv", post(handlers::mv))
         // Stage 11.4: form-friendly file upload from the catalog page.
         .route(

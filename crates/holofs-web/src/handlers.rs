@@ -84,7 +84,10 @@ pub async fn put_object(
             .into_response();
     }
     match gw.ingest_bytes(&name, &body).await {
-        Ok(res) => ingest_to_response(res),
+        Ok(res) => {
+            gw.embed_object_in_background(name.clone());
+            ingest_to_response(res)
+        }
         Err(e) => error_to_response(e),
     }
 }
@@ -261,7 +264,10 @@ pub async fn upload_form(
     }
     let target = pick_return_to(&return_to_field, &parent);
     match gw.ingest_bytes(&path, &body).await {
-        Ok(_) => redirect_to(&target),
+        Ok(_) => {
+            gw.embed_object_in_background(path);
+            redirect_to(&target)
+        }
         Err(e) => error_to_response(e),
     }
 }
@@ -427,6 +433,7 @@ pub async fn mix_save(
     if let Err(e) = gw.ingest_bytes(&dest, &out.bytes).await {
         return error_to_response(e);
     }
+    gw.embed_object_in_background(dest.clone());
     // Land the user on the tree view with the destination's parent
     // expanded — same pattern as mkdir form.
     let parent = dest.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
@@ -436,6 +443,83 @@ pub async fn mix_save(
         format!("/?open={}", url_encode_simple(&parent))
     };
     redirect_to(&target)
+}
+
+/// `POST /api/embed_all` — kick off a one-shot bulk embed of every
+/// image in the catalog that isn't in `embeddings.bin` yet. Synchronous
+/// — the request hangs until the walk finishes — because the typical
+/// run on a few hundred images is sub-minute and the curl caller wants
+/// the final `(new, skipped)` counts to print.
+pub async fn embed_all(Extension(gw): Extension<Arc<Gateway>>) -> Response {
+    if !gw.embed_enabled().await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "embed feature disabled — start the server with --enable-embed",
+        )
+            .into_response();
+    }
+    match gw.embed_all_pending().await {
+        Ok((new_n, skip_n)) => (
+            StatusCode::OK,
+            [(http::header::CONTENT_TYPE, "application/json")],
+            format!("{{\"new\":{new_n},\"skipped\":{skip_n}}}"),
+        )
+            .into_response(),
+        Err(e) => error_to_response(e),
+    }
+}
+
+/// `GET /api/search?q=...&limit=...` — natural-language semantic search.
+/// Returns JSON list of `{name, score}` sorted by cosine descending.
+pub async fn semantic_search(
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
+    Extension(gw): Extension<Arc<Gateway>>,
+) -> Response {
+    let Some(q) = raw.as_deref().and_then(|s| parse_urlencoded_field(s, "q")) else {
+        return (StatusCode::BAD_REQUEST, "missing 'q' query param").into_response();
+    };
+    if q.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "'q' is empty").into_response();
+    }
+    let limit: usize = raw
+        .as_deref()
+        .and_then(|s| parse_urlencoded_field(s, "limit"))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50)
+        .min(200);
+    if !gw.embed_enabled().await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "embed feature disabled — start the server with --enable-embed",
+        )
+            .into_response();
+    }
+    match gw.semantic_search(&q, limit).await {
+        Ok(hits) => {
+            let mut body = String::from("{\"hits\":[");
+            for (i, h) in hits.iter().enumerate() {
+                if i > 0 {
+                    body.push(',');
+                }
+                // Manual JSON escape of the name: gateway-stored catalog
+                // paths use `[A-Za-z0-9._/-]` per `catalog_path::validate`,
+                // so plain stringify is safe.
+                body.push_str(&format!(
+                    "{{\"name\":\"{}\",\"score\":{:.6}}}",
+                    h.name.replace('\\', "\\\\").replace('"', "\\\""),
+                    h.score
+                ));
+            }
+            body.push_str("]}");
+            (
+                StatusCode::OK,
+                [(http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response()
+        }
+        Err(e) => error_to_response(e),
+    }
 }
 
 /// Tiny URL-encode for redirect targets — only escapes the few
