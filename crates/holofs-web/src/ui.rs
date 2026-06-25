@@ -40,6 +40,9 @@ pub fn Topbar(active: &'static str) -> impl IntoView {
                 <a href=move || nav_href("/") class=cls_for("catalog")>
                     {move || translate("nav.catalog", &current_locale())}
                 </a>
+                <a href=move || nav_href("/search") class=cls_for("search")>
+                    {move || translate("nav.search", &current_locale())}
+                </a>
                 <a href=move || nav_href("/health") class=cls_for("health")>
                     {move || translate("nav.health", &current_locale())}
                 </a>

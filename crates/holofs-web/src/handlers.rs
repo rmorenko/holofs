@@ -1054,6 +1054,8 @@ const RESERVED_TOP_SEGMENTS: &[&str] = &[
     "mix",
     // Stage 12.7: pitch / marketing page.
     "about",
+    // Stage 12.9: semantic search page.
+    "search",
 ];
 
 fn top_segment(path: &str) -> &str {

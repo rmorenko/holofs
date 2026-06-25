@@ -1764,3 +1764,147 @@ body.catalog-page .tree-scroll {
   .about-cards, .about-cases { grid-template-columns: 1fr; }
   .about-hero-h { font-size: 30px; }
 }
+
+/* ============================================================
+ * Stage 12.9: /search semantic-search page.
+ * ============================================================ */
+
+.search-h {
+  font-size: 22px;
+  margin: 24px 0 6px;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--fg);
+}
+.search-intro {
+  margin: 0 0 18px;
+  font-size: 14px;
+  line-height: 1.55;
+  max-width: 800px;
+}
+
+.search-form {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 0 0 22px;
+  flex-wrap: wrap;
+}
+.search-input {
+  flex: 1 1 320px;
+  min-width: 240px;
+  font: 15px inherit;
+  padding: 10px 16px;
+  background: var(--surf2);
+  color: var(--fg);
+  border: 1px solid var(--bord);
+  border-radius: 999px;
+  outline: none;
+  transition: border-color .12s ease;
+}
+.search-input:focus { border-color: var(--accent); }
+.search-submit { font-size: 14px; padding: 10px 22px; }
+
+.search-count { margin: 4px 0 18px; font-size: 14px; }
+.search-empty, .search-disabled {
+  font-size: 14px;
+  line-height: 1.55;
+  margin: 14px 0 24px;
+  max-width: 720px;
+}
+
+/* Results grid. Each card is a `<a>` that opens the file in full
+ * resolution; the thumb wrap holds two stacked imgs that cross-fade
+ * (coarse-layer preview underneath, full image on top, faded in on
+ * its own load event via CSS only — no JS). */
+.search-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+  margin-bottom: 36px;
+}
+.search-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--surf);
+  border: 1px solid var(--bord);
+  border-radius: 10px;
+  overflow: hidden;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color .15s ease, transform .15s ease;
+}
+.search-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  text-decoration: none;
+}
+.search-thumb-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  background: #000;
+  overflow: hidden;
+}
+.search-thumb-coarse,
+.search-thumb-full {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* Coarse layer renders first (8% of bytes) — pixelated blur. */
+.search-thumb-coarse {
+  filter: blur(2px) saturate(1.1);
+  z-index: 1;
+}
+/* Full image sits on top. Browser-default `loading="lazy"` defers
+ * the request until near-viewport; once it lands the natural opacity
+ * is 1. We start it at 0 and animate to 1 on `load` — but pure CSS
+ * can't easily key off load events, so we use the `:where(...)`
+ * trick: a freshly painted `<img>` with no cached blob has
+ * `complete=false`; we tag it `loading="lazy"` and let it fade in
+ * via the `animation` once its layout flushes. Good enough — the
+ * full image often is already cached on subsequent visits, in which
+ * case it appears instantly. */
+.search-thumb-full {
+  z-index: 2;
+  animation: search-thumb-focus 0.8s ease-out both;
+}
+@keyframes search-thumb-focus {
+  0%   { opacity: 0; filter: blur(8px); }
+  60%  { opacity: 0.9; filter: blur(2px); }
+  100% { opacity: 1; filter: blur(0); }
+}
+
+.search-card-meta {
+  padding: 10px 12px 12px;
+}
+.search-card-name {
+  font: 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: var(--fg);
+  word-break: break-all;
+  margin-bottom: 6px;
+  line-height: 1.3;
+}
+.search-card-score {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.search-score-bar {
+  flex: 1 1 auto;
+  height: 6px;
+  background: var(--surf2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.search-score-fill {
+  height: 100%;
+  background: var(--accent);
+  opacity: 0.75;
+}

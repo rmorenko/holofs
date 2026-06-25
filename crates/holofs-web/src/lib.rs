@@ -31,6 +31,7 @@ pub mod inspect;
 pub mod mix;
 #[cfg(feature = "ssr")]
 pub mod range;
+pub mod search;
 pub mod similar;
 pub mod ui;
 
@@ -561,6 +562,7 @@ fn RoutedApp() -> impl IntoView {
             <Route path=path!("/help") view=help::HelpIndexPage/>
             <Route path=path!("/help/:slug") view=help::HelpDocPage/>
             <Route path=path!("/about") view=about::AboutPage/>
+            <Route path=path!("/search") view=search::SearchPage/>
         </Routes>
     }
 }
