@@ -964,6 +964,38 @@ pub async fn purge_object(manifest: &Manifest, live: &LiveNodes) -> Result<(), C
     Ok(())
 }
 
+/// Stage 14.0: enumerate every shard hash a node currently stores.
+/// Used by the gateway GC to compute orphans (held by node but not
+/// referenced by any catalog / version manifest). Address is taken
+/// directly — node need not belong to any particular manifest, so the
+/// caller picks from cluster topology, not from `manifest.nodes`.
+pub async fn list_node_hashes(addr: &str) -> Result<Vec<Hash>, ClientError> {
+    match rpc(addr, Request::ListHashes).await? {
+        Response::Hashes(hs) => Ok(hs),
+        Response::Error(msg) => Err(ClientError::Protocol(msg)),
+        other => Err(ClientError::Protocol(format!(
+            "expected Hashes from ListHashes, got {other:?}"
+        ))),
+    }
+}
+
+/// Stage 14.0: ask a node to delete every shard whose hash is in
+/// `hashes`. Idempotent — a node that never held a hash just no-ops on
+/// it. Returns `Ok(())` once the node acks; on Error response, surfaces
+/// the protocol error.
+pub async fn purge_node_by_hash(
+    addr: &str,
+    hashes: Vec<Hash>,
+) -> Result<(), ClientError> {
+    match rpc(addr, Request::PurgeByHash { hashes }).await? {
+        Response::Ack => Ok(()),
+        Response::Error(msg) => Err(ClientError::Protocol(msg)),
+        other => Err(ClientError::Protocol(format!(
+            "expected Ack from PurgeByHash, got {other:?}"
+        ))),
+    }
+}
+
 /// Ping every node in `manifest`. Returns the indices of those that replied Pong.
 pub async fn discover_live(manifest: &Manifest) -> LiveNodes {
     let mut live = Vec::new();

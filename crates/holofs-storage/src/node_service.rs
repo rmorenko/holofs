@@ -136,6 +136,46 @@ impl Store {
         self.shards.values().map(|v| v.len()).sum()
     }
 
+    /// Stage 14.0: list every shard hash this node currently stores,
+    /// across every `(object_id, channel, layer)` bucket. Used by the
+    /// gateway's GC pass to compute the "held but not referenced
+    /// anywhere in the catalog or version archives" delta.
+    pub fn list_all_hashes(&self) -> Vec<Hash> {
+        let mut out = Vec::with_capacity(self.total());
+        for bucket in self.shards.values() {
+            out.extend(bucket.keys().copied());
+        }
+        out
+    }
+
+    /// Stage 14.0: delete every shard whose hash is in `targets`,
+    /// regardless of which `(object_id, channel, layer)` bucket it
+    /// lived in. Returns the count actually removed. Buckets that
+    /// become empty are pruned to reclaim the outer HashMap slot.
+    pub fn purge_by_hashes(&mut self, targets: &std::collections::HashSet<Hash>) -> usize {
+        let mut removed = 0usize;
+        let mut removed_files: Vec<Hash> = Vec::new();
+        self.shards.retain(|_, bucket| {
+            bucket.retain(|h, _| {
+                if targets.contains(h) {
+                    removed += 1;
+                    removed_files.push(*h);
+                    false
+                } else {
+                    true
+                }
+            });
+            !bucket.is_empty()
+        });
+        if let Some(dir) = &self.dir {
+            for h in &removed_files {
+                let path = shard_path(dir, h);
+                let _ = fs::remove_file(&path);
+            }
+        }
+        removed
+    }
+
     /// Drop everything (used on "node death + replacement").
     pub fn wipe(&mut self) {
         self.shards.clear();
@@ -406,6 +446,16 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
         Request::AuthChallenge { nonce } => {
             let signature = identity.sign_challenge(&nonce);
             Response::AuthChallengeOk { signature }
+        }
+        Request::ListHashes => {
+            let s = store.lock().await;
+            Response::Hashes(s.list_all_hashes())
+        }
+        Request::PurgeByHash { hashes } => {
+            let set: std::collections::HashSet<Hash> = hashes.into_iter().collect();
+            let mut s = store.lock().await;
+            s.purge_by_hashes(&set);
+            Response::Ack
         }
     }
 }

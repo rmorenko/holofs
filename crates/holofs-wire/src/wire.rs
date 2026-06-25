@@ -74,6 +74,15 @@ pub enum Request {
     AuthChallenge {
         nonce: [u8; 32],
     },
+    /// Stage 14.0: enumerate every shard hash this node holds. Used by
+    /// the gateway's GC pass; node replies with [`Response::Hashes`].
+    ListHashes,
+    /// Stage 14.0: delete every shard whose hash is in `hashes`. The
+    /// node replies with [`Response::Ack`] regardless of whether the
+    /// hashes actually existed (idempotent).
+    PurgeByHash {
+        hashes: Vec<Hash>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +101,9 @@ pub enum Response {
     AuthChallengeOk {
         signature: [u8; 64],
     },
+    /// Stage 14.0: enumeration response — every shard hash this node
+    /// currently holds, no ordering guarantees.
+    Hashes(Vec<Hash>),
     Error(String),
 }
 
@@ -102,6 +114,8 @@ const OP_PURGE: u8 = 0x03;
 const OP_STAT: u8 = 0x04;
 const OP_AUDIT: u8 = 0x05;
 const OP_AUTH: u8 = 0x06;
+const OP_LIST_HASHES: u8 = 0x07;
+const OP_PURGE_BY_HASH: u8 = 0x08;
 
 const RSP_PONG: u8 = 0x00;
 const RSP_ACK: u8 = 0x01;
@@ -109,6 +123,7 @@ const RSP_SHARDS: u8 = 0x02;
 const RSP_STAT: u8 = 0x03;
 const RSP_AUDIT: u8 = 0x04;
 const RSP_AUTH: u8 = 0x05;
+const RSP_HASHES: u8 = 0x06;
 const RSP_ERR: u8 = 0xff;
 
 impl Request {
@@ -159,6 +174,14 @@ impl Request {
                 b.push(OP_AUTH);
                 b.extend_from_slice(nonce);
             }
+            Request::ListHashes => b.push(OP_LIST_HASHES),
+            Request::PurgeByHash { hashes } => {
+                b.push(OP_PURGE_BY_HASH);
+                b.extend_from_slice(&(hashes.len() as u32).to_be_bytes());
+                for h in hashes {
+                    b.extend_from_slice(h);
+                }
+            }
         }
         b
     }
@@ -203,6 +226,18 @@ impl Request {
                 nonce.copy_from_slice(raw);
                 Ok(Request::AuthChallenge { nonce })
             }
+            OP_LIST_HASHES => Ok(Request::ListHashes),
+            OP_PURGE_BY_HASH => {
+                let n = c.u32()? as usize;
+                let mut hashes = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let raw = c.take(32)?;
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(raw);
+                    hashes.push(h);
+                }
+                Ok(Request::PurgeByHash { hashes })
+            }
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unknown op: {other:#x}"),
@@ -241,6 +276,13 @@ impl Response {
             Response::AuthChallengeOk { signature } => {
                 b.push(RSP_AUTH);
                 b.extend_from_slice(signature);
+            }
+            Response::Hashes(hashes) => {
+                b.push(RSP_HASHES);
+                b.extend_from_slice(&(hashes.len() as u32).to_be_bytes());
+                for h in hashes {
+                    b.extend_from_slice(h);
+                }
             }
             Response::Error(msg) => {
                 b.push(RSP_ERR);
@@ -283,6 +325,17 @@ impl Response {
                 let raw = c.take(64)?;
                 sig.copy_from_slice(raw);
                 Ok(Response::AuthChallengeOk { signature: sig })
+            }
+            RSP_HASHES => {
+                let n = c.u32()? as usize;
+                let mut hashes = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let raw = c.take(32)?;
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(raw);
+                    hashes.push(h);
+                }
+                Ok(Response::Hashes(hashes))
             }
             RSP_ERR => {
                 let n = c.u32()? as usize;

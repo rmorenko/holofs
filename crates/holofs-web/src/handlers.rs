@@ -586,6 +586,52 @@ pub async fn spotlight_png(
     }
 }
 
+/// Stage 14.0: `POST /api/gc` — sweep orphan shards from every live
+/// cluster node. Returns the per-node breakdown as JSON. Synchronous
+/// — the typical run on a development cluster is sub-second; large
+/// clusters might want this on a background task with progress
+/// streaming, but that's not Stage 14.0's scope.
+pub async fn gc_orphans(Extension(gw): Extension<Arc<Gateway>>) -> Response {
+    match gw.gc_orphaned_shards().await {
+        Ok(rep) => {
+            let mut body = String::with_capacity(256 + rep.nodes.len() * 96);
+            body.push_str(&format!(
+                "{{\"live_hashes\":{},\"manifests_scanned\":{},\"held_total\":{},\"purged_total\":{},\"duration_ms\":{},\"nodes\":[",
+                rep.live_hashes,
+                rep.manifests_scanned,
+                rep.held_total,
+                rep.purged_total,
+                rep.duration_ms,
+            ));
+            for (i, n) in rep.nodes.iter().enumerate() {
+                if i > 0 {
+                    body.push(',');
+                }
+                body.push_str(&format!(
+                    "{{\"idx\":{},\"addr\":\"{}\",\"held\":{},\"orphaned\":{},\"ok\":{}",
+                    n.node_idx,
+                    n.node_addr.replace('"', "\\\""),
+                    n.held,
+                    n.orphaned,
+                    n.ok,
+                ));
+                if let Some(e) = &n.error {
+                    body.push_str(&format!(",\"error\":\"{}\"", json_escape(e)));
+                }
+                body.push('}');
+            }
+            body.push_str("]}");
+            (
+                StatusCode::OK,
+                [(http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response()
+        }
+        Err(e) => error_to_response(e),
+    }
+}
+
 /// Stage 13.5: alias `/pkg/holofs_bg.wasm` → the on-disk
 /// `target/site/pkg/holofs.wasm`. wasm-bindgen's generated JS glue
 /// hardcodes the `_bg.wasm` suffix in its `import.meta.url` fetch,

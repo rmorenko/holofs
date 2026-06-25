@@ -149,6 +149,8 @@ async fn main() {
         .route("/api/spotlight.png", get(handlers::spotlight_png))
         // Stage 13.4: form-friendly version restore.
         .route("/api/restore", post(handlers::restore_version_form))
+        // Stage 14.0: orphan-shard garbage collector.
+        .route("/api/gc", post(handlers::gc_orphans))
         .route("/api/mv", post(handlers::mv))
         // Stage 11.4: form-friendly file upload from the catalog page.
         .route(
