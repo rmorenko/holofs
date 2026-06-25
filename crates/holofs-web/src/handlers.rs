@@ -562,7 +562,19 @@ pub async fn spotlight_png(
         w: parse("w", 0.3),
         h: parse("h", 0.3),
     };
-    match gw.spotlight(&name, roi).await {
+    // Stage 14.1: `?mode=coeff` selects the Haar-coefficient-mask
+    // variant; default `spatial` (or anything else) keeps the
+    // Stage 13.2 two-pass spatial composite.
+    let mode = raw
+        .as_deref()
+        .and_then(|s| parse_urlencoded_field(s, "mode"))
+        .unwrap_or_else(|| "spatial".to_string());
+    let result = if mode == "coeff" {
+        gw.spotlight_coeff(&name, roi).await
+    } else {
+        gw.spotlight(&name, roi).await
+    };
+    match result {
         Ok(out) => {
             let mut resp = Response::new(axum::body::Body::from(out.bytes));
             let h = resp.headers_mut();

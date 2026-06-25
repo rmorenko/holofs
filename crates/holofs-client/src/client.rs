@@ -195,6 +195,68 @@ pub async fn get_object_up_to_layer(
     Ok((out, bytes_used))
 }
 
+/// Stage 14.1: variant of [`get_object_up_to_layer`] that decodes
+/// every layer normally but **places only those coefficients whose
+/// flat plane index is in `allowed`**; positions outside the mask
+/// stay at zero before the inverse Haar runs.
+///
+/// Result: pixels inside the spatial ROI covered by `allowed` get
+/// the full-detail reconstruction; pixels outside collapse toward
+/// zero (i.e., black on RGB output). The mask is built upstream from
+/// `holofs_core::transform::spatial_to_dwt_positions` so the caller
+/// just hands an `HashSet<usize>` of DWT plane indices.
+///
+/// **Bandwidth note:** this saves NO network bytes vs the plain
+/// `get_object_up_to_layer` — RLNC encodes the whole layer's
+/// coefficient set into every shard, so you still need K shards per
+/// layer to decode anything. The win is in the spatial reconstruction
+/// (sharp ROI, dark elsewhere) — the visible alternative to the
+/// "two-pass spatial composite" of Stage 13.2.
+pub async fn get_object_with_coeff_mask(
+    gf: &Gf,
+    manifest: &Manifest,
+    live: &LiveNodes,
+    allowed: &HashSet<usize>,
+) -> Result<(Vec<Vec<f32>>, u64), ClientError> {
+    let w = manifest.width as usize;
+    let h = manifest.height as usize;
+    let levels = manifest.levels as usize;
+    let nlayers = manifest.nlayers as usize;
+    let mut out = vec![vec![0f32; w * h]; manifest.channels as usize];
+    let mut bytes_used: u64 = 0;
+
+    for c in 0..manifest.channels as usize {
+        let mut plane = vec![0f32; w * h];
+        for l in 0..nlayers {
+            let raw = gather_layer(manifest, live, c as u8, l as u8).await?;
+            let expected: HashSet<Hash> = manifest.shard_hashes[c][l].iter().copied().collect();
+            let verified: Vec<Shard> = raw
+                .into_iter()
+                .filter(|s| expected.contains(&shard_hash(s)))
+                .collect();
+            let sl = manifest.sym_len[l] as usize;
+            bytes_used += verified.len() as u64 * (manifest.k as u64 + sl as u64);
+            let refs: Vec<&Shard> = verified.iter().collect();
+            let bytes = decode_layer(gf, &refs, sl).ok_or(ClientError::LayerLost {
+                channel: c as u8,
+                layer: l as u8,
+            })?;
+            for (idx, &p) in manifest.layer_positions[l].iter().enumerate() {
+                let pos = p as usize;
+                if !allowed.contains(&pos) {
+                    continue;
+                }
+                let off = idx * 4;
+                let arr = [bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]];
+                plane[pos] = f32::from_le_bytes(arr);
+            }
+        }
+        haar_inverse(&mut plane, w, h, levels);
+        out[c] = plane;
+    }
+    Ok((out, bytes_used))
+}
+
 /// Stage 12.5: wavelet mix. For each `(channel, layer)`, pull shards from
 /// manifest `a` when `layer <= split`, from manifest `b` otherwise. The
 /// IDWT runs on the hybrid coefficient plane so structure (low layers)

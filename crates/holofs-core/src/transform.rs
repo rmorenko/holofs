@@ -127,6 +127,84 @@ pub fn coeff_layer_1d(i: usize, n: usize) -> usize {
     LEVELS
 }
 
+/// Stage 14.1: spatial → DWT inverse map.
+///
+/// Given a spatial ROI `(rx, ry, rw, rh)` in pixel coordinates, return
+/// every DWT-plane position whose Haar coefficient has at least one
+/// pixel of spatial support inside the ROI. The result is exhaustive
+/// — every coefficient that, when nonzero in an otherwise-zero plane,
+/// would write to at least one ROI pixel through the inverse Haar.
+///
+/// Math: for a 2D Haar with `levels` levels on a `w × h` plane, a
+/// coefficient at DWT position `(cx, cy)` belongs to one sub-band at
+/// some level `k ∈ 1..=levels`:
+///   * LL_levels: `cx ∈ [0, w/2^levels)`, `cy ∈ [0, h/2^levels)` (only at the deepest level)
+///   * LH_k:      `cx ∈ [w/2^k, w/2^(k-1))`, `cy ∈ [0, h/2^k)`
+///   * HL_k:      `cx ∈ [0, w/2^k)`, `cy ∈ [h/2^k, h/2^(k-1))`
+///   * HH_k:      `cx ∈ [w/2^k, w/2^(k-1))`, `cy ∈ [h/2^k, h/2^(k-1))`
+/// In every case the coefficient's spatial support is a
+/// `2^k × 2^k` block at band-relative position `(bx, by) * 2^k`,
+/// where `bx = cx % (w/2^k)` and `by = cy % (h/2^k)`. We invert the
+/// block math to enumerate all relevant `(cx, cy)`.
+///
+/// **Caveat:** this is a pure geometric inverse — it does NOT save
+/// bandwidth on an RLNC-encoded store, because every shard of a
+/// layer is a linear combination of *every* coefficient in that
+/// layer. The function is the underlying primitive for any future
+/// per-block encoding work; for today it powers a "coefficient-mask
+/// spotlight" demo in the gateway.
+#[must_use]
+pub fn spatial_to_dwt_positions(
+    rx: usize,
+    ry: usize,
+    rw: usize,
+    rh: usize,
+    w: usize,
+    h: usize,
+    levels: usize,
+) -> Vec<usize> {
+    if rw == 0 || rh == 0 || rx >= w || ry >= h {
+        return Vec::new();
+    }
+    let rx_end = (rx + rw).min(w);
+    let ry_end = (ry + rh).min(h);
+    let mut out: Vec<usize> = Vec::new();
+
+    for k in 1..=levels {
+        let tile = 1usize << k; // 2^k
+        let band_w = w >> k; // = w / 2^k
+        let band_h = h >> k;
+        if band_w == 0 || band_h == 0 {
+            continue;
+        }
+        // Tiles overlapping ROI:
+        let bx_min = rx / tile;
+        let by_min = ry / tile;
+        let bx_max = (rx_end - 1) / tile;
+        let by_max = (ry_end - 1) / tile;
+        let bx_max = bx_max.min(band_w - 1);
+        let by_max = by_max.min(band_h - 1);
+
+        for by in by_min..=by_max {
+            for bx in bx_min..=bx_max {
+                // LL_k only contributes at the deepest level — for k < LEVELS the
+                // LL band has been further decomposed into LL_{k+1} + LH/HL/HH_{k+1}
+                // and is therefore already covered by the next iteration.
+                if k == levels {
+                    out.push(by * w + bx); // LL_levels at (bx, by)
+                }
+                // LH_k: x offset by band_w.
+                out.push(by * w + (band_w + bx));
+                // HL_k: y offset by band_h.
+                out.push((band_h + by) * w + bx);
+                // HH_k: both offset.
+                out.push((band_h + by) * w + (band_w + bx));
+            }
+        }
+    }
+    out
+}
+
 /// Which priority layer position (x, y) belongs to in a DWT-frequency image.
 /// Layer 0 = LL (coarse shape); 1..LEVELS = detail levels (finer → higher).
 pub fn coeff_layer(x: usize, y: usize, w: usize, h: usize) -> usize {
@@ -312,6 +390,91 @@ mod tests {
             ll_energy / total > 0.95,
             "low-freq: LL/total = {}",
             ll_energy / total
+        );
+    }
+
+    // === Stage 14.1: spatial → DWT inverse map ============================
+
+    #[test]
+    fn spatial_to_dwt_empty_roi() {
+        let positions = spatial_to_dwt_positions(0, 0, 0, 0, TW, TH, LEVELS);
+        assert!(positions.is_empty());
+        let positions = spatial_to_dwt_positions(10, 10, 0, 50, TW, TH, LEVELS);
+        assert!(positions.is_empty());
+    }
+
+    #[test]
+    fn spatial_to_dwt_full_image_covers_everything_except_origin_double_count() {
+        // ROI = full image. Every coefficient position must appear at
+        // least once. We dedup the returned positions and compare
+        // against the full plane size minus the "LL_k for k<LEVELS"
+        // positions that the iteration intentionally skips (those are
+        // already covered by the deeper LL_LEVELS + LH/HL/HH_LEVELS
+        // children, mathematically equivalent on inverse).
+        let positions = spatial_to_dwt_positions(0, 0, TW, TH, TW, TH, LEVELS);
+        let dedup: std::collections::HashSet<usize> = positions.iter().copied().collect();
+        // The full DWT plane has TW*TH positions.
+        assert_eq!(dedup.len(), TW * TH, "every position must be reachable");
+    }
+
+    #[test]
+    fn spatial_to_dwt_corner_pixel_hits_one_per_band() {
+        // A 1×1 ROI in the very top-left must hit exactly one
+        // coefficient per (level, sub-band): the (0,0)-block in each.
+        let positions = spatial_to_dwt_positions(0, 0, 1, 1, TW, TH, LEVELS);
+        let expected_total: usize = 1                       // LL_LEVELS
+            + 3 * LEVELS;                                   // LH/HL/HH at each level
+        let dedup: std::collections::HashSet<usize> =
+            positions.iter().copied().collect();
+        assert_eq!(dedup.len(), expected_total);
+        // The LL_LEVELS coefficient lives at (0, 0) in the plane.
+        assert!(dedup.contains(&0));
+    }
+
+    #[test]
+    fn spatial_to_dwt_isolated_block_roundtrip() {
+        // Put a single non-zero coefficient at a known DWT-plane
+        // position (an HL_1 corner — should affect the top half of
+        // the image's first column band). Run haar_inverse and
+        // check that the non-zero pixels match the ROI predicted by
+        // spatial_to_dwt_positions in reverse.
+        //
+        // Concrete: pick a coefficient at (cx, cy) and figure out the
+        // spatial block it influences, then verify that
+        // spatial_to_dwt_positions for that exact block returns
+        // (cx, cy) among its results.
+        let cx = TW / 4;       // first col of HL_1 band
+        let cy = TH / 4;       // first row of HL_1 band — actually this is HH_2
+        let mut plane = vec![0f32; TW * TH];
+        plane[cy * TW + cx] = 100.0;
+        haar_inverse(&mut plane, TW, TH, LEVELS);
+
+        // Find the bounding box of the non-zero region.
+        let mut min_x = TW;
+        let mut max_x = 0;
+        let mut min_y = TH;
+        let mut max_y = 0;
+        for y in 0..TH {
+            for x in 0..TW {
+                if plane[y * TW + x].abs() > 1e-3 {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        assert!(max_x >= min_x, "single coeff yielded no spatial output");
+        let bw = max_x - min_x + 1;
+        let bh = max_y - min_y + 1;
+
+        // spatial_to_dwt_positions over the exact bounding box must
+        // return (cx, cy) — the inverse map must be a superset.
+        let positions = spatial_to_dwt_positions(min_x, min_y, bw, bh, TW, TH, LEVELS);
+        let lookup: std::collections::HashSet<usize> = positions.into_iter().collect();
+        assert!(
+            lookup.contains(&(cy * TW + cx)),
+            "ROI {min_x},{min_y} {bw}x{bh} → DWT set missed ({cx}, {cy})"
         );
     }
 }

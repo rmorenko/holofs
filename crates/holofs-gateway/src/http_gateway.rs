@@ -14,8 +14,8 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 use holofs_client::{
-    get_audio_filtered, get_object_up_to_layer, layer_energies, mix_images_at_split, purge_object,
-    put_object, LiveNodes,
+    get_audio_filtered, get_object_up_to_layer, get_object_with_coeff_mask, layer_energies,
+    mix_images_at_split, purge_object, put_object, LiveNodes,
 };
 use holofs_codec::image_io::{load_photo_from_bytes, to_rgb};
 use holofs_core::gf::Gf;
@@ -2333,6 +2333,87 @@ impl Gateway {
             nlayers: manifest.nlayers,
             bytes_downloaded: lo_bytes + hi_bytes,
             decode_ms: t0.elapsed().as_millis(),
+            roi_px: (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32),
+        })
+    }
+
+    /// Stage 14.1: "coefficient-mask" spotlight — alternative to
+    /// [`Self::spotlight`]'s spatial composite.
+    ///
+    /// Maps the spatial ROI to the set of DWT-plane positions whose
+    /// coefficient affects ROI pixels (via the Haar reverse map in
+    /// `holofs_core::transform`), then decodes the whole image but
+    /// places only those coefficients into the reconstruction plane
+    /// before the inverse Haar. Non-ROI pixels collapse to black.
+    ///
+    /// Visual difference vs Stage 13.2:
+    ///   * Stage 13.2 (`spotlight`) = decode coarse + full, composite
+    ///     per pixel. Outside ROI stays blurry-but-visible.
+    ///   * Stage 14.1 (`spotlight_coeff`) = decode every layer, mask
+    ///     coefficients outside ROI. Outside ROI is black (or near-
+    ///     black, since Haar with masked high coefficients leaks a
+    ///     little).
+    ///
+    /// Same bandwidth as a full fetch — RLNC requires the whole
+    /// layer's shards to decode any coefficient. The win is purely
+    /// in the spatial primitive: this is "operate on shard-level
+    /// coefficients", made visible.
+    pub async fn spotlight_coeff(
+        &self,
+        name: &str,
+        roi: SpotlightRoi,
+    ) -> Result<SpotlightImage, GatewayError> {
+        let manifest = self
+            .catalog
+            .lock()
+            .await
+            .get(name)
+            .cloned()
+            .ok_or(GatewayError::NotFound)?;
+        if manifest.kind != ObjectKind::Image {
+            return Err(GatewayError::BadRequest(
+                "spotlight_coeff: not applicable to non-image objects".into(),
+            ));
+        }
+        let w = manifest.width as usize;
+        let h = manifest.height as usize;
+        let levels = manifest.levels as usize;
+        let x0 = (roi.x.clamp(0.0, 1.0) * w as f32).round() as usize;
+        let y0 = (roi.y.clamp(0.0, 1.0) * h as f32).round() as usize;
+        let x1 = ((roi.x + roi.w).clamp(0.0, 1.0) * w as f32).round() as usize;
+        let y1 = ((roi.y + roi.h).clamp(0.0, 1.0) * h as f32).round() as usize;
+        if x1 <= x0 || y1 <= y0 {
+            return Err(GatewayError::BadRequest(
+                "spotlight_coeff: empty ROI".into(),
+            ));
+        }
+        let positions = holofs_core::transform::spatial_to_dwt_positions(
+            x0,
+            y0,
+            x1 - x0,
+            y1 - y0,
+            w,
+            h,
+            levels,
+        );
+        let allowed: std::collections::HashSet<usize> = positions.into_iter().collect();
+
+        let live = self.effective_live().await;
+        let t0 = Instant::now();
+        let (channels, bytes_dl) =
+            get_object_with_coeff_mask(&self.gf, &manifest, &live, &allowed)
+                .await
+                .map_err(|e| GatewayError::Decode(format!("spotlight_coeff: {e}")))?;
+        let decode_ms = t0.elapsed().as_millis();
+        let png = encode_png(&channels, manifest.width, manifest.height);
+        Ok(SpotlightImage {
+            bytes: png,
+            width: manifest.width,
+            height: manifest.height,
+            channels: manifest.channels,
+            nlayers: manifest.nlayers,
+            bytes_downloaded: bytes_dl,
+            decode_ms,
             roi_px: (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32),
         })
     }
