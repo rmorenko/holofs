@@ -37,22 +37,31 @@ pub fn Topbar(active: &'static str) -> impl IntoView {
         <header class="topbar">
             <h1>"holofs"</h1>
             <nav>
-                <a href=move || nav_href("/") class=cls_for("catalog")>
+                // Stage 14.3: every topbar link gets `rel="external"`
+                // so the browser does a full-page navigation instead
+                // of the SPA-router intercept. Same trick Stage 11.29
+                // applied to per-file action links — under hydrate
+                // bugs (currently the locale Memo + FilterBar query
+                // emit non-reactive-context warnings) the SPA-router
+                // intercept can fail mid-navigation, leaving the
+                // previous page's DOM in place and the topbar
+                // ineffective. Full-page nav always works.
+                <a href=move || nav_href("/") class=cls_for("catalog") rel="external">
                     {move || translate("nav.catalog", &current_locale())}
                 </a>
-                <a href=move || nav_href("/search") class=cls_for("search")>
+                <a href=move || nav_href("/search") class=cls_for("search") rel="external">
                     {move || translate("nav.search", &current_locale())}
                 </a>
-                <a href=move || nav_href("/health") class=cls_for("health")>
+                <a href=move || nav_href("/health") class=cls_for("health") rel="external">
                     {move || translate("nav.health", &current_locale())}
                 </a>
-                <a href=move || nav_href("/escrow") class=cls_for("escrow")>
+                <a href=move || nav_href("/escrow") class=cls_for("escrow") rel="external">
                     {move || translate("nav.escrow", &current_locale())}
                 </a>
-                <a href=move || nav_href("/help") class=cls_for("help")>
+                <a href=move || nav_href("/help") class=cls_for("help") rel="external">
                     {move || translate("nav.help", &current_locale())}
                 </a>
-                <a href=move || nav_href("/about") class=cls_for("about")>
+                <a href=move || nav_href("/about") class=cls_for("about") rel="external">
                     {move || translate("nav.about", &current_locale())}
                 </a>
                 <LocaleSwitcher/>
