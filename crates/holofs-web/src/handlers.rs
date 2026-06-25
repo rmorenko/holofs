@@ -586,6 +586,32 @@ pub async fn spotlight_png(
     }
 }
 
+/// Stage 13.4: `POST /api/restore` — form-friendly version restore.
+/// Body: `name=<path>&id=<version_id>&return_to=<url>`. On success
+/// 303-redirects to `return_to` (defaults to `/versions/<name>`).
+pub async fn restore_version_form(
+    Extension(gw): Extension<Arc<Gateway>>,
+    body: String,
+) -> Response {
+    let Some(name) = parse_urlencoded_field(&body, "name") else {
+        return bad_request("missing 'name'");
+    };
+    let Some(id) = parse_urlencoded_field(&body, "id") else {
+        return bad_request("missing 'id'");
+    };
+    let return_to = parse_urlencoded_field(&body, "return_to")
+        .unwrap_or_else(|| format!("/versions/{}", url_encode_simple(&name)));
+    match gw.restore_version(&name, &id).await {
+        Ok(_) => {
+            // Drop any cached preview / WAV for this name now that the
+            // catalog points at a different manifest.
+            gw.invalidate_cache(&name).await;
+            redirect_to(&return_to)
+        }
+        Err(e) => error_to_response(e),
+    }
+}
+
 /// `POST /api/embed_all` — kick off a one-shot bulk embed of every
 /// image in the catalog that isn't in `embeddings.bin` yet. Synchronous
 /// — the request hangs until the walk finishes — because the typical
@@ -1209,6 +1235,8 @@ const RESERVED_TOP_SEGMENTS: &[&str] = &[
     "holo",
     // Stage 13.2: ROI spotlight composite page.
     "spotlight",
+    // Stage 13.4: per-object version history page.
+    "versions",
 ];
 
 fn top_segment(path: &str) -> &str {

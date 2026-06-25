@@ -46,6 +46,13 @@ pub struct Gateway {
     /// every PUT fires a fire-and-forget background task that embeds
     /// the new object via CLIP and appends to the on-disk index.
     embed: Arc<Mutex<EmbedState>>,
+    /// Stage 13.4: optional per-object version history. When enabled
+    /// every PUT that *replaces* an existing object writes the prior
+    /// manifest as a side file under `versions_dir/<sanitized>/v…bin`
+    /// and skips the usual shard purge so the historical version
+    /// remains decodeable. Trade-off: cluster storage monotonically
+    /// grows while the feature is on (no GC yet).
+    versions: Arc<Mutex<VersionsState>>,
     gf: Arc<Gf>,
     /// Baseline list of "actually live" cluster nodes. `admin_kills` flags
     /// (set via the UI) are layered on top of it.
@@ -92,6 +99,7 @@ impl Gateway {
             catalog,
             catalog_path: None,
             embed: Arc::new(Mutex::new(EmbedState::default())),
+            versions: Arc::new(Mutex::new(VersionsState::default())),
             gf,
             live,
             admin_kills: Arc::new(Mutex::new(vec![false; n])),
@@ -115,6 +123,7 @@ impl Gateway {
             catalog,
             catalog_path: Some(catalog_path),
             embed: Arc::new(Mutex::new(EmbedState::default())),
+            versions: Arc::new(Mutex::new(VersionsState::default())),
             gf,
             live,
             admin_kills: Arc::new(Mutex::new(vec![false; n])),
@@ -140,6 +149,20 @@ impl Gateway {
     /// state mutex.
     pub async fn embed_enabled(&self) -> bool {
         self.embed.lock().await.enabled
+    }
+
+    /// Stage 13.4: turn on per-object version history. `dir` is the
+    /// root under which `versions/<sanitized_name>/v…bin` files are
+    /// written; we create it lazily on the first versioned PUT.
+    pub async fn enable_versions(&self, dir: std::path::PathBuf) {
+        let mut s = self.versions.lock().await;
+        s.enabled = true;
+        s.root = Some(dir);
+    }
+
+    /// Whether version history is wired up.
+    pub async fn versions_enabled(&self) -> bool {
+        self.versions.lock().await.enabled
     }
 
     /// Snapshot of admin_kills flags (for reads outside Gateway, e.g. auditor).
@@ -812,7 +835,17 @@ impl Gateway {
         let live = self.effective_live().await;
         let prev = self.catalog.lock().await.get(name).cloned();
         if let Some(old) = &prev {
-            if let Err(e) = purge_object(old, &live).await {
+            // Stage 13.4: when versioning is on we archive the prior
+            // manifest as a side file AND skip the shard purge — the
+            // old shards must stay live so a `restore_version` call
+            // can decode them again. Trade-off: storage grows
+            // monotonically until either a GC pass lands or the
+            // operator drops the version side files manually.
+            if self.versions_enabled().await {
+                if let Err(e) = self.archive_version(name, old).await {
+                    eprintln!("PUT {name}: version archive failed: {e}");
+                }
+            } else if let Err(e) = purge_object(old, &live).await {
                 eprintln!("PUT {name}: previous object failed to purge (continuing): {e}");
             }
         }
@@ -2348,6 +2381,196 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
         acc += a[i] * b[i];
     }
     acc
+}
+
+// === Stage 13.4: per-object version history ================================
+
+/// Lazy versioning state. `enabled` set via `Gateway::enable_versions`;
+/// the on-disk layout is `root/<sanitized_name>/v<ts_ms>_<cid8>.bin`,
+/// each file holding one `Manifest::encode()` of a prior version.
+#[derive(Default)]
+struct VersionsState {
+    enabled: bool,
+    root: Option<std::path::PathBuf>,
+}
+
+/// One row of [`Gateway::list_versions`].
+#[derive(Debug, Clone)]
+pub struct VersionEntry {
+    /// Opaque id used in restore — the filename minus `.bin`. URL-safe.
+    pub id: String,
+    /// Unix ms when the version was archived (== time the *next* PUT
+    /// for this name landed). Drives the human-readable timestamp.
+    pub created_at_ms: u64,
+    /// First 16 hex chars of the manifest's `data_cid`. Lets the user
+    /// confirm a version is the one they're looking for without
+    /// scrolling the whole hash.
+    pub cid_short: String,
+    /// `width × height` for image / `samples × 1` for audio — same
+    /// rendering as on the catalog row.
+    pub width: u32,
+    pub height: u32,
+    /// Kind so the UI can pick the right thumbnail strategy.
+    pub kind: ObjectKind,
+}
+
+impl Gateway {
+    /// Path to the directory holding version side files for `name`.
+    /// Sanitisation: directory separators in the catalog name become
+    /// `__` so each object gets a flat folder under `root`.
+    fn version_dir_for(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let safe = name.replace('/', "__").replace(['\\', ':', '?', '*', '"', '<', '>', '|'], "_");
+        root.join("versions").join(safe)
+    }
+
+    /// Sanitise / build the path for a single version file.
+    fn version_file_for(
+        root: &std::path::Path,
+        name: &str,
+        ts_ms: u64,
+        cid: &[u8; 32],
+    ) -> std::path::PathBuf {
+        let cid_short: String = cid.iter().take(4).map(|b| format!("{b:02x}")).collect();
+        Self::version_dir_for(root, name).join(format!("v{ts_ms}_{cid_short}.bin"))
+    }
+
+    /// Archive a manifest to the versions side store. Called from
+    /// `ingest_bytes` BEFORE the catalog mutation and the shard purge
+    /// (which we then skip for the prior shards). Cheap — just one
+    /// encode + one file write.
+    async fn archive_version(&self, name: &str, manifest: &Manifest) -> Result<(), GatewayError> {
+        let s = self.versions.lock().await;
+        let Some(root) = s.root.clone() else {
+            return Ok(());
+        };
+        drop(s);
+        let dir = Self::version_dir_for(&root, name);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| GatewayError::BadRequest(format!("versions mkdir: {e}")))?;
+        let ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let path = Self::version_file_for(&root, name, ts_ms, &manifest.data_cid);
+        let bytes = manifest.encode();
+        std::fs::write(&path, &bytes)
+            .map_err(|e| GatewayError::BadRequest(format!("versions write: {e}")))?;
+        Ok(())
+    }
+
+    /// List archived versions of `name`, newest first. Returns an
+    /// empty vec when versioning is off or no versions exist.
+    pub async fn list_versions(
+        &self,
+        name: &str,
+    ) -> Result<Vec<VersionEntry>, GatewayError> {
+        let s = self.versions.lock().await;
+        let Some(root) = s.root.clone() else {
+            return Ok(Vec::new());
+        };
+        drop(s);
+        let dir = Self::version_dir_for(&root, name);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut out: Vec<VersionEntry> = Vec::new();
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| GatewayError::BadRequest(format!("versions readdir: {e}")))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            // `vTS_CID.bin` → parse.
+            let stem = match file_name.strip_suffix(".bin") {
+                Some(s) => s,
+                None => continue,
+            };
+            let after_v = match stem.strip_prefix('v') {
+                Some(s) => s,
+                None => continue,
+            };
+            let (ts, cid_short) = match after_v.split_once('_') {
+                Some((ts, cid)) => (ts.parse::<u64>().unwrap_or(0), cid.to_string()),
+                None => continue,
+            };
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let manifest = match Manifest::decode(&bytes) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            out.push(VersionEntry {
+                id: stem.to_string(),
+                created_at_ms: ts,
+                cid_short,
+                width: manifest.width,
+                height: manifest.height,
+                kind: manifest.kind,
+            });
+        }
+        out.sort_by_key(|v| std::cmp::Reverse(v.created_at_ms));
+        Ok(out)
+    }
+
+    /// Swap the catalog entry for `name` with the archived version
+    /// `id`. The currently-live manifest is archived first so the
+    /// swap is reversible (it appears as a fresh version with the
+    /// current timestamp). Old shards stay on cluster nodes —
+    /// versioning treats every version as immutable.
+    pub async fn restore_version(
+        &self,
+        name: &str,
+        id: &str,
+    ) -> Result<RestoreResult, GatewayError> {
+        let s = self.versions.lock().await;
+        let Some(root) = s.root.clone() else {
+            return Err(GatewayError::BadRequest(
+                "versions disabled — restart with --enable-versions".into(),
+            ));
+        };
+        drop(s);
+        // Locate the version file by id.
+        let dir = Self::version_dir_for(&root, name);
+        let path = dir.join(format!("{id}.bin"));
+        if !path.exists() {
+            return Err(GatewayError::NotFound);
+        }
+        let bytes = std::fs::read(&path)
+            .map_err(|e| GatewayError::BadRequest(format!("versions read: {e}")))?;
+        let target = Manifest::decode(&bytes)
+            .map_err(|e| GatewayError::BadRequest(format!("versions decode: {e}")))?;
+
+        // Archive the current manifest before replacing it. If the
+        // name isn't in the catalog at all (was deleted), restore
+        // becomes a pure resurrection — no prior to archive.
+        let current = self.catalog.lock().await.get(name).cloned();
+        if let Some(prev) = &current {
+            self.archive_version(name, prev).await?;
+        }
+
+        let restored_cid = hex(&target.data_cid);
+        self.catalog
+            .lock()
+            .await
+            .insert(name.to_string(), target);
+        self.invalidate_cache(name).await;
+        self.persist_catalog().await;
+        Ok(RestoreResult {
+            name: name.to_string(),
+            restored_cid_hex: restored_cid,
+        })
+    }
+}
+
+/// Result of [`Gateway::restore_version`].
+#[derive(Debug, Clone)]
+pub struct RestoreResult {
+    pub name: String,
+    /// Hex `data_cid` of the now-live manifest after the swap.
+    pub restored_cid_hex: String,
 }
 
 /// Per-kind object counts inside [`ApiStats`].

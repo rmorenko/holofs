@@ -2107,3 +2107,52 @@ body.catalog-page .tree-scroll {
   margin: 4px 0 24px;
   font-size: 12px;
 }
+
+/* ============================================================
+ * Stage 13.4: /versions/<name>.
+ * ============================================================ */
+
+.versions-h {
+  margin: 18px 0 8px;
+  font-size: 20px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--fg);
+}
+.versions-blurb {
+  margin: 0 0 14px;
+  font-size: 14px;
+  line-height: 1.55;
+  max-width: 760px;
+}
+.versions-disabled {
+  font-size: 14px;
+  line-height: 1.55;
+  max-width: 760px;
+}
+.versions-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  background: var(--surf);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 13px;
+  margin-bottom: 36px;
+}
+.versions-table th,
+.versions-table td {
+  text-align: left;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--bord);
+}
+.versions-table th {
+  background: var(--surf2);
+  color: var(--mut);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.versions-table tr:last-child td { border-bottom: none; }

@@ -146,6 +146,8 @@ async fn main() {
         // inside the ROI. Both pixel space coords (`x_px`/`y_px`/…) and
         // normalised coords (`x`/`y`/…) accepted via query.
         .route("/api/spotlight.png", get(handlers::spotlight_png))
+        // Stage 13.4: form-friendly version restore.
+        .route("/api/restore", post(handlers::restore_version_form))
         .route("/api/mv", post(handlers::mv))
         // Stage 11.4: form-friendly file upload from the catalog page.
         .route(

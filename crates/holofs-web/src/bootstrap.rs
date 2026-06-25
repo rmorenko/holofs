@@ -56,6 +56,10 @@ pub struct BootstrapConfig {
     /// `<storage>/embeddings.bin`; first inference downloads ~155 MiB
     /// of model weights into `~/.cache/huggingface/hub`.
     pub enable_embed: bool,
+    /// Stage 13.4: enable per-object version history. Side files under
+    /// `<storage>/versions/<sanitized_name>/`; prior shards kept live
+    /// on the cluster across PUTs.
+    pub enable_versions: bool,
 }
 
 /// Where to source TLS material for the wire protocol.
@@ -95,6 +99,10 @@ impl BootstrapConfig {
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        let enable_versions = std::env::var("HOLOFS_ENABLE_VERSIONS")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         Self {
             storage,
             catalog,
@@ -104,6 +112,7 @@ impl BootstrapConfig {
             no_seed,
             tls: TlsOptions::default(),
             enable_embed,
+            enable_versions,
         }
     }
 }
@@ -283,6 +292,14 @@ pub async fn bootstrap_cluster(
         let embed_path = config.storage.join("embeddings.bin");
         gateway.enable_embed(embed_path.clone()).await;
         info!(?embed_path, "semantic-search index enabled");
+    }
+    // Stage 13.4: wire per-object version history when the operator
+    // opted in. Side files live at `<storage>/versions/<name>/v…bin`;
+    // prior shards stay live on the cluster across PUTs.
+    if config.enable_versions {
+        let versions_root = config.storage.clone();
+        gateway.enable_versions(versions_root.clone()).await;
+        info!(?versions_root, "version history enabled");
     }
 
     let interval_secs: u64 = std::env::var("HOLOFS_MONITOR_INTERVAL")

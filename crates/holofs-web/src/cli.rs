@@ -107,6 +107,14 @@ pub struct Cli {
     /// `<storage>/embeddings.bin` and grows on every image PUT.
     #[arg(long, env = "HOLOFS_ENABLE_EMBED")]
     pub enable_embed: bool,
+
+    /// Stage 13.4: enable per-object version history. PUTs that
+    /// replace an existing object archive the prior manifest under
+    /// `<storage>/versions/<sanitized_name>/v…bin` and keep the old
+    /// shards on cluster nodes so the version stays decodeable.
+    /// Cluster storage grows monotonically — there's no GC yet.
+    #[arg(long, env = "HOLOFS_ENABLE_VERSIONS")]
+    pub enable_versions: bool,
 }
 
 impl Cli {
@@ -128,6 +136,7 @@ impl Cli {
                 ca_path: self.tls_ca_cert.clone(),
             },
             enable_embed: self.enable_embed,
+            enable_versions: self.enable_versions,
         }
     }
 }

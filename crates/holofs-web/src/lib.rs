@@ -36,6 +36,7 @@ pub mod search;
 pub mod similar;
 pub mod spotlight;
 pub mod ui;
+pub mod versions;
 
 /// Catalog view-model carried over the wire by the [`get_catalog`] server
 /// function. Stays plain-serde so both SSR and hydrate compile it cleanly
@@ -567,6 +568,7 @@ fn RoutedApp() -> impl IntoView {
             <Route path=path!("/search") view=search::SearchPage/>
             <Route path=path!("/holo/*name") view=holo::HoloPage/>
             <Route path=path!("/spotlight") view=spotlight::SpotlightPage/>
+            <Route path=path!("/versions/*name") view=versions::VersionsPage/>
         </Routes>
     }
 }
@@ -1213,6 +1215,8 @@ fn lazy_file_leaf_inner(entry: CatalogEntry) -> impl IntoView {
                     <span class="tree-sep">"·"</span>
                     <a href={format!("/spotlight?a={}", enc_full.clone())} rel="external">{t!("spotlight.link_label")}</a>
                 })}
+                <span class="tree-sep">"·"</span>
+                <a href={format!("/versions/{}", enc_full.clone())} rel="external">{t!("versions.link_label")}</a>
                 <span class="tree-sep">"·"</span>
                 <form
                     method="POST"
@@ -2083,6 +2087,7 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
                     " · " <a href={format!("/holo/{}", enc_full.clone())} rel="external">{t!("holo.link_label")}</a>
                     " · " <a href={format!("/spotlight?a={}", enc_full.clone())} rel="external">{t!("spotlight.link_label")}</a>
                 })}
+                " · " <a href={format!("/versions/{}", enc_full.clone())} rel="external">{t!("versions.link_label")}</a>
                 " · "
                 <form
                     method="POST"
