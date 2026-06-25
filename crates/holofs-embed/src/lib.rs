@@ -17,11 +17,13 @@
 
 #![warn(missing_docs)]
 
+mod ann;
 mod error;
 mod index;
 mod model;
 mod text;
 
+pub use ann::{HnswIndex, SearchHit, HNSW_MIN_BAND_SIZE};
 pub use error::EmbedError;
 pub use index::{EmbedRecord, Index};
 pub use model::Embedder;
@@ -35,7 +37,7 @@ pub const EMBED_DIM: usize = 512;
 /// Layer band the embedding was computed against. Stage 12.8 only writes
 /// `Coarse` (L0-L2 reconstruction at ~10% of the bytes); 12.9 / 13.3 add
 /// the higher bands when the hierarchical index lands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum LayerBand {
     /// L0-L2 reconstruction — silhouette / colour / coarse texture.

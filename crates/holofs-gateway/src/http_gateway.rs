@@ -1962,6 +1962,17 @@ struct EmbedState {
     enabled: bool,
     index_path: Option<std::path::PathBuf>,
     embedder: Option<Arc<holofs_embed::Embedder>>,
+    /// Stage 14.2: in-memory ANN index. `None` until the first
+    /// `semantic_search` after a PUT (or after a startup) — then
+    /// built from the entire `embeddings.bin`. Bumped to `None` by
+    /// `ann_generation` mismatches so the next query rebuilds.
+    ann: Option<Arc<holofs_embed::HnswIndex>>,
+    /// Increments every time a new embedding is appended. Compared
+    /// against the generation the cached `ann` was built at — when
+    /// they diverge we drop the cache and rebuild.
+    ann_generation: u64,
+    /// Generation `ann` was built at. `None` until first build.
+    ann_built_at: Option<u64>,
 }
 
 /// Layer-band selector for [`Gateway::semantic_search`]. `Any` (the
@@ -2151,15 +2162,26 @@ impl Gateway {
             .map_err(|e| GatewayError::BadRequest(format!("embed join: {e}")))??;
             any_new = true;
         }
+        if any_new {
+            // Stage 14.2: bump the ANN generation so the next
+            // semantic_search call rebuilds (or — for small bands —
+            // re-loads the in-memory record vec). The rebuild itself
+            // is lazy; we just signal staleness here.
+            self.embed.lock().await.ann_generation += 1;
+        }
         Ok(any_new)
     }
 
-    /// Brute-force semantic search. Encodes `query` once, then scans
-    /// every record in the index and ranks by cosine similarity.
-    /// `band` filters which layer band's embeddings to consider —
-    /// `Any` (default) takes the best score across all three bands
-    /// per file. `limit` caps the returned list. Returns an empty
-    /// vector when the index is disabled or empty.
+    /// Semantic search backed by [`holofs_embed::HnswIndex`].
+    ///
+    /// Stage 14.2: previously a brute-force flat scan over
+    /// `embeddings.bin` on every query. Now lazily builds an
+    /// in-memory ANN index, cached across queries until the next
+    /// PUT bumps `ann_generation`. Small bands still fall back to
+    /// brute-force inside the index (cheap and lower-latency under
+    /// a few hundred vectors); larger bands graduate to HNSW. The
+    /// public contract is identical — same SemanticHit shape, same
+    /// "best-band-per-name when band == Any" semantics.
     pub async fn semantic_search(
         &self,
         query: &str,
@@ -2169,8 +2191,8 @@ impl Gateway {
         let Some(embedder) = self.ensure_embedder().await? else {
             return Ok(Vec::new());
         };
-        let index_path = match self.embed.lock().await.index_path.clone() {
-            Some(p) => p,
+        let ann = match self.ensure_ann_index().await? {
+            Some(a) => a,
             None => return Ok(Vec::new()),
         };
         let query = query.to_string();
@@ -2178,55 +2200,95 @@ impl Gateway {
             let q = embedder
                 .embed_text(&query)
                 .map_err(|e| GatewayError::Decode(format!("clip text: {e}")))?;
-            let idx = holofs_embed::Index::open(&index_path)
-                .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
-            // Bucket scores per (name, band) so we can pick the best
-            // band per file when `band == Any`.
-            use std::collections::HashMap;
-            let mut best_per_name: HashMap<String, (f32, SearchBand)> = HashMap::new();
-            for rec in idx
-                .iter()
-                .map_err(|e| GatewayError::BadRequest(format!("embed iter: {e}")))?
-            {
-                let rec = rec
-                    .map_err(|e| GatewayError::BadRequest(format!("embed rec: {e}")))?;
-                if rec.vec.is_empty() {
-                    continue;
+            let raw = match band {
+                SearchBand::Any => ann.search_any(&q, limit),
+                other => {
+                    let band_enum = match other {
+                        SearchBand::Coarse => holofs_embed::LayerBand::Coarse,
+                        SearchBand::Mid => holofs_embed::LayerBand::Mid,
+                        SearchBand::Full => holofs_embed::LayerBand::Full,
+                        SearchBand::Any => unreachable!(),
+                    };
+                    ann.search(band_enum, &q, limit)
                 }
-                let rec_band = match rec.band {
-                    holofs_embed::LayerBand::Coarse => SearchBand::Coarse,
-                    holofs_embed::LayerBand::Mid => SearchBand::Mid,
-                    holofs_embed::LayerBand::Full => SearchBand::Full,
-                };
-                // Filter out bands the caller doesn't want.
-                match band {
-                    SearchBand::Any => {}
-                    other if other == rec_band => {}
-                    _ => continue,
-                }
-                let score = cosine(&q, &rec.vec);
-                let entry = best_per_name
-                    .entry(rec.name.clone())
-                    .or_insert((f32::NEG_INFINITY, rec_band));
-                if score > entry.0 {
-                    *entry = (score, rec_band);
-                }
-            }
-            let mut hits: Vec<SemanticHit> = best_per_name
+            };
+            let hits: Vec<SemanticHit> = raw
                 .into_iter()
-                .map(|(name, (score, band))| SemanticHit { name, score, band })
+                .map(|h| SemanticHit {
+                    name: h.name,
+                    score: h.score,
+                    band: match h.band {
+                        holofs_embed::LayerBand::Coarse => SearchBand::Coarse,
+                        holofs_embed::LayerBand::Mid => SearchBand::Mid,
+                        holofs_embed::LayerBand::Full => SearchBand::Full,
+                    },
+                })
                 .collect();
-            hits.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            hits.truncate(limit);
             Ok(hits)
         })
         .await
         .map_err(|e| GatewayError::BadRequest(format!("search join: {e}")))?;
         result
+    }
+
+    /// Lazily build (or reuse) the in-memory ANN index. Rebuilds the
+    /// whole index when the cached generation is stale relative to
+    /// `ann_generation`; otherwise returns the cached `Arc` directly.
+    /// Returns `Ok(None)` when the embed feature is disabled or the
+    /// `embeddings.bin` path is unset.
+    async fn ensure_ann_index(
+        &self,
+    ) -> Result<Option<Arc<holofs_embed::HnswIndex>>, GatewayError> {
+        // Fast path.
+        {
+            let s = self.embed.lock().await;
+            if !s.enabled {
+                return Ok(None);
+            }
+            if let (Some(ann), Some(built_at)) = (&s.ann, s.ann_built_at) {
+                if built_at == s.ann_generation {
+                    return Ok(Some(Arc::clone(ann)));
+                }
+            }
+        }
+        // Slow path — rebuild. Snapshot path + generation, drop the
+        // lock, read records, build HNSW off-thread, then store back.
+        let (index_path, generation) = {
+            let s = self.embed.lock().await;
+            let p = match &s.index_path {
+                Some(p) => p.clone(),
+                None => return Ok(None),
+            };
+            (p, s.ann_generation)
+        };
+        let built = tokio::task::spawn_blocking(move || -> Result<holofs_embed::HnswIndex, GatewayError> {
+            let idx = holofs_embed::Index::open(&index_path)
+                .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
+            let mut recs: Vec<holofs_embed::EmbedRecord> = Vec::new();
+            for r in idx
+                .iter()
+                .map_err(|e| GatewayError::BadRequest(format!("embed iter: {e}")))?
+            {
+                let r = r.map_err(|e| GatewayError::BadRequest(format!("embed rec: {e}")))?;
+                if !r.vec.is_empty() {
+                    recs.push(r);
+                }
+            }
+            Ok(holofs_embed::HnswIndex::build_from(recs))
+        })
+        .await
+        .map_err(|e| GatewayError::BadRequest(format!("ann build join: {e}")))??;
+        let arc = Arc::new(built);
+        let mut s = self.embed.lock().await;
+        // Another task may have raced us with a *newer* generation;
+        // if so we still write ours — the next query will rebuild
+        // again, which is fine. The point of the cache is amortising
+        // across many queries between writes, not strict freshness.
+        if s.ann_generation == generation {
+            s.ann = Some(Arc::clone(&arc));
+            s.ann_built_at = Some(generation);
+        }
+        Ok(Some(arc))
     }
 
     /// Fire-and-forget embedding for a freshly-PUT object. Called
@@ -2450,18 +2512,6 @@ impl Gateway {
         }
         Ok((new_n, skip_n))
     }
-}
-
-/// Cosine similarity for two L2-normalised vectors == dot product.
-/// `holofs-embed` always normalises before storing, so this is a plain
-/// hot loop with no normalisation work.
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let n = a.len().min(b.len());
-    let mut acc = 0.0f32;
-    for i in 0..n {
-        acc += a[i] * b[i];
-    }
-    acc
 }
 
 // === Stage 13.4: per-object version history ================================
