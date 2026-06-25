@@ -23,6 +23,7 @@ use clap::Parser;
 use leptos::prelude::*;
 use leptos_axum::{generate_route_list, handle_server_fns_with_context, LeptosRoutes};
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{info, Level};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -206,7 +207,23 @@ async fn main() {
                 move || view! { <Shell options=opts.clone()/> }
             },
         )
-        .nest_service("/pkg", ServeDir::new(format!("{site_root}/pkg")))
+        // Stage 13.5: force the browser to revalidate the leptos
+        // wasm/js bundle on every load. Without this the default
+        // ServeDir response has no Cache-Control, so the browser
+        // caches `holofs_bg.wasm` aggressively against the last
+        // PUT/GET pair — and a soft-reloaded tab after `cargo leptos
+        // build` keeps running the old WASM against the new SSR
+        // markup, which silently breaks hydration. `no-cache` keeps
+        // the resource cached but forces a 304/200 revalidation.
+        .nest_service(
+            "/pkg",
+            tower::ServiceBuilder::new()
+                .layer(SetResponseHeaderLayer::overriding(
+                    http::header::CACHE_CONTROL,
+                    http::HeaderValue::from_static("no-cache"),
+                ))
+                .service(ServeDir::new(format!("{site_root}/pkg"))),
+        )
         // Stage 11.5: static assets used by the upload form, the help
         // viewer (Mermaid + KaTeX bootstrap), and anything else dropped
         // into `crates/holofs-web/assets/`.

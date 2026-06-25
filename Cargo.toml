@@ -58,7 +58,7 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 # Web stack: axum HTTP server + Leptos SSR. cargo-leptos drives the WASM build.
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "json", "matched-path", "tracing", "multipart"] }
 tower = { version = "0.4", default-features = false }
-tower-http = { version = "0.5", default-features = false, features = ["fs", "compression-gzip", "trace"] }
+tower-http = { version = "0.5", default-features = false, features = ["fs", "compression-gzip", "trace", "set-header"] }
 http = "1"
 http-body-util = "0.1"
 mime_guess = "2"
