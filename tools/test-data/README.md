@@ -27,7 +27,10 @@ What lands under `samples/`:
 
 ```
 photos/
-  landscapes/    mountain.png, ocean.png, forest.png, desert.png, tundra.png
+  landscapes/    mountain.png, ocean.png, forest.png, desert.png, tundra.png  (256×256, ~17 KB)
+  landscapes-xl/ snowy-peaks.png, desert-dunes.png, ocean-horizon.png, forest-canopy.png,
+                 sunset-lake.png, autumn-valley.png  (2560×1440, 2.8–3.3 MB each — requires
+                 Pillow; skipped with a warning if `import PIL` fails)
   abstract/      mandala-{a,b}.png, gradient-{warm,cool}.png, noise-rgb.png, pixel-blocks.png
   brand-pairs/   logo-N.png + logo-N-wm.png (3 pairs — robust-copy targets)
 audio/

@@ -260,6 +260,272 @@ def make_brand_watermark(base: list[list[tuple[int, int, int]]], seed: int) -> l
 
 
 # ---------------------------------------------------------------------------
+# Large landscapes — uses Pillow when available (skipped with a friendly
+# note otherwise so the script still works without it).  Each scene is a
+# hand-composed gradient + silhouette + atmospheric haze layer; output
+# resolution is 1920×1080 so the generated PNGs land in the 1–3 MB range
+# and feel like real photos in the catalog.
+# ---------------------------------------------------------------------------
+
+
+def _try_import_pil():
+    try:
+        from PIL import Image, ImageDraw, ImageFilter  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+HAS_PIL = _try_import_pil()
+
+
+def _smoothstep(t: float) -> float:
+    return t * t * (3 - 2 * t)
+
+
+def _lerp_color(c1: tuple[int, int, int], c2: tuple[int, int, int], t: float) -> tuple[int, int, int]:
+    return (
+        int(c1[0] * (1 - t) + c2[0] * t),
+        int(c1[1] * (1 - t) + c2[1] * t),
+        int(c1[2] * (1 - t) + c2[2] * t),
+    )
+
+
+def _vgradient(w: int, h: int, top: tuple[int, int, int], bot: tuple[int, int, int]):
+    """Vertical gradient as a Pillow image."""
+    from PIL import Image
+
+    img = Image.new("RGB", (w, h))
+    px = img.load()
+    for y in range(h):
+        t = y / max(h - 1, 1)
+        c = _lerp_color(top, bot, _smoothstep(t))
+        for x in range(w):
+            px[x, y] = c
+    return img
+
+
+def _silhouette_curve(w: int, h_pixels: int, seed: int, base_y: int, amplitude: int, freq: float) -> list[int]:
+    """Per-column terrain height (returned as the y-coord of the silhouette)."""
+    rng = LCG(seed)
+    # Two overlaid sinusoids + a per-column jitter — looks like a hand-drawn ridgeline.
+    return [
+        int(
+            base_y
+            - amplitude * math.sin(x * freq + rng.f01() * 6.28)
+            - 0.4 * amplitude * math.sin(x * freq * 2.7 + rng.f01() * 6.28)
+            + (rng.f01() - 0.5) * amplitude * 0.15
+        )
+        for x in range(w)
+    ]
+
+
+def _fill_below(img, ys: list[int], color: tuple[int, int, int]):
+    """Paint every pixel below ys[x] with `color` (silhouette fill)."""
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+    # Polygon: top edge is the silhouette, bottom edge is the image bottom.
+    pts = [(x, max(0, min(h - 1, ys[x]))) for x in range(w)]
+    pts.append((w - 1, h - 1))
+    pts.append((0, h - 1))
+    draw.polygon(pts, fill=color)
+
+
+def _haze_layer(img, color: tuple[int, int, int], opacity_top: float, opacity_bot: float):
+    """Blend a vertical opacity gradient of `color` over the image."""
+    from PIL import Image
+
+    w, h = img.size
+    haze = Image.new("RGB", (w, h), color)
+    mask = Image.new("L", (w, h))
+    mpx = mask.load()
+    for y in range(h):
+        t = y / max(h - 1, 1)
+        op = int(255 * (opacity_top * (1 - t) + opacity_bot * t))
+        for x in range(w):
+            mpx[x, y] = op
+    img.paste(haze, (0, 0), mask)
+
+
+def _grain(img, amplitude: int, seed: int):
+    """Per-pixel film-grain noise.  Small amplitude (±5..15) — looks like
+    real photographic noise AND breaks the gradient compression so the
+    files weigh in at megabytes instead of kilobytes."""
+    rng = LCG(seed)
+    px = img.load()
+    w, h = img.size
+    for y in range(h):
+        for x in range(w):
+            d = (rng.byte() % (amplitude * 2 + 1)) - amplitude
+            r, g, b = px[x, y]
+            px[x, y] = (
+                max(0, min(255, r + d)),
+                max(0, min(255, g + d)),
+                max(0, min(255, b + d)),
+            )
+
+
+def _texture_overlay(img, ys: list[int], color: tuple[int, int, int], variation: int, seed: int):
+    """Add per-pixel chromatic variation BELOW the silhouette curve to
+    simulate rocky / wave / canopy texture.  Each affected pixel is
+    nudged by an independent random delta inside ±variation."""
+    rng = LCG(seed)
+    px = img.load()
+    w, h = img.size
+    for x in range(w):
+        y_start = max(0, min(h - 1, ys[x]))
+        for y in range(y_start, h):
+            d_r = (rng.byte() % (variation * 2 + 1)) - variation
+            d_g = (rng.byte() % (variation * 2 + 1)) - variation
+            d_b = (rng.byte() % (variation * 2 + 1)) - variation
+            r, g, b = px[x, y]
+            px[x, y] = (
+                max(0, min(255, r + d_r)),
+                max(0, min(255, g + d_g)),
+                max(0, min(255, b + d_b)),
+            )
+
+
+def _sun_glow(img, cx: int, cy: int, r: int, color: tuple[int, int, int]):
+    """Soft sun disc + halo painted on top of the sky."""
+    from PIL import Image, ImageDraw, ImageFilter
+
+    w, h = img.size
+    glow = Image.new("RGB", (w, h), (0, 0, 0))
+    d = ImageDraw.Draw(glow)
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=color)
+    glow = glow.filter(ImageFilter.GaussianBlur(radius=r // 3))
+    # Screen-blend approximation: max(img, glow) per channel.
+    base_px = img.load()
+    glow_px = glow.load()
+    for y in range(h):
+        for x in range(w):
+            b = base_px[x, y]
+            g = glow_px[x, y]
+            base_px[x, y] = (max(b[0], g[0]), max(b[1], g[1]), max(b[2], g[2]))
+
+
+@dataclass
+class LandscapeSpec:
+    name: str
+    seed: int
+    sky_top: tuple[int, int, int]
+    sky_bot: tuple[int, int, int]
+    mid_silhouette: tuple[int, int, int]
+    near_silhouette: tuple[int, int, int]
+    sun: tuple[int, tuple[int, int, int]] | None = None  # (radius, color); placed at horizon-right
+    haze: tuple[int, int, int] | None = None
+    horizon_pct: float = 0.55
+
+
+def make_large_landscape(spec: LandscapeSpec, w: int = 2560, h: int = 1440):
+    """Compose one big landscape scene as a Pillow Image.
+
+    Output is 2560×1440 ≈ 3.7 MP.  Final PNG is in the 2–6 MB range
+    because the film-grain layer breaks gradient compression — that's
+    intentional, the user asked for "огромные" landscapes and a
+    well-compressed 50 KB gradient doesn't qualify."""
+    from PIL import Image
+
+    img = _vgradient(w, h, spec.sky_top, spec.sky_bot)
+    if spec.sun is not None:
+        sun_r, sun_color = spec.sun
+        _sun_glow(img, cx=int(w * 0.78), cy=int(h * spec.horizon_pct * 0.85), r=sun_r, color=sun_color)
+    # Two mountain ranges: a far / hazy one, then a closer / darker one.
+    mid_ys = _silhouette_curve(
+        w,
+        h,
+        seed=spec.seed + 1,
+        base_y=int(h * spec.horizon_pct),
+        amplitude=int(h * 0.12),
+        freq=0.005,
+    )
+    near_ys = _silhouette_curve(
+        w,
+        h,
+        seed=spec.seed + 2,
+        base_y=int(h * (spec.horizon_pct + 0.12)),
+        amplitude=int(h * 0.14),
+        freq=0.004,
+    )
+    _fill_below(img, mid_ys, spec.mid_silhouette)
+    if spec.haze is not None:
+        _haze_layer(img, spec.haze, opacity_top=0.32, opacity_bot=0.0)
+    # Foreground silhouette + per-pixel chromatic texture so the lower
+    # half of the image is photographic-noisy, not flat-coloured.
+    _fill_below(img, near_ys, spec.near_silhouette)
+    _texture_overlay(img, near_ys, spec.near_silhouette, variation=22, seed=spec.seed + 3)
+    # Global fine film-grain — keeps the sky from compressing back down
+    # to a 50 KB gradient PNG.
+    _grain(img, amplitude=6, seed=spec.seed + 4)
+    return img
+
+
+# Six scenes — palettes tuned so each looks distinct under CLIP search.
+LARGE_LANDSCAPE_SPECS: list[LandscapeSpec] = [
+    LandscapeSpec(
+        name="snowy-peaks.png",
+        seed=1001,
+        sky_top=(70, 110, 170),
+        sky_bot=(200, 220, 240),
+        mid_silhouette=(140, 160, 195),
+        near_silhouette=(230, 235, 245),
+        haze=(220, 230, 245),
+    ),
+    LandscapeSpec(
+        name="desert-dunes.png",
+        seed=1002,
+        sky_top=(255, 195, 130),
+        sky_bot=(255, 230, 180),
+        mid_silhouette=(195, 130, 75),
+        near_silhouette=(155, 95, 50),
+        sun=(140, (255, 235, 200)),
+        horizon_pct=0.50,
+    ),
+    LandscapeSpec(
+        name="ocean-horizon.png",
+        seed=1003,
+        sky_top=(40, 90, 160),
+        sky_bot=(180, 210, 235),
+        mid_silhouette=(35, 90, 140),
+        near_silhouette=(20, 60, 110),
+        horizon_pct=0.50,
+    ),
+    LandscapeSpec(
+        name="forest-canopy.png",
+        seed=1004,
+        sky_top=(140, 175, 200),
+        sky_bot=(220, 230, 230),
+        mid_silhouette=(55, 100, 70),
+        near_silhouette=(25, 65, 40),
+        haze=(200, 215, 215),
+    ),
+    LandscapeSpec(
+        name="sunset-lake.png",
+        seed=1005,
+        sky_top=(190, 90, 80),
+        sky_bot=(250, 180, 100),
+        mid_silhouette=(110, 60, 70),
+        near_silhouette=(35, 30, 45),
+        sun=(180, (255, 220, 150)),
+        horizon_pct=0.55,
+    ),
+    LandscapeSpec(
+        name="autumn-valley.png",
+        seed=1006,
+        sky_top=(180, 170, 150),
+        sky_bot=(230, 220, 200),
+        mid_silhouette=(180, 105, 60),
+        near_silhouette=(120, 60, 35),
+        haze=(220, 200, 175),
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
 # Audio generators.
 # ---------------------------------------------------------------------------
 
@@ -403,6 +669,22 @@ def collect_samples(out_root: Path) -> list[Sample]:
         target.parent.mkdir(parents=True, exist_ok=True)
         write_png(target, px)
         samples.append(Sample(f"photos/{rel}", target.read_bytes()))
+
+    # 1b. Large landscapes — six 1920×1080 scenes, ~1-3 MB PNGs.
+    if HAS_PIL:
+        xl_dir = write_under / "photos" / "landscapes-xl"
+        xl_dir.mkdir(parents=True, exist_ok=True)
+        for spec in LARGE_LANDSCAPE_SPECS:
+            target = xl_dir / spec.name
+            img = make_large_landscape(spec)
+            img.save(target, format="PNG", optimize=True)
+            samples.append(Sample(f"photos/landscapes-xl/{spec.name}", target.read_bytes()))
+    else:
+        print(
+            "[!] Pillow not installed — skipping photos/landscapes-xl/ "
+            "(install with `pip install Pillow` to get the big landscape set)",
+            file=sys.stderr,
+        )
 
     # 2. Audio.
     audio_specs = [
