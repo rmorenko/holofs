@@ -10,6 +10,9 @@
 /data/
 /out/
 
+# tools/test-data generator output — reproducible from generate-samples.py
+/samples/
+
 # IDE
 /.vscode/
 /.idea/

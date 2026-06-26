@@ -571,3 +571,25 @@ décoder, transformer, ré-encoder) :
 * **Exploration peu coûteuse** — le LLM peut balayer `split` de
   0..nlayers-1 pour trouver l'hybride le plus intéressant, en payant
   seulement les shard-fetches nécessaires par layer.
+
+---
+
+## 7. Stages 12.6 – 15.0 — Référence en anglais
+
+Depuis le Stage 12.5, neuf stages supplémentaires ont été
+livrés : per-file metrics (12.7), page `/about` (12.7), recherche
+sémantique CLIP + UI `/search` (12.8/12.9), colonne robust-copy
+(13.0), hologramme streaming (13.1), spotlight ROI (13.2 + 14.1),
+index par bande hiérarchique (13.3), versions par objet (13.4),
+GC des shards orphelins (14.0), recherche HNSW (14.2), GC des
+embeddings (14.3), barrière GC (14.4), magic `HOLOFSM9` +
+`ObjectEncoding` (15.0) plus nouvelles opérations TCP
+(`ListHashes`, `PurgeByHash`, `PutBatch`).
+
+La traduction française de cette section n'est pas encore prête.
+Référez-vous au `docs/api.md` anglais (sections 7–12) — il
+contient la table complète des endpoints et des pages, le JSON
+GcReport, les layouts de frames des nouvelles wire ops, et les
+règles de compatibilité HOLOFSM9.
+
+Les PR de traduction sont bienvenues.

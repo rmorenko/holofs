@@ -565,3 +565,85 @@ blob_base64}`.
 * **Дешёвый перебор** — LLM может прокатиться по `split` от 0 до
   `nlayers-1` в поиске самого интересного гибрида, оплачивая только
   shard-фетчи для каждого слоя.
+
+---
+
+## 7. UI и API, добавленные в Stages 12.6 – 15.0
+
+Поверхность сильно выросла относительно изначальных пяти страниц.
+Полный референс — в английском `docs/api.md` (секции 7–12);
+ниже краткая выжимка по-русски, чтобы можно было ориентироваться
+без переключения языка.
+
+### Новые HTTP-эндпоинты
+
+| Метод + путь                              | Stage  | Что делает |
+|-------------------------------------------|--------|------------|
+| `GET /api/file_metrics?name=<path>`       | 12.7   | JSON-метрики файла: dedup, originality по слоям, top-N соседей по shared shards, энергия слоёв (image/audio), audio bands. |
+| `GET /api/search?q=<text>&band=<...>&limit=N` | 12.8 → 13.3 | CLIP-поиск. `band ∈ {any, coarse, mid, full}`. По умолчанию `any` — лучшая оценка на файл. Требует `--enable-embed`. |
+| `POST /api/embed_all`                     | 12.8   | Синхронный bulk-индекс: проходит по каталогу, embed-ит всё новое. Возвращает `{new, skipped}`. |
+| `GET /preview/stream/<name>`              | 13.1   | `multipart/x-mixed-replace` поток PNG-кадров от L0 к полному разрешению. Каждый кадр — отдельный part с `X-Holofs-Layer: <N>`. |
+| `GET /api/spotlight.png?name=...&x,y,w,h&mode=<spatial\|coeff>` | 13.2 + 14.1 | ROI-композит. `spatial` — двухпроходная композиция; `coeff` — Haar reverse-map, зануление коэффициентов вне ROI. |
+| `POST /api/restore`                       | 13.4   | Восстановление архивной версии. Body: `name=<path>&id=<version_id>&return_to=<url>`. 303-редирект. Текущий manifest архивируется первым (restore обратим). |
+| `GET /api/versions_list?name=<path>`      | 13.4   | Server fn под `/versions/<name>`: `{name, versions: [{id, created_at_ms, cid_short, width, height, kind}], enabled}`. |
+| `POST /api/gc`                            | 14.0 + 14.3 + 14.4 | Сборка мусора шардов кластера + переписывание `embeddings.bin` с удалением stale-записей. JSON `GcReport`. См. ниже. |
+
+### Новые Leptos-страницы
+
+| Маршрут                | Stage  | Что показывает |
+|------------------------|--------|----------------|
+| `/mix?a=&b=&split=`    | 12.6   | UI для wavelet-mix (раньше был только MCP-tool). |
+| `/about`               | 12.7   | Маркетинговая страница: hero + 4 архитектурные карточки + бизнес-польза + 6 кейсов. Чистая i18n. |
+| `/search?q=&band=`     | 12.9 + 13.3 | Семантический поиск с band-пиллами. Карточки результатов имеют две `<img>`: coarse + full, full плавно проявляется. |
+| `/holo/<name>`         | 13.1   | Streaming-голограмма: один `<img>` на `/preview/stream/<name>`. Без JS. |
+| `/spotlight?a=`        | 13.2   | ROI композит. Preset-кнопки + custom ROI form + переключатель `mode=spatial\|coeff`. |
+| `/versions/<name>`     | 13.4   | Таблица архивных версий с кнопкой "restore". Требует `--enable-versions`. |
+
+### `POST /api/gc` — формат ответа
+
+```json
+{
+  "live_hashes":         <distinct hash-ей в каталоге + version archives>,
+  "manifests_scanned":   <число>,
+  "held_total":          <сумма shards на всех нодах>,
+  "purged_total":        <сумма purge-нутых>,
+  "embeddings_kept":     <записей осталось в embeddings.bin>,
+  "embeddings_dropped":  <записей удалено из embeddings.bin>,
+  "duration_ms":         <ms>,
+  "nodes": [
+    { "idx": 0, "addr": "127.0.0.1:9100", "held": 117, "orphaned": 0, "ok": true },
+    …
+  ]
+}
+```
+
+**Concurrency (Stage 14.4):** GC берёт эксклюзивный `write()` на
+`gc_barrier` RwLock; PUT-ы / restore / embed-append держат `read()`.
+GC ждёт пока все in-flight writers закончат, и блокирует новые
+до завершения паса. PUT блокируется на ~40 ms на dev-каталоге.
+
+### Новые wire-операции (TCP)
+
+| OP    | Request                          | Response  | Назначение |
+|-------|----------------------------------|-----------|------------|
+| `0x07`| `ListHashes`                     | `Hashes`  | Перечисление всех hash-ей шардов на ноде. Используется GC для вычисления orphans = held − live. |
+| `0x08`| `PurgeByHash { hashes }`         | `Ack`     | Идемпотентное удаление по списку hash. |
+| `0x09`| `PutBatch { object_id, channel, layer, shards }` | `Ack` | Батч-PUT: один RPC вместо одного на каждый шард. Используется в Stage 15.0 scaffolding для будущего producer-а replicated encoding. |
+
+### CLI-флаги оператора
+
+| Флаг                  | Default | Назначение |
+|-----------------------|---------|------------|
+| `--enable-embed`      | off     | Stage 12.8 — CLIP semantic search. Первый запрос: скачивает ~155 MiB весов. |
+| `--enable-versions`   | off     | Stage 13.4 — per-object versions. Storage растёт монотонно пока флаг включён; `POST /api/gc` чистит. |
+
+### HOLOFSM9 + `ObjectEncoding` (Stage 15.0)
+
+Манифест добавил трейлинг-байт `encoding`. Варианты:
+
+| Байт | Вариант                              | Хвост |
+|------|--------------------------------------|-------|
+| `0`  | `Rlnc`                               | — (дефолт для всего, что мы пишем сегодня) |
+| `1`  | `Replicated { replication: u8 }`     | один `u8` (Stage 15.1 scaffolding; producer'а ещё нет) |
+
+Совместимость: `HOLOFSM8/7/6` декодируются с дефолтом `Rlnc`.

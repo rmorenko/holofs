@@ -577,3 +577,301 @@ re-encode):
 * **Cheap to explore** — the LLM can sweep `split` from 0..nlayers-1
   to find the most visually interesting hybrid, only paying for the
   shard fetches needed for each layer.
+
+---
+
+## 7. UI pages added in Stages 12.6 – 15.0
+
+The surface area below grew well past the original five pages
+(catalog, health, similar, inspect, diff). Every route here is server-
+rendered through Leptos SSR and accepts a `?lang=` query for locale
+override.
+
+### 7.1 `/mix` — wavelet-mix composer (Stage 12.6 / 12.6.1)
+
+GET `/mix?a=<image>&b=<image>&split=<u8>`. The leptos page wraps the
+Stage 12.5 MCP tool: a B-picker with native `<datalist>` search, a
+split-layer number input, a live preview `<img src="/api/mix.png?…">`,
+and a "save as…" form posting to `POST /api/mix-save`. Save lands the
+output through the normal `ingest_bytes` pipeline so the hybrid
+becomes a first-class catalog entry.
+
+### 7.2 `/about` — pitch page (Stage 12.7)
+
+GET `/about`. Server-rendered marketing surface: hero, four
+architectural cards (per-layer addressable storage, content-addressed
+dedup, RLNC k-of-n, shard transforms), business-outcome bullet list,
+six use-case cards, CTA back to the catalog. Pure i18n strings, no
+backing data. Linked from every page through the topbar's
+"why holofs" entry.
+
+### 7.3 `/health/<name>` — extended metrics (Stage 12.7)
+
+Existing margin / Monte-Carlo / zone-failure tables get a new
+"Unique metrics" block below them:
+
+* Storage / dedup — unique / total shards in this file; intra-file
+  dedup %; this file's contribution to catalog-wide unique set.
+* Originality — % of this file's distinct hashes that don't appear in
+  any other catalog entry, with a per-layer breakdown bar chart.
+* Layer energy distribution — for image / audio only, the share of
+  `Σ coef²` per layer. Computed by decoding every layer once via
+  `Gateway::file_metrics` (one network round-trip per layer).
+* Audio band split — bass / mid / treble grouping of layer energies
+  for `ObjectKind::Audio` only.
+* Top-N shard reuse neighbours — table with per-layer breakdown bars
+  so the kind of overlap (coarse structure vs fine detail) is
+  legible at a glance.
+
+Data path: `GET /api/file_metrics?name=<path>` returns the
+`FileMetricsView` JSON consumed by the page. Useful as a curl probe.
+
+### 7.4 `/search` — semantic search UI (Stage 12.9 + 13.3)
+
+GET `/search?q=<text>&band=<any|coarse|mid|full>&lang=<code>`. Pure
+SSR page with an autofocus input, a band-picker pill row, and a
+responsive card grid. Each result card initially renders the coarse-
+layer preview (`/preview/<name>`) and cross-fades to the full-res
+image so the gallery visibly "sharpens" as detail arrives — no
+JavaScript involved. Each card carries a tinted band badge so the
+user can tell which abstraction level produced the win.
+
+### 7.5 `/holo/<name>` — streaming hologram (Stage 13.1)
+
+GET `/holo/<name>`. One full-bleed `<img>` whose `src` points at
+`/preview/stream/<name>` (see section 8.1). The browser swaps the
+rendered pixels as each multipart part arrives so the image visibly
+focuses over the response lifetime. Accompanied by a short
+narrative explaining what's happening on the wire.
+
+Caveat: subsequent visits hit the per-(name, layer) PNG cache and
+feel instant. Force-reload (Cmd+Shift+R) to see the focus animation
+again.
+
+### 7.6 `/spotlight` — ROI composite (Stage 13.2 + 14.1)
+
+GET `/spotlight?a=<image>&x=N&y=N&w=N&h=N&mode=<spatial|coeff>`.
+Pages a preset-row + custom-ROI form + the rendered PNG. Two render
+modes:
+
+* `spatial` (default) — gateway decodes coarse L0 + full quality
+  separately and composites per pixel by ROI mask. Outside ROI
+  stays blurry-visible.
+* `coeff` (Stage 14.1) — gateway uses the Haar reverse-map to find
+  which DWT coefficient positions touch the ROI and zeros every
+  other coefficient before the inverse Haar. Outside ROI collapses
+  to black with the sharper Haar-block boundary.
+
+Same backing endpoint for both: `GET /api/spotlight.png` returns
+`image/png` with these response headers:
+
+| Header                          | Meaning |
+|---------------------------------|---------|
+| `x-holofs-roi-px: x,y,w,h`      | pixel-space ROI after clamping |
+| `x-holofs-decode-ms`            | server-side decode + composite time |
+| `x-holofs-bytes-downloaded`     | shard bytes pulled (informational; doesn't reflect a real bandwidth saving until per-block encoding ships in Stage 15.1) |
+
+### 7.7 `/versions/<name>` — per-object history (Stage 13.4)
+
+GET `/versions/<name>`. Lists every archived prior manifest for the
+named catalog entry, newest first. Each row has a one-click
+`restore` form that POSTs to `/api/restore` and 303-redirects back.
+
+Requires the gateway to be started with `--enable-versions`. The
+page shows an explanatory banner when versioning is off.
+
+### 7.8 Topbar nav
+
+Every Leptos page renders the same `<crate::ui::Topbar>` component,
+which carries `rel="external"` on every link so click navigation
+always does a full-page reload (Stage 11.29 introduced this for
+per-file action links; `c33f553` extended it to the topbar nav to
+work around a Leptos SPA-router hijack that was leaving the previous
+page's DOM in place).
+
+---
+
+## 8. New HTTP endpoints
+
+Listed in alphabetical order; everything mounted by `holofs-web/src/main.rs`.
+
+### 8.1 `GET /preview/stream/<name>` (Stage 13.1)
+
+Streaming hologram. Returns
+`Content-Type: multipart/x-mixed-replace; boundary=hololayer-2026-06-25`
+with one PNG part per cumulative DWT layer (L0 → L0-L1 → … → full).
+Each part carries `Content-Type: image/png`,
+`Content-Length: <bytes>`, and `X-Holofs-Layer: <N>`. Browsers swap
+the rendered `<img>` content as each part arrives.
+
+Cache: PNG cache per `(name, max_layer)` is shared with the regular
+`/preview/<name>` and `/<name>` endpoints, so a second visitor of a
+recently-decoded image gets instant frames.
+
+### 8.2 `GET /api/file_metrics?name=<path>` (Stage 12.7)
+
+Server-function endpoint behind `/health/<name>`. Returns the
+`FileMetricsView` JSON: storage / dedup, originality + per-layer
+breakdown, top-N reuse neighbours with per-layer shared counts,
+layer-energy distribution (image/audio only), audio band split
+(audio only). All percentages are pre-formatted as `f32`.
+
+### 8.3 `GET /api/search?q=<text>&limit=<N>&band=<coarse|mid|full|any>` (Stage 12.8 → 13.3)
+
+CLIP-backed semantic search. Returns
+`{"hits": [{"name": "<path>", "score": <f32>, "band": "<coarse|mid|full|any>"}, …]}`.
+`limit` defaults to 50, capped at 200. `band=any` (default) returns
+the best-scoring band per name; explicit bands filter to that
+abstraction level.
+
+Requires `--enable-embed`. On the first call after process start
+the gateway downloads ~155 MiB of CLIP weights from HuggingFace
+into `~/.cache/huggingface/hub/` — subsequent restarts read from
+cache.
+
+### 8.4 `POST /api/embed_all` (Stage 12.8)
+
+Synchronous bulk-index endpoint. Walks every `ObjectKind::Image`
+catalog entry; for each `(data_cid, band)` pair not already in
+`embeddings.bin` it decodes the appropriate band, runs CLIP, and
+appends. Returns
+`{"new": <N>, "skipped": <M>}`.
+
+### 8.5 `POST /api/gc` (Stage 14.0 + 14.3 + 14.4)
+
+Sweep orphan shards from every live cluster node AND tombstone
+stale embeddings. Synchronous; sub-second on dev catalogs.
+
+Returns:
+
+```json
+{
+  "live_hashes":         <distinct hashes referenced by catalog + version archives>,
+  "manifests_scanned":   <count>,
+  "held_total":          <sum across nodes of held shards>,
+  "purged_total":        <sum across nodes of purged shards>,
+  "embeddings_kept":     <records remaining in embeddings.bin>,    // null when embed is off
+  "embeddings_dropped":  <records purged from embeddings.bin>,     // null when embed is off
+  "duration_ms":         <wall clock>,
+  "nodes": [
+    { "idx": 0, "addr": "127.0.0.1:9100", "held": 117, "orphaned": 0, "ok": true },
+    …
+  ]
+}
+```
+
+Concurrency: the pass takes an exclusive write guard on the
+gateway's `gc_barrier` RwLock. PUTs, restores, and embedding-append
+operations hold the read guard, so GC waits for in-flight writers
+to drain AND blocks new ones until it finishes. Trade-off
+documented inline: PUTs queue behind GC for the duration of one
+pass (~40 ms on dev catalogs).
+
+### 8.6 `POST /api/restore` (Stage 13.4)
+
+Form-friendly version restore. Body:
+`name=<path>&id=<version_id>&return_to=<url>`. Loads the archived
+manifest for `id`, archives the current manifest (so restore is
+reversible), swaps the catalog entry. Returns 303 to `return_to`
+on success (defaults to `/versions/<name>`).
+
+### 8.7 `GET /api/spotlight.png?name=<path>&x=N&y=N&w=N&h=N&mode=<spatial|coeff>` (Stage 13.2 + 14.1)
+
+Returns `image/png` of the ROI composite. See section 7.6 for mode
+semantics and the response headers list.
+
+### 8.8 `GET /api/versions_list?name=<path>` (Stage 13.4)
+
+Server function backing `/versions/<name>`. Returns
+`{"name", "versions": [{"id", "created_at_ms", "cid_short",
+"width", "height", "kind"}], "enabled": <bool>}`. Empty list when
+versioning is off (the page renders a friendly banner instead of
+pretending no versions exist).
+
+---
+
+## 9. Wire protocol additions (Stages 14.0, 15.0)
+
+The TCP wire format described in section 2 gained three new ops:
+
+| OP byte | Request                         | Response       | Purpose |
+|---------|---------------------------------|----------------|---------|
+| `0x07`  | `ListHashes`                    | `Hashes`       | Enumerate every shard hash a node currently holds. Used by `Gateway::gc_orphaned_shards` to compute orphans (held − live). |
+| `0x08`  | `PurgeByHash { hashes: Vec<H> }`| `Ack`          | Idempotent: delete every shard whose hash is in `hashes` from the node's in-memory store + on-disk shard dir. |
+| `0x09`  | `PutBatch { object_id, channel, layer, shards: Vec<Shard> }` | `Ack` | Batched PUT: store every shard in `shards` under the same `(object_id, channel, layer)` bucket. Useful for any high-volume PUT path; the Stage 15.0 scaffolding sends one PutBatch per (node, channel, layer) instead of one Put per shard. |
+
+Response side gains:
+
+| Tag    | Response                  |
+|--------|---------------------------|
+| `0x06` | `Hashes(Vec<Hash>)`       |
+
+Frame layout for the new ops:
+
+```
+OP_LIST_HASHES: 0x07                              (no payload)
+OP_PURGE_BY_HASH: 0x08 | u32 count | hash[count]
+OP_PUT_BATCH:     0x09 | u64 object_id | u8 channel | u8 layer
+                       | u32 count | shard[count]
+RSP_HASHES:       0x06 | u32 count | hash[count]
+```
+
+Same `MAX_FRAME = 64 MiB` limit as the rest of the protocol.
+
+---
+
+## 10. Manifest format additions
+
+### 10.1 `HOLOFSM9` magic (Stage 15.0)
+
+The on-disk manifest gained one more trailing field — a one-byte
+`encoding` discriminant plus a variant-specific tail.
+
+| Byte | Variant                     | Tail |
+|------|-----------------------------|------|
+| `0`  | `ObjectEncoding::Rlnc`      | (empty) — default for everything produced today |
+| `1`  | `ObjectEncoding::Replicated { replication: u8 }` | one trailing `u8` |
+
+Backwards compatibility: legacy magic bytes `HOLOFSM6`, `HOLOFSM7`,
+and `HOLOFSM8` are still decodable. `HOLOFSM8` records get
+`encoding = Rlnc` on read; `HOLOFSM7` / `HOLOFSM6` additionally fill
+`created_at_unix = 0`.
+
+**Invariant**: every manifest produced by this codebase today has
+`encoding == Rlnc`. The `Replicated` variant exists as Stage 15.1
+scaffolding so the discriminant byte is locked; the producer ships
+in a later stage with a `block_size` parameter once the storage
+layer's per-shard file count is brought under control.
+
+---
+
+## 11. CLI / operator flags
+
+| Flag                      | Default | Purpose |
+|---------------------------|---------|---------|
+| `--enable-embed`          | off     | Stage 12.8 CLIP semantic search. First-call cost: ~155 MiB weights download. |
+| `--enable-versions`       | off     | Stage 13.4 per-object versioning. Storage grows monotonically while on; run `/api/gc` to reclaim. |
+
+Both have matching env vars (`HOLOFS_ENABLE_EMBED`,
+`HOLOFS_ENABLE_VERSIONS`). They're additive — turning one on
+doesn't affect the other.
+
+---
+
+## 12. Static asset workaround (Stage 13.5)
+
+`cargo-leptos` 0.3.6 saves the WASM bundle as
+`target/site/pkg/holofs.wasm`, but the JS glue emitted by
+`wasm-bindgen 0.2.100+` hard-codes
+`new URL('holofs_bg.wasm', import.meta.url)`. Without intervention
+the browser 404s on the wasm fetch and hydrate silently never runs
+(symptom: lazy folder rows stay stuck on "loading catalog…").
+
+The gateway papers over this with a dedicated route at
+`/pkg/holofs_bg.wasm` that serves the bytes from
+`target/site/pkg/holofs.wasm` directly. Cache-Control on the whole
+`/pkg/` prefix is set to `no-cache` so soft-reloads always
+revalidate against the freshly-built bundle.
+
+Both pieces are pure axum + tower-http; nothing to configure.
+

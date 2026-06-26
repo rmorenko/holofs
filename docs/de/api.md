@@ -574,3 +574,24 @@ transformieren, neu kodieren):
 * **Billiger Explorer** — das LLM kann `split` von 0..nlayers-1
   durchprobieren, um den visuell spannendsten Hybriden zu finden, und
   bezahlt nur die Shard-Fetches pro Layer.
+
+---
+
+## 7. Stages 12.6 – 15.0 — Reference auf Englisch
+
+Seit Stage 12.5 sind neun zusätzliche Stages gelandet: per-file
+metrics (12.7), `/about` page (12.7), CLIP semantic search +
+`/search` UI (12.8/12.9), robust-copy column (13.0), streaming
+hologram (13.1), ROI spotlight (13.2 + 14.1), hierarchical band
+index (13.3), per-object versions (13.4), orphan-shard GC (14.0),
+HNSW search (14.2), embedding GC (14.3), GC barrier (14.4),
+`HOLOFSM9` magic + `ObjectEncoding` (15.0) plus new TCP wire ops
+(`ListHashes`, `PurgeByHash`, `PutBatch`).
+
+Die deutsche Übersetzung dieses Abschnitts steht noch aus.
+Bitte das englische `docs/api.md` (Abschnitte 7–12) als Referenz
+benutzen — dort gibt es die vollständige Endpoint- und
+Page-Tabelle, den GcReport-JSON, die Wire-Op-Frame-Layouts und
+die HOLOFSM9-Kompatibilitätsregeln.
+
+PRs mit der vollen Übersetzung sind willkommen.

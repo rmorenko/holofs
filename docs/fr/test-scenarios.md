@@ -895,3 +895,24 @@ et consultez :
 - [docs/architecture.md](./architecture.md) — flux de données PUT → GET
 - [docs/api.md](./api.md) — API HTTP, format du protocole filaire
 - [docs/threat-model.md](./threat-model.md) — menaces couvertes
+
+---
+
+## 18+ — Scénarios Stages 12.6 – 15.0 (référence anglaise)
+
+Chacun des stages suivants a son propre scénario de test dans le
+`docs/test-scenarios.md` anglais (sections 18–25) :
+
+- 18 — Quickstart avec l'arbre d'exemples `tools/test-data/`
+- 19 — Métriques par-fichier sur `/health/<name>` (Stage 12.7)
+- 20 — Recherche sémantique CLIP + pilules de bande (Stages 12.8/12.9/13.3)
+- 21 — Colonne robust-copy sur `/similar` (Stage 13.0)
+- 22 — Hologramme streaming via `/preview/stream/<name>` (Stage 13.1)
+- 23 — `/api/spotlight.png?mode=<spatial|coeff>` (Stages 13.2 + 14.1)
+- 24 — Versionnement par objet + `/api/restore` (Stage 13.4)
+- 25 — `POST /api/gc` pour shards + embeddings (Stages 14.0/3/4)
+
+Les traductions françaises arriveront.  En attendant,
+`tools/test-data/run-tests.sh` fournit un smoke-test
+end-to-end indépendant de la langue couvrant tous les points
+ci-dessus (chaque vérification affiche `✓` / `✗`).

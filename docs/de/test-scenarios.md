@@ -883,3 +883,23 @@ Beschreibungen und konsultieren Sie:
 - [docs/architecture.md](./architecture.md) — Datenfluss PUT → GET
 - [docs/api.md](./api.md) — HTTP-API, Wire-Protokoll-Format
 - [docs/threat-model.md](./threat-model.md) — abgedeckte Bedrohungen
+
+---
+
+## 18+ — Stages 12.6 – 15.0 Szenarien (englische Referenz)
+
+Die folgenden Stages haben jeweils ein eigenes Test-Szenario im
+englischen `docs/test-scenarios.md` (Abschnitte 18–25):
+
+- 18 — Quickstart mit dem `tools/test-data/`-Sample-Tree
+- 19 — Per-file metrics auf `/health/<name>` (Stage 12.7)
+- 20 — CLIP semantic search + Band-Pillen (Stages 12.8/12.9/13.3)
+- 21 — Robust-copy-Spalte auf `/similar` (Stage 13.0)
+- 22 — Streaming hologram via `/preview/stream/<name>` (Stage 13.1)
+- 23 — `/api/spotlight.png?mode=<spatial|coeff>` (Stages 13.2 + 14.1)
+- 24 — Per-object versioning + `/api/restore` (Stage 13.4)
+- 25 — `POST /api/gc` für Shards + Embeddings (Stages 14.0/3/4)
+
+Deutsche Übersetzungen folgen.  In der Zwischenzeit liefert
+`tools/test-data/run-tests.sh` einen sprachlosen End-to-End-Smoke
+über alle obigen Punkte (jede Prüfung gibt `✓` / `✗` aus).

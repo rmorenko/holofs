@@ -840,6 +840,243 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
 
 ---
 
+## 18. Quickstart с генератором тестового набора
+
+`tools/test-data/` содержит готовый набор для прогона всех новых
+фич без подготовки фикстур вручную:
+
+```
+tools/test-data/
+├── generate-samples.py    # детерминированный генератор, только stdlib Python 3.10+
+├── clean-cluster.sh       # стирает catalog + shards + embeddings + versions
+├── upload-samples.sh      # PUT-ит весь tree с сохранением иерархии
+└── run-tests.sh           # end-to-end smoke по 12.6–15.0
+```
+
+### 18.1 Сгенерировать набор
+
+```sh
+python3 tools/test-data/generate-samples.py
+# → wrote 38 samples (1,862,535 bytes) under <repo>/samples
+```
+
+Что получится:
+
+```
+samples/
+  photos/{landscapes,abstract,brand-pairs}/*.png
+  audio/{music,effects,silence}/*.wav
+  docs/{notes,spec,legal}/{*.txt,*.md,*.json}
+  binaries/{archives,blobs}/{*.zip,*.tar,*.bin}
+```
+
+Папка `brand-pairs/` содержит пары `logo-N.png` + `logo-N-wm.png`
+— это намеренные near-duplicates, чтобы robust-copy на
+`/similar/<name>` дал реальные хиты.
+
+### 18.2 Полный чистый рестарт
+
+```sh
+tools/test-data/clean-cluster.sh
+# (FORCE=1 пропускает подтверждение)
+
+./target/release/holofs-web \
+    --storage ./holofs-data \
+    --addr 127.0.0.1:8787 \
+    --enable-embed \
+    --enable-versions &
+```
+
+Без `--enable-embed` `/search` показывает баннер "embed disabled".
+Без `--enable-versions` PUT-замена удаляет старые шарды.
+
+### 18.3 Залить набор
+
+```sh
+tools/test-data/upload-samples.sh
+```
+
+Скрипт сначала mkdir-ит каждый prefix, потом PUT-ит каждый файл,
+в конце дёргает `/api/stats` и печатает итоги.
+
+### 18.4 End-to-end smoke
+
+```sh
+tools/test-data/run-tests.sh
+```
+
+Покрывает Stage 9 (каталог), 12.6 (mix), 12.7 (metrics + /about),
+12.8/9 (search), 13.0 (robust-copy), 13.1 (streaming),
+13.2/14.1 (spotlight modes), 13.4 (versions), 14.0/3 (GC).
+Финал: `N / M passed`, exit-code 0 только если всё зелёное.
+
+---
+
+## 19. Per-file metrics (Stage 12.7)
+
+`GET /health/<name>` показывает блок "Unique metrics": dedup,
+originality (overall + по слоям), layer-energy distribution,
+audio bands (для аудио), top-N соседей с per-layer breakdown.
+
+Curl backing API:
+
+```sh
+curl -s 'http://127.0.0.1:8787/api/file_metrics?name=photos/landscapes/mountain.png' \
+     | python3 -m json.tool
+```
+
+Ожидаемое: `total_shards_in_file ≈ unique_shards_in_file`,
+`originality_pct` в `[0, 100]`, `originality_per_layer` длиной
+`nlayers`, `layer_energy` заполнено для image/audio,
+`audio_bands` только для `kind == "audio"`, `neighbours` пустой
+если у файла нет дубликатов в каталоге.
+
+На `brand-pairs/logo-1.png` originality на нижних слоях должна
+заметно просесть (та же coarse structure есть в `logo-1-wm.png`)
+и восстановиться на верхних — это пейлоад для Stage 13.0.
+
+---
+
+## 20. CLIP search + bands (Stages 12.8/12.9/13.3)
+
+**Prereq:** сервер запущен с `--enable-embed`. Первый запрос
+скачивает ~155 MiB весов CLIP в `~/.cache/huggingface/hub`.
+
+Bulk-индекс после чистого рестарта:
+
+```sh
+curl -s -X POST http://127.0.0.1:8787/api/embed_all
+# → {"new":<N>,"skipped":<M>}
+```
+
+Per-band query:
+
+```sh
+for band in any coarse mid full; do
+  echo "--- band=$band ---"
+  curl -s "http://127.0.0.1:8787/api/search?q=mountain&band=$band&limit=3" \
+    | python3 -m json.tool
+done
+```
+
+Ожидаемое:
+
+- `any` — dedup по имени, лучший band на файл.
+- `coarse` — ранжирует по силуэту/цвету, landscapes сверху.
+- `full` — по фактуре, noise/pixel-blocks подтянутся.
+- `mid` — gradient-картинки.
+
+UI: `/search?q=mountain&band=any` — гридка карточек с
+band-бейджем (синий = coarse, фиолетовый = mid, розовый = full).
+
+---
+
+## 21. Robust-copy (Stage 13.0)
+
+Цель: проверить детект "structure matches, detail differs"
+(водяные знаки / перекодировки / лёгкая ретушь).
+
+1. Открой `/similar/photos/brand-pairs/logo-1.png`.
+2. В таблице "shard overlaps" должна быть строка с
+   `logo-1-wm.png`: `shared shards > 0`, `low-band % > high-band %`,
+   `robust copy?` показывает положительный `+xx.x`. При score ≥ 30
+   подсвечивается жёлтым с tooltip-предупреждением.
+
+---
+
+## 22. Streaming hologram (Stage 13.1)
+
+```sh
+curl -sI 'http://127.0.0.1:8787/preview/stream/photos/abstract/mandala-a.png'
+# Content-Type: multipart/x-mixed-replace; boundary=hololayer-2026-06-25
+```
+
+В браузере: `/holo/photos/abstract/mandala-a.png`, **force-reload**
+(Cmd+Shift+R) чтобы обойти PNG-кэш. Картинка должна заметно
+"фокусироваться" по мере прихода новых multipart-частей.
+
+---
+
+## 23. Spotlight modes (Stages 13.2 + 14.1)
+
+```sh
+img=photos/landscapes/mountain.png
+for mode in spatial coeff; do
+  curl -s -o "/tmp/spot-$mode.png" \
+       "http://127.0.0.1:8787/api/spotlight.png?name=$img&x=0.35&y=0.35&w=0.3&h=0.3&mode=$mode"
+done
+md5 /tmp/spot-*.png   # хеши должны отличаться
+```
+
+- `spatial`: вокруг ROI — размытое L0, видно контекст.
+- `coeff`: вокруг ROI близко к чёрному с чётким Haar-блочным
+  бордером (зануление коэффициентов вне ROI).
+
+Headers: `x-holofs-roi-px`, `x-holofs-decode-ms`,
+`x-holofs-bytes-downloaded`. Последний станет реальной экономией
+трафика после Stage 15.1 (per-block encoding для replicated
+объектов).
+
+UI: `/spotlight?a=<image>` — пиллы выбора mode + preset-кнопки +
+custom-coordinates форма.
+
+---
+
+## 24. Per-object versioning (Stage 13.4)
+
+**Prereq:** `--enable-versions`. Storage растёт пока флаг включён;
+`POST /api/gc` чистит.
+
+1. Залей `mandala-a.png` (через scenario 18).
+2. Перезалей под тем же именем другую картинку:
+
+   ```sh
+   curl -sf -X PUT \
+        --data-binary @samples/photos/abstract/mandala-b.png \
+        http://127.0.0.1:8787/photos/abstract/mandala-a.png
+   ```
+
+3. `/versions/photos/abstract/mandala-a.png` должна показать
+   архивную строку.
+4. Кликни "restore" (или curl `POST /api/restore` с `name=` и
+   `id=`). После этого:
+
+   ```sh
+   md5 <(curl -sf http://127.0.0.1:8787/photos/abstract/mandala-a.png)
+   ```
+
+   должен совпасть с исходным хешем — restore обратим, замена
+   ушла в архив.
+
+---
+
+## 25. GC: shards + embeddings + concurrency (Stages 14.0/3/4)
+
+1. После PUT-replace (см. 24) удали version side-files:
+
+   ```sh
+   rm -rf holofs-data/versions/photos__abstract__mandala-a.png
+   ```
+
+2. Запусти GC:
+
+   ```sh
+   curl -s -X POST http://127.0.0.1:8787/api/gc | python3 -m json.tool
+   ```
+
+Ожидаемое:
+
+- `purged_total > 0`.
+- `embeddings_dropped > 0` если stale-CID-ы были в индексе.
+- Каждая нода `ok: true`, без `error`.
+- `duration_ms` обычно < 100 ms на dev-кластере.
+
+Concurrency-check: запусти PUT и GC параллельно через `&`. RwLock
+барьер должен сериализовать их — GC дождётся PUT, потом сделает
+своё дело.
+
+---
+
 ## Завершение
 
 Чистый стоп:
@@ -852,6 +1089,8 @@ pkill -f 'target/release/holofs-web'
 Чистый wipe — удалить весь state:
 
 ```sh
+tools/test-data/clean-cluster.sh
+# или вручную:
 rm -rf ./holofs-data ./.cluster-data
 ```
 
@@ -860,5 +1099,6 @@ rm -rf ./holofs-data ./.cluster-data
 
 - [docs/operations.md](./operations.md) — конфигурация и эксплуатация
 - [docs/architecture.md](./architecture.md) — поток данных PUT → GET
-- [docs/api.md](./api.md) — HTTP API, формат wire-протокола
+- [docs/api.md](./api.md) — HTTP API, формат wire-протокола, новые эндпоинты
 - [docs/threat-model.md](./threat-model.md) — какие угрозы покрыты
+- `tools/test-data/README.md` — usage сэмпл-tree + smoke-runner

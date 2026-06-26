@@ -840,6 +840,375 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
 
 ---
 
+## 18. Quickstart with the sample tree
+
+`tools/test-data/` ships four pieces that take a fresh checkout
+straight to "every feature exercised, every page populated" without
+needing to hand-craft input files:
+
+```
+tools/test-data/
+├── generate-samples.py    # deterministic, dependency-free Python 3.10+
+├── clean-cluster.sh       # wipes catalog + shards + embeddings + versions
+├── upload-samples.sh      # PUTs the sample tree, preserving hierarchy
+└── run-tests.sh           # end-to-end smoke across Stages 12.6–15.0
+```
+
+### 18.1 Generate the tree
+
+```sh
+python3 tools/test-data/generate-samples.py
+# → wrote 38 samples (1,862,535 bytes) under <repo>/samples
+```
+
+The output lives under `./samples/` (gitignored). All bytes are
+deterministic — re-running with the same args produces byte-identical
+files, so version-controlled tests can pin against the exact hashes.
+
+Hierarchy:
+
+```
+samples/
+  photos/{landscapes,abstract,brand-pairs}/*.png
+  audio/{music,effects,silence}/*.wav
+  docs/{notes,spec,legal}/{*.txt,*.md,*.json}
+  binaries/{archives,blobs}/{*.zip,*.tar,*.bin}
+```
+
+The brand-pairs folder includes intentional near-duplicates
+(`logo-N.png` + `logo-N-wm.png`) so `/similar`'s robust-copy
+column produces hits.
+
+### 18.2 Clean restart
+
+```sh
+tools/test-data/clean-cluster.sh
+# (FORCE=1 to skip the confirmation prompt)
+
+./target/release/holofs-web \
+    --storage ./holofs-data \
+    --addr 127.0.0.1:8787 \
+    --enable-embed \
+    --enable-versions &
+```
+
+Without `--enable-embed` the `/search` page renders an "embed
+disabled" banner. Without `--enable-versions` PUTs that replace an
+existing object purge the prior shards (no archive).
+
+### 18.3 Push the tree
+
+```sh
+tools/test-data/upload-samples.sh
+```
+
+The script mkdirs every prefix folder first (so `/?p=<dir>` works
+straight away), then PUTs every file. Finally it queries `/api/stats`
+and prints the new catalog totals — expect `objects_total = 38 +
+<directory_markers>` (the upload script's mkdirs are also counted as
+directory entries).
+
+### 18.4 End-to-end smoke
+
+```sh
+tools/test-data/run-tests.sh
+```
+
+What it walks through, by stage:
+
+| Stage  | Check                                              |
+|--------|----------------------------------------------------|
+| 9      | `/` + `/?p=<folder>` for every subdir              |
+| 12.6   | `/mix?a=<image>` renders the wavelet-mix composer  |
+| 12.7   | `/health/<name>` per-file metrics                  |
+| 12.7   | `/about` marketing page                            |
+| 12.8/9 | `/search` UI + `/api/search?band=<any|coarse|mid|full>` |
+| 13.0   | `/similar/<brand-pair logo>` includes robust-copy column |
+| 13.1   | `/holo/<name>` + `/preview/stream/<name>` multipart |
+| 13.2   | `/api/spotlight.png?mode=spatial`                  |
+| 14.1   | `/api/spotlight.png?mode=coeff`                    |
+| 13.4   | PUT twice → `/versions/<name>` shows archived row  |
+| 14.0/3 | `POST /api/gc` returns a `GcReport` JSON           |
+
+Each check prints `✓` / `✗` and the script's exit code is non-zero
+if any check fails.
+
+---
+
+## 19. Per-file metrics page (Stage 12.7)
+
+**Goal**: confirm the "Unique metrics" block under
+`/health/<name>` populates correctly.
+
+**Steps**:
+
+1. Pick any image from the sample tree, e.g.
+   `photos/landscapes/mountain.png`.
+2. Visit `http://127.0.0.1:8787/health/photos/landscapes/mountain.png`
+   in a browser, or curl the underlying API directly:
+
+   ```sh
+   curl -s 'http://127.0.0.1:8787/api/file_metrics?name=photos/landscapes/mountain.png' \
+        | python3 -m json.tool
+   ```
+
+**Expected payload**: a `FileMetricsView` with:
+
+- `total_shards_in_file` ≈ `unique_shards_in_file` (PUT-time
+  deduplication doesn't compress within one file's RLNC encoding).
+- `catalog_total_shards` ≥ `total_shards_in_file`.
+- `originality_pct` somewhere in `[0, 100]`; a sample-tree image
+  with no shared structure should be close to 100.
+- `originality_per_layer` is a `Vec<f32>` with `nlayers` entries.
+- `layer_energy` populated for image / audio; `None` for text / opaque.
+- `audio_bands` only present when `kind == "audio"`.
+- `neighbours` is empty unless the catalog also contains the same
+  bytes under a different name.
+
+**Brand-pair check**: against
+`photos/brand-pairs/logo-1.png`, the per-layer originality should
+show a noticeable drop in lower layers (the same coarse structure
+exists in `logo-1-wm.png`) and recovery in higher ones — that's the
+"shared coarse, divergent fine" pattern that drives the Stage 13.0
+robust-copy score.
+
+---
+
+## 20. CLIP semantic search + bands (Stages 12.8 / 12.9 / 13.3)
+
+**Prereq**: server started with `--enable-embed`. On first call the
+gateway downloads ~155 MiB of CLIP weights from HuggingFace into
+`~/.cache/huggingface/hub`; subsequent restarts are instant.
+
+**Bulk index** (only needed once after a clean restart):
+
+```sh
+curl -s -X POST http://127.0.0.1:8787/api/embed_all
+# → {"new":<N>,"skipped":<M>}
+```
+
+`new` counts catalog entries newly embedded; `skipped` counts
+images whose `(data_cid, band)` was already in `embeddings.bin`
+(same content uploaded under multiple paths).
+
+**Per-band query**:
+
+```sh
+for band in any coarse mid full; do
+  echo "--- band=$band ---"
+  curl -s "http://127.0.0.1:8787/api/search?q=mountain&band=$band&limit=3" \
+    | python3 -m json.tool
+done
+```
+
+**Expected outcomes**:
+
+- `band=any` returns the highest-scoring band per file (dedup by
+  name).
+- `band=coarse` ranks by silhouette / colour blob — landscape
+  photos with a horizon line should bubble to the top.
+- `band=full` ranks by texture — the noise / pixel-blocks abstracts
+  should re-shuffle.
+- `band=mid` sits between — gradient images should score well.
+
+**UI surface**: `/search?q=mountain&band=any` shows a card grid
+where each card's coarse thumbnail cross-fades to the full
+resolution. The card carries a coloured band badge (blue =
+coarse, purple = mid, pink = full).
+
+---
+
+## 21. Robust-copy column on `/similar` (Stage 13.0)
+
+**Goal**: detect "structure matches, detail differs" pairs (the
+watermark / re-encode / light retouch signature).
+
+**Steps**:
+
+1. Visit `/similar/photos/brand-pairs/logo-1.png`.
+2. Scroll to the "shard overlaps" table.
+
+**Expected**: at least `photos/brand-pairs/logo-1-wm.png` appears
+in the overlaps table. Columns:
+
+- `shared shards` > 0 (low-layer hashes coincide).
+- `low-band %` > `high-band %`.
+- `robust copy?` column shows a positive `+xx.x` value; a yellow ⚠
+  glyph appears when the score exceeds 30, with a tooltip
+  ("likely a watermarked / re-encoded / lightly retouched copy").
+
+Curl the underlying server function via the page (browsers only):
+
+```sh
+curl -s 'http://127.0.0.1:8787/similar/photos/brand-pairs/logo-1.png' \
+  | grep -oE 'robust_copy_score":-?[0-9.]+'
+```
+
+---
+
+## 22. Streaming hologram (Stage 13.1)
+
+**Goal**: confirm that `/preview/stream/<name>` returns a multipart
+body and the browser-side `/holo/<name>` page works.
+
+**Curl probe**:
+
+```sh
+curl -sI 'http://127.0.0.1:8787/preview/stream/photos/abstract/mandala-a.png'
+# Content-Type should be: multipart/x-mixed-replace; boundary=hololayer-2026-06-25
+```
+
+**Browser**:
+
+1. Visit `/holo/photos/abstract/mandala-a.png`.
+2. Force-reload (Cmd+Shift+R) to bypass the per-(name, layer) PNG
+   cache.
+3. Watch the image visibly sharpen — first frame in ~tens of
+   milliseconds, each subsequent frame adds one DWT layer's worth
+   of detail.
+
+**Caveat**: subsequent visits hit the cache and feel instant. The
+JavaScript-free `<img>` swap relies on `multipart/x-mixed-replace`,
+which Chrome and Firefox handle gracefully.
+
+---
+
+## 23. Holographic spotlight modes (Stage 13.2 + 14.1)
+
+**Goal**: render the same ROI two ways and compare visually.
+
+```sh
+img=photos/landscapes/mountain.png
+for mode in spatial coeff; do
+  curl -s -o "/tmp/spot-$mode.png" \
+       "http://127.0.0.1:8787/api/spotlight.png?name=$img&x=0.35&y=0.35&w=0.3&h=0.3&mode=$mode"
+done
+file /tmp/spot-*.png
+md5 /tmp/spot-*.png    # expect distinct hashes
+```
+
+**Expected**: two PNGs of the same dimensions but distinct bytes.
+
+- `spatial` keeps the area outside the ROI as a blurry-but-visible
+  L0 reconstruction.
+- `coeff` keeps non-ROI pixels near black (Haar reverse-map zeros
+  every coefficient that doesn't touch the ROI).
+
+**Headers**:
+
+```sh
+curl -sI \
+  "http://127.0.0.1:8787/api/spotlight.png?name=$img&x=0.35&y=0.35&w=0.3&h=0.3&mode=coeff" \
+  | grep -i 'x-holofs'
+```
+
+`x-holofs-roi-px` echoes the clamped pixel ROI; `x-holofs-decode-ms`
+reports server work; `x-holofs-bytes-downloaded` is informational
+(Stage 15.1 will turn it into a real bandwidth-saving number for
+`?mode=coeff` on replicated objects).
+
+**UI**: `/spotlight?a=<image>` exposes the mode toggle + ROI
+presets + a custom-coordinates form.
+
+---
+
+## 24. Per-object versioning (Stage 13.4)
+
+**Prereq**: server started with `--enable-versions`. Versioned PUTs
+SKIP the usual shard purge so storage grows monotonically while
+the flag is on. Run `/api/gc` (scenario 25) to reclaim.
+
+**Steps**:
+
+1. Pick a target name, e.g. `samples/photos/abstract/mandala-a.png`
+   you've already uploaded.
+2. Upload a different image to the same path:
+
+   ```sh
+   curl -sf -X PUT \
+        --data-binary @samples/photos/abstract/mandala-b.png \
+        http://127.0.0.1:8787/photos/abstract/mandala-a.png
+   ```
+
+3. Inspect history:
+
+   ```sh
+   open 'http://127.0.0.1:8787/versions/photos/abstract/mandala-a.png'
+   ```
+
+   Expect at least one archived row dated just now. The CID prefix
+   should match the original Stage 18 upload, not the replacement.
+
+4. Click "restore" on the archived row. Confirm at the dialog.
+
+   ```sh
+   # Or via curl:
+   curl -X POST \
+        -d 'name=photos/abstract/mandala-a.png&id=v<TS>_<CIDSHORT>' \
+        http://127.0.0.1:8787/api/restore
+   ```
+
+5. Re-fetch the image:
+
+   ```sh
+   md5 <(curl -sf http://127.0.0.1:8787/photos/abstract/mandala-a.png)
+   ```
+
+**Expected**: the post-restore MD5 matches the pre-replace MD5; the
+replacement is now itself archived (restore is reversible).
+
+---
+
+## 25. Orphan-shard GC + embedding GC (Stages 14.0 / 14.3 / 14.4)
+
+**Goal**: confirm the gateway reclaims shards no longer referenced
+by any live manifest or version archive, AND cleans stale
+embeddings out of `embeddings.bin`.
+
+**Steps**:
+
+1. Trigger one PUT-replace pass (scenario 24) so the cluster has
+   orphan-able shards.
+2. Delete the version side-files for that name (simulates the
+   operator removing history):
+
+   ```sh
+   rm -rf holofs-data/versions/photos__abstract__mandala-a.png
+   ```
+
+   (The script `clean-cluster.sh` does the same wholesale.)
+
+3. Run GC:
+
+   ```sh
+   curl -s -X POST http://127.0.0.1:8787/api/gc | python3 -m json.tool
+   ```
+
+**Expected**:
+
+- `purged_total` > 0 (the prior shards are now unreferenced).
+- `embeddings_dropped` > 0 if any stale CIDs lived in the index.
+- `embeddings_kept` matches the number of live `(data_cid, band)`
+  records remaining.
+- Every node's `ok: true`, no `error` field set.
+- `duration_ms` typically < 100 ms on the dev cluster.
+
+**Concurrency check** (optional): run a long PUT + a GC in parallel
+and verify both succeed. The RwLock barrier in `Gateway` should
+serialise them — GC will wait for the PUT to finish, then run
+alone.
+
+```sh
+( curl -sf -X PUT --data-binary @samples/photos/landscapes/ocean.png \
+       http://127.0.0.1:8787/race-test.png ) &
+sleep 0.2
+( curl -sf -X POST http://127.0.0.1:8787/api/gc | python3 -m json.tool ) &
+wait
+# Both should complete; GC's `duration_ms` will include the wait time.
+```
+
+---
+
 ## Wrap-up
 
 Clean stop:
@@ -852,6 +1221,8 @@ pkill -f 'target/release/holofs-web'
 Clean wipe — drop all state:
 
 ```sh
+tools/test-data/clean-cluster.sh
+# or, manually:
 rm -rf ./holofs-data ./.cluster-data
 ```
 
@@ -860,5 +1231,6 @@ consult:
 
 - [docs/operations.md](./operations.md) — configuration and operations
 - [docs/architecture.md](./architecture.md) — PUT → GET data flow
-- [docs/api.md](./api.md) — HTTP API, wire-protocol format
+- [docs/api.md](./api.md) — HTTP API, wire-protocol format, new endpoints
 - [docs/threat-model.md](./threat-model.md) — covered threats
+- `tools/test-data/README.md` — sample-tree + smoke-runner usage

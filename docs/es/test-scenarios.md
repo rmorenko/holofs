@@ -864,3 +864,24 @@ consulte:
 - [docs/architecture.md](./architecture.md) — flujo de datos PUT → GET
 - [docs/api.md](./api.md) — API HTTP, formato del protocolo de cable
 - [docs/threat-model.md](./threat-model.md) — amenazas cubiertas
+
+---
+
+## 18+ — Escenarios Stages 12.6 – 15.0 (referencia en inglés)
+
+Cada uno de los siguientes stages tiene su propio escenario de
+prueba en el `docs/test-scenarios.md` en inglés (secciones 18–25):
+
+- 18 — Quickstart con el árbol de muestras `tools/test-data/`
+- 19 — Métricas por-archivo en `/health/<name>` (Stage 12.7)
+- 20 — Búsqueda semántica CLIP + píldoras de banda (Stages 12.8/12.9/13.3)
+- 21 — Columna robust-copy en `/similar` (Stage 13.0)
+- 22 — Holograma streaming vía `/preview/stream/<name>` (Stage 13.1)
+- 23 — `/api/spotlight.png?mode=<spatial|coeff>` (Stages 13.2 + 14.1)
+- 24 — Versionado por objeto + `/api/restore` (Stage 13.4)
+- 25 — `POST /api/gc` para shards + embeddings (Stages 14.0/3/4)
+
+Las traducciones al español están pendientes.  Mientras tanto,
+`tools/test-data/run-tests.sh` ofrece un smoke-test end-to-end
+independiente del idioma cubriendo todos los puntos anteriores
+(cada comprobación imprime `✓` / `✗`).
