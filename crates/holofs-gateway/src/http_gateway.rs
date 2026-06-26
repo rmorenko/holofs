@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use holofs_client::{
     get_audio_filtered, get_object_up_to_layer, get_object_with_coeff_mask, layer_energies,
@@ -53,6 +53,24 @@ pub struct Gateway {
     /// remains decodeable. Trade-off: cluster storage monotonically
     /// grows while the feature is on (no GC yet).
     versions: Arc<Mutex<VersionsState>>,
+    /// Stage 14.4: serialisation barrier between catalog-mutating
+    /// writers and the orphan-shard GC pass.
+    ///
+    /// Writers (`ingest_bytes`, `restore_version`, `embed_object`)
+    /// hold a `read()` guard for their full duration. The GC
+    /// (`gc_orphaned_shards`) takes a `write()` guard, so it waits
+    /// for every in-flight writer to finish AND blocks any new
+    /// writer until it's done.
+    ///
+    /// Without this lock a fresh PUT that wrote shards to node N+1
+    /// *after* GC's `ListHashes(node 0)` but *before*
+    /// `ListHashes(node N+1)` would have its `h_new` show up in the
+    /// held-list snapshot of node N+1 yet not in the live-hash set
+    /// (snapshotted before the PUT updated the catalog) — and GC's
+    /// `PurgeByHash(node N+1)` would silently delete the new shard.
+    /// The barrier turns that race into "PUTs queue behind GC" which
+    /// is fine for the manually-triggered `/api/gc`.
+    gc_barrier: Arc<RwLock<()>>,
     gf: Arc<Gf>,
     /// Baseline list of "actually live" cluster nodes. `admin_kills` flags
     /// (set via the UI) are layered on top of it.
@@ -100,6 +118,7 @@ impl Gateway {
             catalog_path: None,
             embed: Arc::new(Mutex::new(EmbedState::default())),
             versions: Arc::new(Mutex::new(VersionsState::default())),
+            gc_barrier: Arc::new(RwLock::new(())),
             gf,
             live,
             admin_kills: Arc::new(Mutex::new(vec![false; n])),
@@ -124,6 +143,7 @@ impl Gateway {
             catalog_path: Some(catalog_path),
             embed: Arc::new(Mutex::new(EmbedState::default())),
             versions: Arc::new(Mutex::new(VersionsState::default())),
+            gc_barrier: Arc::new(RwLock::new(())),
             gf,
             live,
             admin_kills: Arc::new(Mutex::new(vec![false; n])),
@@ -806,6 +826,11 @@ impl Gateway {
         name: &str,
         body: &[u8],
     ) -> Result<IngestResult, GatewayError> {
+        // Stage 14.4: hold the GC barrier for the full PUT. GC
+        // upgrades to a write guard and waits for us; any
+        // concurrent GC blocks new PUTs until it's done. Released
+        // automatically on function return.
+        let _gc_guard = self.gc_barrier.read().await;
         if body.is_empty() {
             return Err(GatewayError::BadRequest("empty body".into()));
         }
@@ -2063,6 +2088,10 @@ impl Gateway {
     ///     wrong kind),
     ///   * `Err(...)` — decode / inference failure.
     pub async fn embed_object(&self, name: &str) -> Result<bool, GatewayError> {
+        // Stage 14.4: hold the GC barrier so the embeddings.bin
+        // rewrite (also a writer) doesn't race our append. The
+        // guard outlives the whole decode + CLIP + index.append.
+        let _gc_guard = self.gc_barrier.read().await;
         let Some(embedder) = self.ensure_embedder().await? else {
             return Ok(false);
         };
@@ -2656,6 +2685,13 @@ impl Gateway {
         name: &str,
         id: &str,
     ) -> Result<RestoreResult, GatewayError> {
+        // Stage 14.4: hold the GC barrier — restore mutates the
+        // catalog AND relies on the prior version's shards still
+        // being live on the cluster. If GC ran between our archive
+        // step and the catalog swap it could purge those shards
+        // (they're not in the old catalog's manifest at the moment
+        // GC snapshots).
+        let _gc_guard = self.gc_barrier.read().await;
         let s = self.versions.lock().await;
         let Some(root) = s.root.clone() else {
             return Err(GatewayError::BadRequest(
@@ -2759,22 +2795,28 @@ impl Gateway {
     /// Held set = `ListHashes` from each node. Orphans = held - live.
     /// One `PurgeByHash` round per node deletes the orphans.
     ///
-    /// **Concurrency note:** a brief catalog lock snapshots names +
-    /// manifests, then the lock is dropped. PUTs during the GC pass
-    /// land fine — their shards go to the cluster after our `ListHashes`
-    /// has already enumerated, so they're not in the held set we
-    /// purge against. The catch is a PUT-then-REPLACE that lands
-    /// **between** ListHashes and PurgeByHash on the same node: the
-    /// old shard is on the held list, was not in the snapshot's live
-    /// set, gets purged. Versioning archives the prior manifest
-    /// before the catalog mutation though, so live set rebuilt
-    /// next pass picks the old shards back up — and the next PUT
-    /// pass will recreate them via the standard repair pipeline if
-    /// the user calls `restore_version`. Documented gap.
+    /// **Concurrency (Stage 14.4):** the pass takes an exclusive
+    /// `gc_barrier.write()` guard, so it waits for every in-flight
+    /// PUT / restore / embed-append AND blocks new ones until it's
+    /// done. Trade-off: PUTs are queued behind GC for the duration
+    /// of one pass (≈40 ms on the dev catalog). That's fine for a
+    /// manually-triggered `/api/gc`; a scheduled GC would want a
+    /// smarter epoch-based scheme instead.
     ///
     /// Returns a [`GcReport`] with per-node breakdown.
     pub async fn gc_orphaned_shards(&self) -> Result<GcReport, GatewayError> {
         use std::collections::HashSet;
+        // Stage 14.4: serialise against catalog-mutating writers
+        // (PUTs, restore_version, embed_object). Waits for every
+        // in-flight writer; blocks new ones until we're done.
+        // Without this exclusive guard a fresh PUT during the GC
+        // pass could land shards on a node *after* we snapshotted
+        // its held list AND *before* we snapshotted the catalog
+        // for the live set — the next node's held list would then
+        // include `h_new` while our `live` set wouldn't, and the
+        // subsequent PurgeByHash would silently delete the fresh
+        // shard.
+        let _gc_guard = self.gc_barrier.write().await;
         let t0 = Instant::now();
 
         // 1. Snapshot the live catalog hashes.
