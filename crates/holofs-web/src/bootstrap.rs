@@ -414,6 +414,7 @@ async fn put_named(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
+        encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
     };
     put_object(gf, &mut m, &live.to_vec(), channels)
         .await

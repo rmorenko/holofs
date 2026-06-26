@@ -369,6 +369,7 @@ impl Gateway {
             audio_sample_rate: 0,
             text_minhash: vec![],
             created_at_unix: 0,
+            encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
         }
     }
 
@@ -422,6 +423,7 @@ impl Gateway {
             audio_sample_rate: sample_rate,
             text_minhash: vec![],
             created_at_unix: 0,
+            encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
         })
     }
 
@@ -454,6 +456,7 @@ impl Gateway {
             audio_sample_rate: 0,
             text_minhash: vec![],
             created_at_unix: 0,
+            encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
         }
     }
 
@@ -496,6 +499,7 @@ impl Gateway {
             audio_sample_rate: 0,
             text_minhash: vec![],
             created_at_unix: 0,
+            encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
         }
     }
 

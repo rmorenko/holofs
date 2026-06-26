@@ -457,6 +457,18 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
             s.purge_by_hashes(&set);
             Response::Ack
         }
+        Request::PutBatch {
+            object_id,
+            channel,
+            layer,
+            shards,
+        } => {
+            let mut s = store.lock().await;
+            for shard in shards {
+                s.put((object_id, channel, layer), shard);
+            }
+            Response::Ack
+        }
     }
 }
 

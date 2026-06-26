@@ -64,6 +64,7 @@ fn image_manifest(object_id: u64) -> Manifest {
         audio_sample_rate: 0,
         text_minhash: vec![],
         created_at_unix: 0,
+        encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
     }
 }
 

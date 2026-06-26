@@ -213,6 +213,7 @@ mod tests {
             audio_sample_rate: 0,
             text_minhash: vec![],
             created_at_unix: 1_700_000_000 + seed as u64,
+            encoding: crate::manifest::ObjectEncoding::Rlnc,
         }
     }
 

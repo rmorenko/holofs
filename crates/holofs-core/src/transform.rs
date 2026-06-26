@@ -205,6 +205,57 @@ pub fn spatial_to_dwt_positions(
     out
 }
 
+/// Stage 15.0: map a spatial ROI to the per-layer block indices that
+/// cover it. `layer_positions[l]` is the list of DWT-plane positions
+/// (flat `y*w + x`) packed into layer `l`'s shards in PUT order; this
+/// helper returns, per layer, the *indices into that vector* whose
+/// underlying position is inside the ROI.
+///
+/// Output shape: `Vec<Vec<u32>>` indexed by layer. `out[l]` is the
+/// position-indices (in `layer_positions[l]`) whose Haar coefficient
+/// affects at least one pixel of the ROI. Caller fans across channels
+/// at fetch time — channels share the same position layout.
+///
+/// Used by the gateway when an object is `ObjectEncoding::Replicated`
+/// to fetch only the shards covering the ROI, finally delivering the
+/// bandwidth-aware spotlight the Stage 14.1 reverse-map primitive
+/// promised but couldn't reach with RLNC.
+#[must_use]
+pub fn roi_to_block_ids(
+    rx: usize,
+    ry: usize,
+    rw: usize,
+    rh: usize,
+    w: usize,
+    h: usize,
+    layer_positions: &[Vec<u32>],
+) -> Vec<Vec<u32>> {
+    use std::collections::HashSet;
+    let levels = LEVELS;
+    if layer_positions.is_empty() || rw == 0 || rh == 0 {
+        return vec![Vec::new(); layer_positions.len()];
+    }
+    // 1. Set of DWT-plane positions whose coefficient touches the ROI.
+    let touched: HashSet<u32> =
+        spatial_to_dwt_positions(rx, ry, rw, rh, w, h, levels)
+            .into_iter()
+            .map(|p| p as u32)
+            .collect();
+    // 2. For each layer, find the indices in its `positions` vec whose
+    //    value is in `touched`.
+    let mut out: Vec<Vec<u32>> = Vec::with_capacity(layer_positions.len());
+    for positions in layer_positions {
+        let mut layer_ids: Vec<u32> = Vec::new();
+        for (idx, &p) in positions.iter().enumerate() {
+            if touched.contains(&p) {
+                layer_ids.push(idx as u32);
+            }
+        }
+        out.push(layer_ids);
+    }
+    out
+}
+
 /// Which priority layer position (x, y) belongs to in a DWT-frequency image.
 /// Layer 0 = LL (coarse shape); 1..LEVELS = detail levels (finer → higher).
 pub fn coeff_layer(x: usize, y: usize, w: usize, h: usize) -> usize {
@@ -429,6 +480,44 @@ mod tests {
         assert_eq!(dedup.len(), expected_total);
         // The LL_LEVELS coefficient lives at (0, 0) in the plane.
         assert!(dedup.contains(&0));
+    }
+
+    #[test]
+    fn roi_to_block_ids_full_image_covers_every_position() {
+        // Build layer_positions the same way bootstrap does, then ask
+        // for the full image ROI. Sum of per-layer block id counts
+        // must equal w*h — every position is covered.
+        let (w, h) = (TW, TH);
+        let mut positions: Vec<Vec<u32>> = vec![Vec::new(); NLAYERS];
+        for y in 0..h {
+            for x in 0..w {
+                let l = coeff_layer(x, y, w, h);
+                positions[l].push((y * w + x) as u32);
+            }
+        }
+        let ids = roi_to_block_ids(0, 0, w, h, w, h, &positions);
+        let total: usize = ids.iter().map(|v| v.len()).sum();
+        assert_eq!(total, w * h);
+    }
+
+    #[test]
+    fn roi_to_block_ids_corner_is_strictly_smaller() {
+        // 1×1 corner ROI must yield strictly fewer block ids than the
+        // full image — proof the helper actually filters.
+        let (w, h) = (TW, TH);
+        let mut positions: Vec<Vec<u32>> = vec![Vec::new(); NLAYERS];
+        for y in 0..h {
+            for x in 0..w {
+                let l = coeff_layer(x, y, w, h);
+                positions[l].push((y * w + x) as u32);
+            }
+        }
+        let full = roi_to_block_ids(0, 0, w, h, w, h, &positions);
+        let corner = roi_to_block_ids(0, 0, 1, 1, w, h, &positions);
+        let full_n: usize = full.iter().map(|v| v.len()).sum();
+        let corner_n: usize = corner.iter().map(|v| v.len()).sum();
+        assert!(corner_n > 0, "corner ROI must touch at least one block");
+        assert!(corner_n < full_n, "corner < full");
     }
 
     #[test]

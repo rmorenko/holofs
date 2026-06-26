@@ -83,6 +83,18 @@ pub enum Request {
     PurgeByHash {
         hashes: Vec<Hash>,
     },
+    /// Stage 15.0: batched PUT — store every shard in `shards` under
+    /// the same `(object_id, channel, layer)` bucket. Single Ack on
+    /// success. Used by the replicated-encoding path where a single
+    /// `(object_id, channel, layer)` can carry thousands of one-
+    /// coefficient shards; sending each as its own RPC exhausts
+    /// ephemeral ports.
+    PutBatch {
+        object_id: u64,
+        channel: u8,
+        layer: u8,
+        shards: Vec<Shard>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +128,7 @@ const OP_AUDIT: u8 = 0x05;
 const OP_AUTH: u8 = 0x06;
 const OP_LIST_HASHES: u8 = 0x07;
 const OP_PURGE_BY_HASH: u8 = 0x08;
+const OP_PUT_BATCH: u8 = 0x09;
 
 const RSP_PONG: u8 = 0x00;
 const RSP_ACK: u8 = 0x01;
@@ -182,6 +195,21 @@ impl Request {
                     b.extend_from_slice(h);
                 }
             }
+            Request::PutBatch {
+                object_id,
+                channel,
+                layer,
+                shards,
+            } => {
+                b.push(OP_PUT_BATCH);
+                b.extend_from_slice(&object_id.to_be_bytes());
+                b.push(*channel);
+                b.push(*layer);
+                b.extend_from_slice(&(shards.len() as u32).to_be_bytes());
+                for s in shards {
+                    encode_shard(&mut b, s);
+                }
+            }
         }
         b
     }
@@ -237,6 +265,22 @@ impl Request {
                     hashes.push(h);
                 }
                 Ok(Request::PurgeByHash { hashes })
+            }
+            OP_PUT_BATCH => {
+                let object_id = c.u64()?;
+                let channel = c.u8()?;
+                let layer = c.u8()?;
+                let n = c.u32()? as usize;
+                let mut shards = Vec::with_capacity(n);
+                for _ in 0..n {
+                    shards.push(decode_shard(&mut c)?);
+                }
+                Ok(Request::PutBatch {
+                    object_id,
+                    channel,
+                    layer,
+                    shards,
+                })
             }
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,

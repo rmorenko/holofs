@@ -221,6 +221,7 @@ fn blank_manifest(node_addrs: &[String], w: usize, h: usize) -> Manifest {
         audio_sample_rate: 0,
         text_minhash: vec![],
         created_at_unix: 0,
+        encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
     }
 }
 

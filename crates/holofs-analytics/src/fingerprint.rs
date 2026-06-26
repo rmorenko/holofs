@@ -372,6 +372,7 @@ mod tests {
             audio_sample_rate: 0,
             text_minhash: vec![],
             created_at_unix: 0,
+            encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
         }
     }
 

@@ -592,6 +592,11 @@ pub async fn spotlight_png(
                 HeaderValue::from_str(&out.decode_ms.to_string())
                     .unwrap_or(HeaderValue::from_static("0")),
             );
+            h.insert(
+                HeaderName::from_static("x-holofs-bytes-downloaded"),
+                HeaderValue::from_str(&out.bytes_downloaded.to_string())
+                    .unwrap_or(HeaderValue::from_static("0")),
+            );
             resp
         }
         Err(e) => error_to_response(e),
