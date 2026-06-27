@@ -5,32 +5,42 @@ end-to-end environment for testing every Stage 12.6–15.0 feature.
 
 ```
 tools/test-data/
-├── generate-samples.py    # writes ~40 deterministic samples under samples/
-├── clean-cluster.sh       # wipes catalog + shards + embeddings + versions
-├── upload-samples.sh      # PUTs the sample tree, preserving hierarchy
-├── run-tests.sh           # end-to-end smoke: 30+ checks across the new features
-└── README.md              # you are here
+├── generate-samples.py        # writes ~38 deterministic samples under samples/
+├── fetch-real-landscapes.sh   # downloads 6 real 2560×1440 landscapes (picsum)
+├── clean-cluster.sh           # wipes catalog + shards + embeddings + versions
+├── upload-samples.sh          # PUTs the sample tree, preserving hierarchy
+├── run-tests.sh               # end-to-end smoke: 30+ checks across the new features
+└── README.md                  # you are here
 ```
 
 ## Usage — one-time setup
 
 The generator is dependency-free (only stdlib Python 3.10+). Generate the
-sample tree once:
+sample tree once, then fetch the real landscape photos:
 
 ```bash
 python3 tools/test-data/generate-samples.py
 # wrote 38 samples (1,862,535 bytes) under <repo>/samples
 # manifest at samples/MANIFEST.txt
+
+tools/test-data/fetch-real-landscapes.sh
+# fetches 6 real 2560×1440 JPEGs from picsum.photos into
+# samples/photos/landscapes-xl/ — IDs are pinned for reproducibility.
 ```
+
+Re-running `generate-samples.py` after the fetch is safe: it preserves
+anything already sitting under `samples/photos/landscapes-xl/` and folds
+those files into the MANIFEST automatically.
 
 What lands under `samples/`:
 
 ```
 photos/
   landscapes/    mountain.png, ocean.png, forest.png, desert.png, tundra.png  (256×256, ~17 KB)
-  landscapes-xl/ snowy-peaks.png, desert-dunes.png, ocean-horizon.png, forest-canopy.png,
-                 sunset-lake.png, autumn-valley.png  (2560×1440, 2.8–3.3 MB each — requires
-                 Pillow; skipped with a warning if `import PIL` fails)
+  landscapes-xl/ norway-fjord.jpg, highland-pass.jpg, stormy-shore.jpg, himalaya-camp.jpg,
+                 yosemite-sunset.jpg, yosemite-valley.jpg  (2560×1440 real JPEGs from
+                 picsum.photos / Unsplash, ~280–900 KB each — populated by
+                 `fetch-real-landscapes.sh`, not by the generator)
   abstract/      mandala-{a,b}.png, gradient-{warm,cool}.png, noise-rgb.png, pixel-blocks.png
   brand-pairs/   logo-N.png + logo-N-wm.png (3 pairs — robust-copy targets)
 audio/
@@ -67,9 +77,10 @@ tools/test-data/clean-cluster.sh
 tools/test-data/upload-samples.sh
 ```
 
-After step 3 `/api/stats` should report ~38 objects + ~15 directory markers.
-The total comes from `find samples -type f -not -name MANIFEST.txt` + the
-folders the upload script auto-creates.
+After step 3 `/api/stats` should report ~44 objects (38 synthetic + 6 real
+landscape JPEGs) plus ~15 directory markers. The total comes from
+`find samples -type f -not -name MANIFEST.txt` + the folders the upload
+script auto-creates.
 
 ## End-to-end smoke
 

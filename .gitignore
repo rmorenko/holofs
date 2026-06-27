@@ -34,3 +34,7 @@ Thumbs.db
 # Coverage
 *.profraw
 lcov.info
+
+# Local tool caches
+__pycache__/
+.pkgconfig/
