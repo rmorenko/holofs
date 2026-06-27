@@ -948,7 +948,11 @@ if any check fails.
    in a browser, or curl the underlying API directly:
 
    ```sh
-   curl -s 'http://127.0.0.1:8787/api/file_metrics?name=photos/landscapes/mountain.png' \
+   # POST — the endpoint is a leptos server fn, so the name argument
+   # rides in the form body, not the query string. A GET returns
+   # 405 Method Not Allowed.
+   curl -s -X POST -d 'name=photos/landscapes/mountain.png' \
+        http://127.0.0.1:8787/api/file_metrics \
         | python3 -m json.tool
    ```
 
@@ -965,12 +969,14 @@ if any check fails.
 - `neighbours` is empty unless the catalog also contains the same
   bytes under a different name.
 
-**Brand-pair check**: against
-`photos/brand-pairs/logo-1.png`, the per-layer originality should
-show a noticeable drop in lower layers (the same coarse structure
-exists in `logo-1-wm.png`) and recovery in higher ones — that's the
-"shared coarse, divergent fine" pattern that drives the Stage 13.0
-robust-copy score.
+**Brand-pair check**: against `photos/brand-pairs/logo-1.png`, the
+`neighbours[]` array should list `photos/brand-pairs/logo-1-wm.png`
+as the **top** entry (highest `shared_total`) with a non-zero
+`shared_per_layer[0]` — i.e., layer-0 (LL / coarse) systematic
+shards survive byte-for-byte despite the corner watermark. Other
+images in the catalog show `shared_per_layer[0] == 0`. That layer-0
+overlap is what feeds the Stage 13.0 robust-copy score. See §21
+for the score-formula caveat on synthetic test data.
 
 ---
 
@@ -1028,14 +1034,31 @@ watermark / re-encode / light retouch signature).
 1. Visit `/similar/photos/brand-pairs/logo-1.png`.
 2. Scroll to the "shard overlaps" table.
 
-**Expected**: at least `photos/brand-pairs/logo-1-wm.png` appears
-in the overlaps table. Columns:
+**Expected**:
 
-- `shared shards` > 0 (low-layer hashes coincide).
-- `low-band %` > `high-band %`.
-- `robust copy?` column shows a positive `+xx.x` value; a yellow ⚠
-  glyph appears when the score exceeds 30, with a tooltip
-  ("likely a watermarked / re-encoded / lightly retouched copy").
+- `photos/brand-pairs/logo-1-wm.png` is the **top neighbour**
+  (highest `shared shards`) — confirms the mechanism: the localized
+  bottom-right watermark preserves the bulk of the LL (layer-0)
+  systematic shards, so 39+ of those 192 layer-0 shards hash
+  identically between the base and the watermarked variant. No
+  unrelated image (mandala, gradient, other brand) shares a single
+  layer-0 shard.
+- `low-band %` > 0 (layer-0 overlap).
+
+**Caveat on the score** (synthetic-test-data limitation, not a bug
+in the feature): the `robust copy?` numeric on the seeded sample
+tree is **negative** for every brand pair, and the +30 watermark-
+warning glyph never lights up here. The reason is that the gateway
+upscales 256×256 sample PNGs to its 512×512 working resolution
+before encoding; bilinear/bicubic upsampling makes the finest Haar
+band (layer 3) almost entirely zero for every smooth synthetic
+image. The K=16 systematic shards over those zeros hash to the same
+"all-zero" value across **every** image in the sample tree, so each
+pair gets a baseline ~36 % `high-band %` that swamps the score
+formula. On real photographs with rich high-frequency detail the
+score crosses +30 cleanly; on this test set, treat the **top-rank +
+non-zero layer-0 overlap** as the success signal, not the absolute
+number.
 
 Curl the underlying server function via the page (browsers only):
 

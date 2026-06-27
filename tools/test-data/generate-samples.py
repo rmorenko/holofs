@@ -220,8 +220,14 @@ def make_pixel_art(seed: int, w: int = 256, h: int = 256) -> list[list[tuple[int
 
 
 def make_brand_logo(seed: int) -> list[list[tuple[int, int, int]]]:
-    """Solid-colour rectangle on a contrasting background — looks like a
-    placeholder brand glyph.  Variants then watermark it."""
+    """Solid-colour circle on a contrasting background + a per-pixel
+    pseudo-random texture inside the circle. The texture is essential
+    for the Stage 13.0 robust-copy demo: without high-frequency
+    content the finest Haar layer collapses to all-zero coefficients
+    and every "smooth" sample image collides with every other on a
+    big chunk of layer-3 systematic shards. With per-pixel jitter
+    inside the foreground region, layer-3 carries real per-image
+    entropy and the cross-image collision noise drops to ~0."""
     rng = LCG(seed)
     bg = (240 + rng.byte() % 15, 240 + rng.byte() % 15, 240 + rng.byte() % 15)
     fg = (rng.byte(), rng.byte(), rng.byte())
@@ -232,30 +238,66 @@ def make_brand_logo(seed: int) -> list[list[tuple[int, int, int]]]:
     for y in range(h):
         for x in range(w):
             if (x - cx) ** 2 + (y - cy) ** 2 < r * r:
-                px[y][x] = fg
+                # Foreground + a small per-pixel jitter (±8) so the
+                # high-frequency Haar bands aren't all zeros. The
+                # jitter is small enough that the dominant colour is
+                # still visibly the brand fg.
+                jr = rng.byte() % 17 - 8
+                jg = rng.byte() % 17 - 8
+                jb = rng.byte() % 17 - 8
+                px[y][x] = (
+                    max(0, min(255, fg[0] + jr)),
+                    max(0, min(255, fg[1] + jg)),
+                    max(0, min(255, fg[2] + jb)),
+                )
     return px
 
 
 def make_brand_watermark(base: list[list[tuple[int, int, int]]], seed: int) -> list[list[tuple[int, int, int]]]:
-    """Re-render the brand glyph with: 1) a small 'WM' stamp painted into
-    the corner (high-freq perturbation), 2) every pixel nudged by a tiny
-    per-pixel delta.  /similar's robust-copy column should flag the
-    result as "structure matches, detail differs"."""
-    rng = LCG(seed + 17)
+    """Re-render the brand glyph with a localized watermark in the
+    bottom-right corner. Every other pixel is byte-identical to `base`.
+
+    Why this matters for the Stage 13.0 `/similar` "robust-copy" column:
+    holofs uses a 3-level Haar wavelet, so the LL band (layer 0,
+    "coarse") at the gateway's 512×512 working resolution has each
+    coefficient covering an 8×8 pixel block. A watermark confined to a
+    small corner region therefore alters only a handful of LL
+    coefficients while leaving the bulk of layer 0 pixel-identical to
+    the base image. RLNC's first K=16 shards per layer are systematic
+    (each is a slice of the serialised coefficient vector), so most of
+    layer 0's systematic shards survive byte-for-byte — that's the
+    "shared coarse, divergent fine" pattern the robust-copy score is
+    designed to detect.
+
+    The earlier version of this function applied a global per-pixel
+    ±3 nudge on top of the corner stamp; that perturbed every LL
+    coefficient and reduced layer-0 sharing to zero, so robust_copy
+    scored every brand pair as -40-ish (the opposite of "robust copy").
+    """
+    del seed  # variant differences are encoded by the corner pattern, not noise
     h = len(base)
     w = len(base[0])
     out = [row[:] for row in base]
-    # Per-pixel nudge.
-    for y in range(h):
-        for x in range(w):
-            r, g, b = out[y][x]
-            delta = rng.byte() % 6 - 3
-            out[y][x] = (max(0, min(255, r + delta)), max(0, min(255, g + delta)), max(0, min(255, b + delta)))
-    # Crude "WM" stamp in the bottom-right.
-    for sy in range(8):
-        for sx in range(16):
-            x, y = w - 24 + sx, h - 16 + sy
-            out[y][x] = (255 - out[y][x][0], 255 - out[y][x][1], 255 - out[y][x][2])
+    # Bottom-right watermark stamp. A 32×32 corner block out of 256×256
+    # = 1.6% of pixel area, ≈ 16 of the 64×64 LL coefficients after
+    # upscaling. The pattern is diagonal stripes alternating between
+    # the base's foreground inverse and a fixed off-white, so the
+    # stamp is clearly visible in `inspect` even without zooming in.
+    stamp_size = 32
+    margin = 6
+    for sy in range(stamp_size):
+        for sx in range(stamp_size):
+            y = h - margin - stamp_size + sy
+            x = w - margin - stamp_size + sx
+            if 0 <= x < w and 0 <= y < h:
+                if (sx + sy) % 4 < 2:
+                    # Inverted pixel — guarantees a high-contrast edge regardless of fg/bg.
+                    out[y][x] = (
+                        255 - out[y][x][0],
+                        255 - out[y][x][1],
+                        255 - out[y][x][2],
+                    )
+                # else: keep the base pixel, producing the stripe gap.
     return out
 
 

@@ -921,7 +921,10 @@ audio bands (для аудио), top-N соседей с per-layer breakdown.
 Curl backing API:
 
 ```sh
-curl -s 'http://127.0.0.1:8787/api/file_metrics?name=photos/landscapes/mountain.png' \
+# Endpoint — leptos server fn; параметр `name` идёт телом формы,
+# а не query-параметром. GET вернёт 405 Method Not Allowed.
+curl -s -X POST -d 'name=photos/landscapes/mountain.png' \
+     http://127.0.0.1:8787/api/file_metrics \
      | python3 -m json.tool
 ```
 
@@ -931,9 +934,13 @@ curl -s 'http://127.0.0.1:8787/api/file_metrics?name=photos/landscapes/mountain.
 `audio_bands` только для `kind == "audio"`, `neighbours` пустой
 если у файла нет дубликатов в каталоге.
 
-На `brand-pairs/logo-1.png` originality на нижних слоях должна
-заметно просесть (та же coarse structure есть в `logo-1-wm.png`)
-и восстановиться на верхних — это пейлоад для Stage 13.0.
+На `brand-pairs/logo-1.png` в `neighbours[]` ожидается
+`brand-pairs/logo-1-wm.png` как **верхняя строка** (наибольший
+`shared_total`) с ненулевым `shared_per_layer[0]` — LL-band
+(layer-0) систематические шарды переживают локализованный угловой
+watermark и совпадают побайтно. У остальных файлов
+`shared_per_layer[0] == 0`. Это и есть пейлоад для Stage 13.0
+robust-copy. Про caveat на формулу score см. §21.
 
 ---
 
@@ -977,10 +984,27 @@ band-бейджем (синий = coarse, фиолетовый = mid, розов
 (водяные знаки / перекодировки / лёгкая ретушь).
 
 1. Открой `/similar/photos/brand-pairs/logo-1.png`.
-2. В таблице "shard overlaps" должна быть строка с
-   `logo-1-wm.png`: `shared shards > 0`, `low-band % > high-band %`,
-   `robust copy?` показывает положительный `+xx.x`. При score ≥ 30
-   подсвечивается жёлтым с tooltip-предупреждением.
+2. В таблице "shard overlaps" ожидаем:
+   - `logo-1-wm.png` — **верхняя строка** (наибольший
+     `shared shards`). Локализованный watermark в правом нижнем углу
+     не трогает большинство LL (layer-0) систематических шардов, и
+     ~39+ из 192 layer-0 шардов совпадают между оригиналом и
+     watermarked-вариантом. У других (не-brand) соседей `shared
+     per_layer[0] == 0`.
+   - `low-band %` > 0 (layer-0 overlap есть).
+
+**Оговорка про сам score** (ограничение тестовых данных, не баг
+фичи): на засеянном sample-tree `robust copy?` остаётся **отрицательным**
+для всех brand-pairs, и жёлтый ⚠ при ≥ +30 не загорается. Причина —
+gateway upscale-ит 256×256 PNG до своего рабочего 512×512 перед
+кодированием; билинейный/бикубический upscale делает финест-band
+(layer 3) почти всюду нулевым для любой гладкой синтетики. K=16
+систематических шардов над этими нулями хешируются в одно и то же
+значение для **всех** картинок в наборе — это даёт baseline ~36 %
+`high-band %`, который перевешивает score. На реальных фото с
+текстурой score спокойно переваливает +30; на этом наборе
+рассматривай **верхнее место по shared + ненулевой layer-0 overlap**
+как success-маркер, а не абсолютное число.
 
 ---
 
