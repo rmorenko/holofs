@@ -16,10 +16,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 use crate::reputation::{Reputation, DEFAULT_THRESHOLD};
+use holofs_client::pool;
 use holofs_client::ClientError;
 use holofs_core::merkle::{shard_hash, Hash};
 use holofs_core::rng::Rng;
@@ -101,16 +101,20 @@ pub async fn audit_shard(
         layer,
         shard_hash: shard_hash_expected,
     };
-    let mut s = match TcpStream::connect(addr).await {
+    let mut s = match pool::acquire(addr).await {
         Ok(s) => s,
         Err(_) => return AuditOutcome::Unreachable,
     };
     if write_frame(&mut s, &req.encode()).await.is_err() {
+        s.poison();
         return AuditOutcome::Unreachable;
     }
     let buf = match read_frame(&mut s).await {
         Ok(b) => b,
-        Err(_) => return AuditOutcome::Unreachable,
+        Err(_) => {
+            s.poison();
+            return AuditOutcome::Unreachable;
+        }
     };
     let resp = match Response::decode(&buf) {
         Ok(r) => r,

@@ -647,3 +647,27 @@ GC ждёт пока все in-flight writers закончат, и блокир�
 | `1`  | `Replicated { replication: u8 }`     | один `u8` (Stage 15.1 scaffolding; producer'а ещё нет) |
 
 Совместимость: `HOLOFSM8/7/6` декодируются с дефолтом `Rlnc`.
+
+### Пул соединений (Stage 15.1)
+
+Все client→node RPC теперь идут через per-address LIFO-пул живых
+`TransportStream`-ов. Серверная сторона и так работает в режиме
+keepalive (`handle_connection` циклит по фреймам), так что протокол
+не менялся. До пула полная заливка 44 семплов вышибала эфемерные
+порты macOS на 28-м файле — теперь тот же тест с `THROTTLE_MS=0` и
+дефолтными интервалами monitor/auditor проходит чисто.
+
+Реализация — `holofs_client::pool`. Кнопки через переменные окружения:
+
+| Переменная               | Default | Назначение |
+|--------------------------|---------|------------|
+| `HOLOFS_POOL_PER_NODE`   | `8`     | Максимум idle-соединений на одну ноду. |
+| `HOLOFS_POOL_IDLE_SECS`  | `30`    | TTL idle-записи. Старше — на ближайшем `acquire` дропаем. |
+| `HOLOFS_POOL_DISABLE`    | unset   | `=1` → пул выключен, каждый RPC дёргает свежий dial (escape hatch). |
+
+В `rpc()` встроен ровно один retry на свежем соединении если первый
+IO упал в `UnexpectedEof / BrokenPipe / ConnectionReset /
+ConnectionAborted / NotConnected` — все wire-операции идемпотентны
+(PUT/Audit/Gather/Purge/PutBatch ключуются по shard hash), так что
+retry безопасен и молча скрывает гонку "peer закрыл сокет пока мы
+простаивали".

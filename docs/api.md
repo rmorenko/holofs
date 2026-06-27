@@ -875,3 +875,31 @@ revalidate against the freshly-built bundle.
 
 Both pieces are pure axum + tower-http; nothing to configure.
 
+---
+
+## 13. Wire connection pool (Stage 15.1)
+
+Client→node RPCs now share a per-address LIFO pool of post-handshake
+[`TransportStream`]s. Without it, every PUT/Audit/Gather opened a fresh
+TCP (plus TLS handshake when enabled), and a full sample-tree seed
+exhausted macOS's ephemeral-port pool by the 28th request — see
+`feedback_workflow.md` rule 7 for the historical workaround. With the
+pool, a 44-file seed at zero throttle and default background-scan
+intervals completes cleanly.
+
+The pool sits in `holofs_client::pool`. The server side already loops
+over frames per connection, so no protocol change was needed.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `HOLOFS_POOL_PER_NODE` | `8` | Max idle connections kept per node address. |
+| `HOLOFS_POOL_IDLE_SECS` | `30` | Drop idle entries older than this on next acquire (handles peer-side idle timeouts). |
+| `HOLOFS_POOL_DISABLE` | unset | Set to `1` to force a fresh dial on every RPC (escape hatch / A-B testing). |
+
+`rpc()` retries once on a freshly-dialed socket if the first IO on a
+pooled stream surfaces `UnexpectedEof / BrokenPipe / ConnectionReset /
+ConnectionAborted / NotConnected`. Every wire op is idempotent at the
+application layer (PUT/Audit/Gather/Purge/PutBatch all key on shard
+hash), so the retry is safe and silently masks the rare "peer closed
+while we were idle" race.
+

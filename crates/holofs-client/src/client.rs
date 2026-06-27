@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::io;
 
-use crate::transport;
+use crate::pool;
 
 use holofs_codec::text_codec::{assemble_text_with_holes, split_text_into_k_chunks};
 use holofs_core::gf::Gf;
@@ -57,10 +57,44 @@ pub type LiveNodes = Vec<usize>;
 // === RPC helper ============================================================
 
 async fn rpc(addr: &str, req: Request) -> io::Result<Response> {
-    let mut s = transport::connect(addr).await?;
-    write_frame(&mut s, &req.encode()).await?;
-    let buf = read_frame(&mut s).await?;
+    let encoded = req.encode();
+    match rpc_attempt(addr, &encoded).await {
+        Ok(resp) => Ok(resp),
+        // A pooled connection might have been silently closed by the
+        // peer or the OS while idle; the first IO on it then surfaces
+        // EPIPE / ECONNRESET / UnexpectedEof. Every wire op the
+        // protocol exposes is idempotent at the application layer
+        // (PUT/Audit/Gather/Purge/PutBatch all key on shard hash, Ping
+        // is harmless), so a single retry against a freshly-dialed
+        // connection is safe and lets the keepalive pool degrade
+        // gracefully without bubbling spurious failures up to callers.
+        Err(e) if is_likely_stale_connection(&e) => rpc_attempt(addr, &encoded).await,
+        Err(e) => Err(e),
+    }
+}
+
+async fn rpc_attempt(addr: &str, encoded_req: &[u8]) -> io::Result<Response> {
+    let mut s = pool::acquire(addr).await?;
+    if let Err(e) = write_frame(&mut s, encoded_req).await {
+        s.poison();
+        return Err(e);
+    }
+    let buf = match read_frame(&mut s).await {
+        Ok(b) => b,
+        Err(e) => {
+            s.poison();
+            return Err(e);
+        }
+    };
     Response::decode(&buf)
+}
+
+fn is_likely_stale_connection(e: &io::Error) -> bool {
+    use io::ErrorKind::*;
+    matches!(
+        e.kind(),
+        UnexpectedEof | BrokenPipe | ConnectionReset | ConnectionAborted | NotConnected
+    )
 }
 
 // === Encode and dispatch ===================================================
