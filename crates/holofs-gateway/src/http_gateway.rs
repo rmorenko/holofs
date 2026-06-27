@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use holofs_client::{
     get_audio_filtered, get_object_up_to_layer, get_object_with_coeff_mask, layer_energies,
-    mix_images_at_split, purge_object, put_object, LiveNodes,
+    mix_images_at_split, put_object, LiveNodes,
 };
 use holofs_codec::image_io::{load_photo_from_bytes, to_rgb};
 use holofs_core::gf::Gf;
@@ -220,6 +220,129 @@ impl Gateway {
             .copied()
             .filter(|&n| !kills.get(n).copied().unwrap_or(false))
             .collect()
+    }
+
+    /// Purge only the shards `manifest` references that are not also
+    /// referenced by any other live catalog entry or version-archive
+    /// manifest. Used by DELETE and (when versions are off) by
+    /// PUT-replace.
+    ///
+    /// Why this exists: the node-side `Request::Purge { object_id }`
+    /// deletes the entire `(object_id, channel, layer)` bucket on
+    /// the node. Holofs derives `object_id` from `data_cid`, so two
+    /// objects with byte-identical content share an `object_id` and
+    /// share the same buckets after PUT-time dedup. Calling Purge
+    /// on one such object yanks the shards out from under the other,
+    /// breaking GETs and producing real (not transient) `margin=-K`
+    /// warnings in the monitor — observed on `ocean.png` after a
+    /// scratch `race-test.png` containing the same bytes was DELETEd
+    /// during the §25 concurrency scenario.
+    ///
+    /// The fix walks the rest of the catalog + version archives,
+    /// builds the set of hashes still referenced after `manifest`
+    /// is conceptually removed (callers must remove from catalog
+    /// FIRST), subtracts that from `manifest.shard_hashes`, and
+    /// asks every live node to `PurgeByHash` the residue.
+    pub(crate) async fn purge_orphans_of(
+        &self,
+        manifest: &holofs_model::manifest::Manifest,
+        live_nodes: &LiveNodes,
+        exclude_name: Option<&str>,
+    ) -> Result<(), GatewayError> {
+        use std::collections::HashSet;
+        // 1. Hashes the deleted manifest claimed to own.
+        let mut owned: HashSet<[u8; 32]> = HashSet::new();
+        for chan in &manifest.shard_hashes {
+            for per_l in chan {
+                for h in per_l {
+                    owned.insert(*h);
+                }
+            }
+        }
+        if owned.is_empty() {
+            return Ok(());
+        }
+        // 2. Hashes still referenced by the rest of the catalog. The
+        //    PUT-replace caller hasn't yet removed `old` from the
+        //    catalog under `name`, so we skip that name explicitly —
+        //    otherwise `owned` would always empty itself out.
+        {
+            let cat = self.catalog.lock().await;
+            for (n, m) in cat.entries.iter() {
+                if m.kind == ObjectKind::Directory {
+                    continue;
+                }
+                if Some(n.as_str()) == exclude_name {
+                    continue;
+                }
+                for chan in &m.shard_hashes {
+                    for per_l in chan {
+                        for h in per_l {
+                            owned.remove(h);
+                            if owned.is_empty() {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 3. Hashes still referenced by version archives on disk.
+        let versions_dir = self
+            .versions
+            .lock()
+            .await
+            .root
+            .clone()
+            .map(|r| r.join("versions"));
+        if let Some(dir) = versions_dir {
+            if dir.exists() {
+                if let Ok(by_name) = std::fs::read_dir(&dir) {
+                    for name_entry in by_name.flatten() {
+                        let path = name_entry.path();
+                        if !path.is_dir() {
+                            continue;
+                        }
+                        if let Ok(versions) = std::fs::read_dir(&path) {
+                            for v_entry in versions.flatten() {
+                                let p = v_entry.path();
+                                if p.extension().and_then(|s| s.to_str()) != Some("bin") {
+                                    continue;
+                                }
+                                let bytes = match std::fs::read(&p) {
+                                    Ok(b) => b,
+                                    Err(_) => continue,
+                                };
+                                let m = match holofs_model::manifest::Manifest::decode(&bytes) {
+                                    Ok(m) => m,
+                                    Err(_) => continue,
+                                };
+                                for chan in &m.shard_hashes {
+                                    for per_l in chan {
+                                        for h in per_l {
+                                            owned.remove(h);
+                                            if owned.is_empty() {
+                                                return Ok(());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 4. Whatever is left in `owned` is unique to this manifest
+        //    and safe to purge. Send a PurgeByHash to every live node.
+        let orphans: Vec<[u8; 32]> = owned.into_iter().collect();
+        for &node_idx in live_nodes {
+            let addr = self.cluster.node_addrs[node_idx].clone();
+            if let Err(e) = holofs_client::purge_node_by_hash(&addr, orphans.clone()).await {
+                eprintln!("purge_orphans_of: PurgeByHash failed on {addr}: {e}");
+            }
+        }
+        Ok(())
     }
 
     /// Atomically persist the catalog to disk. No-op if Gateway was built
@@ -874,8 +997,24 @@ impl Gateway {
                 if let Err(e) = self.archive_version(name, old).await {
                     eprintln!("PUT {name}: version archive failed: {e}");
                 }
-            } else if let Err(e) = purge_object(old, &live).await {
-                eprintln!("PUT {name}: previous object failed to purge (continuing): {e}");
+            } else {
+                // Stage 15.2 fix: the prior `purge_object(old, &live)`
+                // call yanked entire (object_id, channel, layer) buckets
+                // on every node, which destroyed the shards of any
+                // other catalog entry that happened to share the same
+                // `data_cid` (and therefore `object_id`) — e.g.,
+                // PUT-replacing one of two dedupe-matched copies broke
+                // the survivor. We now scope the purge to hashes
+                // unique to `old`. Caller's catalog mutation has not
+                // yet replaced `old` in the catalog at this point;
+                // pass through `purge_orphans_of` which itself walks
+                // the catalog *as it is now*. `old` isn't in the
+                // catalog yet for this name, but the new manifest
+                // also isn't — so `purge_orphans_of` will only see
+                // OTHER entries and the residue is correct.
+                if let Err(e) = self.purge_orphans_of(old, &live, Some(name)).await {
+                    eprintln!("PUT {name}: previous object failed to purge (continuing): {e}");
+                }
             }
         }
         let t0 = Instant::now();
@@ -926,9 +1065,16 @@ impl Gateway {
         self.invalidate_cache(name).await;
         self.persist_catalog().await;
         let live = self.effective_live().await;
-        purge_object(&manifest, &live)
-            .await
-            .map_err(|e| GatewayError::Decode(format!("partial purge: {e}")))?;
+        // Stage 15.2 fix: purge ONLY the shards unique to `manifest`.
+        // The legacy `purge_object(&manifest, &live)` deleted the
+        // entire `(object_id, *, *)` bucket on each node, which broke
+        // any other catalog entry that happened to share the same
+        // `data_cid`. `manifest` was already removed from the catalog
+        // above, so `purge_orphans_of` walks what remains and only
+        // ships hashes nobody else still references to PurgeByHash.
+        if let Err(e) = self.purge_orphans_of(&manifest, &live, None).await {
+            return Err(GatewayError::Decode(format!("partial purge: {e}")));
+        }
         Ok(RemoveResult {
             name: name.to_string(),
             object_id: manifest.object_id,
