@@ -224,7 +224,15 @@ fn HelpLayout(slug: String) -> impl IntoView {
                                                     );
                                                     view! {
                                                         <li>
-                                                            <a class=active_cls href=href>{item.title.clone()}</a>
+                                                            // `rel="external"` forces a full SSR reload on
+                                                            // each doc switch. The help page boots KaTeX +
+                                                            // Mermaid via `help-init.js`, which only runs on
+                                                            // `DOMContentLoaded`. Without a full reload the
+                                                            // SPA router swaps the article body in place,
+                                                            // bypasses the init hook, and the new doc's
+                                                            // formulas / diagrams stay un-rendered until the
+                                                            // user manually refreshes.
+                                                            <a class=active_cls href=href rel="external">{item.title.clone()}</a>
                                                         </li>
                                                     }
                                                 }
@@ -250,7 +258,10 @@ fn HelpLayout(slug: String) -> impl IntoView {
                         );
                         view! {
                             <li>
-                                <a href=href>{*label}</a>
+                                // Same SSR-reload requirement as the doc list above —
+                                // a locale switch must re-run help-init.js so KaTeX +
+                                // Mermaid pick up the freshly-translated content.
+                                <a href=href rel="external">{*label}</a>
                                 " "
                                 <span class="mut">"(" {*code} ")"</span>
                             </li>

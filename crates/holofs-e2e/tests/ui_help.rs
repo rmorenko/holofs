@@ -53,6 +53,66 @@ async fn help_doc_page_renders_markdown_content() -> Result<()> {
 }
 
 #[tokio::test]
+async fn clicking_sidebar_link_re_runs_mermaid_renderer() -> Result<()> {
+    // Regression: the help sidebar's doc links go to leptos-routed
+    // `/help/<slug>` paths. Without `rel="external"` the Router
+    // intercepts the click and swaps the article body in place —
+    // but `help-init.js` only boots Mermaid + KaTeX on
+    // `DOMContentLoaded`, which doesn't fire on SPA navigation. The
+    // user-visible symptom: navigate from `/help/api` to
+    // `/help/architecture`, the mermaid diagrams stay as raw text
+    // until you manually refresh.
+    //
+    // The test exercises the click flow: load /help/api, click the
+    // sidebar link for the architecture doc, then verify that at
+    // least one `.mermaid` block has been transformed into an
+    // `<svg>` by mermaid.run().
+    let harness = TestHarness::fresh().await?;
+    harness.goto("/help/api").await?;
+    harness.wait_for(".help-sidebar", Duration::from_secs(10)).await?;
+
+    let target = harness
+        .wait_until(
+            async |drv| {
+                let links = drv.find_all(By::Css(".help-sidebar a")).await?;
+                for a in links {
+                    let href = a.attr("href").await.unwrap_or_default().unwrap_or_default();
+                    if href.contains("/help/architecture") {
+                        return Ok(Some(a));
+                    }
+                }
+                Ok(None)
+            },
+            Duration::from_secs(10),
+        )
+        .await?;
+    target.click().await?;
+
+    // Wait for the architecture doc to appear AND for mermaid to
+    // turn at least one source block into an SVG. Mermaid loads
+    // its bundle from a CDN; on a cold cache that can take a few
+    // seconds. The test fails clearly if the SVG never appears.
+    harness
+        .wait_until(
+            async |drv| {
+                let svgs = drv.find_all(By::Css(".help-doc .mermaid svg")).await?;
+                Ok(if !svgs.is_empty() { Some(()) } else { None })
+            },
+            Duration::from_secs(25),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "after clicking the `architecture` link in the help sidebar, no \
+                 `.mermaid svg` appeared in the DOM. Either help-init.js failed \
+                 to re-run (sidebar <a> missing rel=\"external\"?) or the Mermaid \
+                 CDN bundle never loaded."
+            )
+        })?;
+    harness.close().await
+}
+
+#[tokio::test]
 async fn unknown_help_slug_returns_a_friendly_error_page() -> Result<()> {
     let harness = TestHarness::fresh().await?;
     harness.goto("/help/this-slug-does-not-exist").await?;
