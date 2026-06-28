@@ -42,7 +42,13 @@ pub fn Topbar(active: &'static str) -> impl IntoView {
                 // always decodes regardless of how much detail
                 // arrived. `currentColor` ties the strokes to the
                 // active theme's `--fg`; the dot uses `--accent`.
+                // Intrinsic width/height keep the emblem from
+                // ballooning to 300×150 (the SVG default) when the
+                // browser is serving a stale CSS bundle without the
+                // `.holofs-emblem` rule. The CSS still wins when
+                // present and themes still flip via currentColor.
                 <svg class="holofs-emblem" viewBox="0 0 32 32"
+                     width="26" height="26"
                      xmlns="http://www.w3.org/2000/svg"
                      aria-hidden="true" focusable="false">
                     <polygon points="16,3 29,16 16,29 3,16"
