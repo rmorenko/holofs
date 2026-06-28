@@ -211,7 +211,11 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
     view! {
         <h2 style="margin-top:0">
             {t!("similar.title_prefix")} " "
-            <a href={format!("/{object_link_enc}")}>{name.clone()}</a>
+            // `rel="external"` keeps leptos Router from intercepting the
+            // click. The title points at `/<name>` which is the raw GET
+            // route, not a leptos route — without the attribute the SPA
+            // router catches the click and 404s silently.
+            <a href={format!("/{object_link_enc}")} rel="external">{name.clone()}</a>
         </h2>
 
         <ScopeSelector name_enc=enc.clone() active=scope_for_links.clone()/>
@@ -279,16 +283,23 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
                         view! {
                             <tr>
                                 <td class="name">
-                                    <a href=href>{m.name.clone()}</a>
+                                    // Neighbour name → that neighbour's
+                                    // own /similar page. Without
+                                    // `rel="external"` the leptos Router
+                                    // intercepts; user-reported symptom
+                                    // was "clicking a neighbour does
+                                    // nothing".
+                                    <a href=href rel="external">{m.name.clone()}</a>
                                 </td>
                                 <td class=sim_cls><b>{sim}</b></td>
                                 <td class="name"><code>{method}</code></td>
                                 <td class="name">
+                                    // `target="_blank"` already escapes SPA-nav.
                                     <a href={format!("/{nenc}")} target="_blank">{t!("similar.action.open")}</a>
                                     " · "
-                                    <a href={format!("/inspect/{nenc}")}>{t!("similar.action.shards")}</a>
+                                    <a href={format!("/inspect/{nenc}")} rel="external">{t!("similar.action.shards")}</a>
                                     " · "
-                                    <a href={format!("/diff?a={self_enc}&b={nenc}")}>{t!("similar.action.diff")}</a>
+                                    <a href={format!("/diff?a={self_enc}&b={nenc}")} rel="external">{t!("similar.action.diff")}</a>
                                 </td>
                             </tr>
                         }
@@ -338,7 +349,9 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
                         view! {
                             <tr>
                                 <td class="name">
-                                    <a href=href>{o.name.clone()}</a>
+                                    // Same rel="external" rule as the
+                                    // perceptual table above.
+                                    <a href=href rel="external">{o.name.clone()}</a>
                                 </td>
                                 <td class="name"><code>{o.common}</code></td>
                                 <td class="name"><b>{pct}</b></td>
@@ -355,9 +368,9 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
         }}
 
         <p style="margin-top:24px">
-            <a href={format!("/inspect/{footer_enc}")}>{t!("similar.footer.all_shards")}</a>
+            <a href={format!("/inspect/{footer_enc}")} rel="external">{t!("similar.footer.all_shards")}</a>
             " · "
-            <a href="/">{t!("generic.back_to_catalog")}</a>
+            <a href="/" rel="external">{t!("generic.back_to_catalog")}</a>
         </p>
     }
 }
@@ -384,7 +397,12 @@ fn ScopeSelector(name_enc: String, active: String) -> impl IntoView {
             }.into_any()
         } else {
             view! {
-                <a class="scope-pill" href=href>{label}</a>
+                // Each scope pill flips `?scope=` to all / folder / tree.
+                // The doc comment on this component already promises a
+                // full reload — make it explicit with rel="external" so
+                // the leptos Router doesn't intercept and leave the
+                // current data Suspense in a stuck state.
+                <a class="scope-pill" href=href rel="external">{label}</a>
             }.into_any()
         }
     }).collect_view();
