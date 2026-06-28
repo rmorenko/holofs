@@ -1353,13 +1353,19 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
     let inner_path = path.clone();
     view! {
         <li class="tree-branch">
-            // `open` is set as a plain HTML attribute (not reactive) so
-            // SSR renders top-level folders expanded just like the
-            // eager path. The native browser flips it on click; our
-            // `on:toggle` listener mirrors that flip back into
-            // `open_sig`, which triggers the lazy children fetch the
-            // first time the user opens a deeper level.
-            <details node_ref=details_ref open=initial_open on:toggle=on_toggle>
+            // `open` binds reactively to `open_sig` so:
+            //   1. SSR renders the initial value of the signal
+            //      (`initial_open`) into the attribute — top-level
+            //      folders open, deeper ones closed — same as before.
+            //   2. After hydrate, any signal update (native toggle,
+            //      `holofsExpandAll`, `holofsCollapseAll`,
+            //      `?open=<path>` autoload) is mirrored to the DOM
+            //      and survives subsequent re-renders of the
+            //      surrounding `<ul class="tree-children">`. Without
+            //      this, programmatically setting `details.open` via
+            //      JS used to be silently reverted when a sibling
+            //      lazy-fetch resolved and recreated the row.
+            <details node_ref=details_ref open=move || open_sig.get() on:toggle=on_toggle>
                 <summary class="tree-summary">
                     <span class="tree-icon">"📁"</span>
                     <span class="tree-name">{basename}</span>
