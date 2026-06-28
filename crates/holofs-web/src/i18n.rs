@@ -1648,7 +1648,14 @@ pub fn LocaleSwitcher() -> impl IntoView {
                 let cls = move || if active() == code { "active" } else { "" };
                 view! {
                     {separator.map(|s| s.to_string())}
-                    <a class=cls href=href title=label>{code}</a>
+                    // `rel="external"` keeps leptos Router's hands off
+                    // the click: switching locale must trigger a full
+                    // server-rendered reload, otherwise the page URL
+                    // changes to `?lang=<new>` but every `t!()` call
+                    // was already resolved against the SSR-time locale
+                    // and stays in the original language until the
+                    // user manually refreshes.
+                    <a class=cls href=href title=label rel="external">{code}</a>
                 }
             }).collect_view()}
         </span>
