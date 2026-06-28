@@ -265,6 +265,20 @@ pub async fn metrics(Extension(gw): Extension<Arc<Gateway>>) -> Response {
     body.push_str("# TYPE holofs_bytes_total gauge\n");
     body.push_str(&format!("holofs_bytes_total {}\n", stats.bytes_total));
 
+    body.push_str("# HELP holofs_auto_repairs_total GET path hit a LayerLost error and ran an inline repair_node pass.\n");
+    body.push_str("# TYPE holofs_auto_repairs_total counter\n");
+    body.push_str(&format!(
+        "holofs_auto_repairs_total {}\n",
+        stats.auto_repairs_total
+    ));
+
+    body.push_str("# HELP holofs_auto_repair_failures_total Auto-repair attempted but the post-repair decode also failed (irrecoverable).\n");
+    body.push_str("# TYPE holofs_auto_repair_failures_total counter\n");
+    body.push_str(&format!(
+        "holofs_auto_repair_failures_total {}\n",
+        stats.auto_repair_failures_total
+    ));
+
     body.push_str("# HELP holofs_node_admin_killed Per-node admin-kill flag (1 = disabled).\n");
     body.push_str("# TYPE holofs_node_admin_killed gauge\n");
     for (idx, killed) in kills.iter().enumerate() {
@@ -1386,7 +1400,9 @@ fn stats_to_json(s: &ApiStats) -> String {
 \"shards_total\":{sht},\
 \"shards_unique\":{shu},\
 \"dedup_savings_pct\":{dd:.2},\
-\"bytes_total\":{bt}}}\n",
+\"bytes_total\":{bt},\
+\"auto_repairs_total\":{ar},\
+\"auto_repair_failures_total\":{arf}}}\n",
         nt = s.nodes_total,
         nl = s.nodes_live,
         ot = s.objects_total,
@@ -1394,6 +1410,8 @@ fn stats_to_json(s: &ApiStats) -> String {
         shu = s.shards_unique,
         dd = s.dedup_savings_pct,
         bt = s.bytes_total,
+        ar = s.auto_repairs_total,
+        arf = s.auto_repair_failures_total,
     )
 }
 

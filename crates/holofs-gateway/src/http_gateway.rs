@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use holofs_client::{
     get_audio_filtered, get_object_up_to_layer, get_object_with_coeff_mask, layer_energies,
-    mix_images_at_split, put_object, LiveNodes,
+    mix_images_at_split, put_object, repair_node, ClientError, LiveNodes,
 };
 use holofs_codec::image_io::{load_photo_from_bytes, to_rgb};
 use holofs_core::gf::Gf;
@@ -96,6 +96,12 @@ pub struct Gateway {
     /// Temporary cache of generated escrow shares: escrow_id_hex → Vec<ShareFile>.
     /// Kept only until the gateway restarts (shares are not part of the cluster).
     escrow_cache: Mutex<HashMap<String, Vec<holofs_analytics::escrow::ShareFile>>>,
+    /// Auto-repair-on-read counters. Bumped from
+    /// [`Self::decode_with_autorepair`] when the first decode attempt
+    /// hits [`ClientError::LayerLost`] and the retry path kicks in.
+    /// Surfaced via [`ApiStats`].
+    auto_repairs_total: Arc<std::sync::atomic::AtomicU64>,
+    auto_repair_failures_total: Arc<std::sync::atomic::AtomicU64>,
 }
 
 struct CachedFile {
@@ -126,6 +132,8 @@ impl Gateway {
             cache: Mutex::new(HashMap::new()),
             shard_cache: Mutex::new(HashMap::new()),
             escrow_cache: Mutex::new(HashMap::new()),
+            auto_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            auto_repair_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -151,6 +159,8 @@ impl Gateway {
             cache: Mutex::new(HashMap::new()),
             shard_cache: Mutex::new(HashMap::new()),
             escrow_cache: Mutex::new(HashMap::new()),
+            auto_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            auto_repair_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -220,6 +230,168 @@ impl Gateway {
             .copied()
             .filter(|&n| !kills.get(n).copied().unwrap_or(false))
             .collect()
+    }
+
+    /// Wrap `get_object_up_to_layer` with eager auto-repair on
+    /// [`ClientError::LayerLost`]. The first decode attempt runs
+    /// normally; on a LayerLost error we walk every live node,
+    /// regenerate its missing shards via [`repair_node`], persist
+    /// the mutated manifest back to the catalog (so the new
+    /// `shard_hashes` survive a restart), and retry the decode
+    /// once. The second LayerLost is permanent — we surface it.
+    ///
+    /// Why this exists: the old audit-reputation bug
+    /// (Stage 14.x) silently emptied half the catalog's images
+    /// overnight; even after we stopped the cascade, the only
+    /// path back was a manual `curl -X PUT` per affected file.
+    /// Auto-repair-on-read heals those holes inline whenever a
+    /// user actually GETs an affected object, without requiring
+    /// the operator to keep the original bytes lying around.
+    ///
+    /// Cost: a single failing GET pays one full
+    /// `repair_node`-per-node pass — bounded at K shard-encode
+    /// RPCs per live node. For the dev cluster (40 nodes × 444
+    /// shards) that's ~1–2 s of latency on the first read; the
+    /// repaired shards stay put for subsequent reads.
+    pub(crate) async fn decode_with_autorepair(
+        &self,
+        name: &str,
+        max_layer: u8,
+    ) -> Result<(Vec<Vec<f32>>, u64), ClientError> {
+        let live = self.effective_live().await;
+        let manifest = {
+            let cat = self.catalog.lock().await;
+            cat.get(name).cloned().ok_or_else(|| {
+                ClientError::Protocol(format!("decode_with_autorepair: {name} not in catalog"))
+            })?
+        };
+        match get_object_up_to_layer(&self.gf, &manifest, &live, max_layer).await {
+            Ok(v) => Ok(v),
+            Err(ClientError::LayerLost { channel, layer }) => {
+                self.auto_repairs_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!(
+                    "auto-repair: {name} decode failed on (c={channel}, l={layer}); \
+                     running repair_node across {} live nodes",
+                    live.len()
+                );
+                if let Err(e) = self.repair_object_inplace(name).await {
+                    self.auto_repair_failures_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!("auto-repair: {name}: repair pass itself failed: {e}");
+                    return Err(ClientError::LayerLost { channel, layer });
+                }
+                // Re-snapshot the (now-mutated) manifest from the
+                // catalog and retry. `repair_object_inplace`
+                // wrote it back, so `cat.get(name)` returns the
+                // repaired version.
+                let repaired = {
+                    let cat = self.catalog.lock().await;
+                    cat.get(name).cloned().ok_or_else(|| {
+                        ClientError::Protocol(format!(
+                            "decode_with_autorepair: {name} disappeared from catalog mid-repair"
+                        ))
+                    })?
+                };
+                match get_object_up_to_layer(&self.gf, &repaired, &live, max_layer).await {
+                    Ok(v) => Ok(v),
+                    Err(e) => {
+                        self.auto_repair_failures_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Err(e)
+                    }
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Surgical auto-repair: find live nodes whose
+    /// `list_node_hashes()` is MISSING any hash that
+    /// `manifest.place_shard(...)` says should land on them, and
+    /// call `repair_node` only on those. Skips healthy nodes so
+    /// we don't churn shards out of well-placed buckets.
+    /// Persists the mutated manifest back to the catalog so the
+    /// new `shard_hashes` survive a restart.
+    ///
+    /// Iterative `repair_node` across all 40 nodes was an
+    /// expensive footgun: each call purges its target's bucket
+    /// before re-encoding, and the donor-set shrinks as nearby
+    /// nodes get churned. A single-pass "only repair what's
+    /// broken" loop converges in one shot.
+    async fn repair_object_inplace(&self, name: &str) -> Result<(), ClientError> {
+        use std::collections::HashSet;
+        let live = self.effective_live().await;
+        let mut manifest = {
+            let cat = self.catalog.lock().await;
+            cat.get(name).cloned().ok_or_else(|| {
+                ClientError::Protocol(format!("repair_object_inplace: {name} not in catalog"))
+            })?
+        };
+        let mut rng = holofs_core::rng::Rng::new(u64::from_be_bytes(
+            manifest.data_cid[0..8].try_into().unwrap(),
+        ));
+        let d = manifest.k as usize;
+
+        // For each live node, compute the set of hashes that
+        // *should* live on it per `place_shard`, then query the
+        // node's actual hash inventory and diff.
+        for &node in live.iter() {
+            let mut expected_on_node: HashSet<[u8; 32]> = HashSet::new();
+            for c in 0..manifest.channels {
+                for l in 0..manifest.nlayers {
+                    let n = manifest.n_per_layer[l as usize];
+                    for idx in 0..n {
+                        if manifest.place_shard(c, l, idx, &live) == node {
+                            if let Some(h) = manifest
+                                .shard_hashes
+                                .get(c as usize)
+                                .and_then(|chan| chan.get(l as usize))
+                                .and_then(|per_l| per_l.get(idx as usize))
+                            {
+                                expected_on_node.insert(*h);
+                            }
+                        }
+                    }
+                }
+            }
+            if expected_on_node.is_empty() {
+                continue;
+            }
+            // Ask the node what it actually has.
+            let held = match holofs_client::list_node_hashes(&manifest.nodes[node]).await {
+                Ok(hs) => hs.into_iter().collect::<HashSet<[u8; 32]>>(),
+                Err(e) => {
+                    eprintln!(
+                        "repair_object_inplace: list_node_hashes node {node} failed: {e}"
+                    );
+                    continue;
+                }
+            };
+            // If the node already holds every expected hash,
+            // leave it alone — running repair_node would purge
+            // its bucket needlessly.
+            if expected_on_node.is_subset(&held) {
+                continue;
+            }
+            eprintln!(
+                "auto-repair: {name} node {node}: {} of {} expected hashes missing, repairing",
+                expected_on_node.difference(&held).count(),
+                expected_on_node.len()
+            );
+            if let Err(e) = repair_node(
+                &self.gf, &mut rng, &mut manifest, &live, node, d,
+            )
+            .await
+            {
+                eprintln!("repair_object_inplace: {name} node {node}: {e}");
+            }
+        }
+        let mut cat = self.catalog.lock().await;
+        cat.insert(name.to_string(), manifest);
+        drop(cat);
+        self.persist_catalog().await;
+        Ok(())
     }
 
     /// Purge only the shards `manifest` references that are not also
@@ -633,14 +805,23 @@ impl Gateway {
                 return Some(Arc::clone(c));
             }
         }
-        let manifest = self.catalog.lock().await.get(name)?.clone();
-        let live = self.effective_live().await;
+        // The catalog snapshot + live set are taken inside
+        // `decode_with_autorepair`; this branch only needs the
+        // post-decode width/height (which doesn't change across
+        // auto-repair since `repair_node` only rewrites
+        // `shard_hashes`, not dimensions).
+        let (width, height) = {
+            let cat = self.catalog.lock().await;
+            let m = cat.get(name)?;
+            (m.width, m.height)
+        };
         let t0 = Instant::now();
-        let (channels, bytes) = get_object_up_to_layer(&self.gf, &manifest, &live, max_layer)
+        let (channels, bytes) = self
+            .decode_with_autorepair(name, max_layer)
             .await
             .ok()?;
         let decode_ms = t0.elapsed().as_millis();
-        let png = encode_png(&channels, manifest.width, manifest.height);
+        let png = encode_png(&channels, width, height);
         let entry = Arc::new(CachedFile {
             bytes: png,
             max_layer,
@@ -1321,6 +1502,12 @@ impl Gateway {
             shards_unique: unique_hashes.len() as u64,
             dedup_savings_pct: (dedup_pct * 100.0).round() / 100.0,
             bytes_total: total_payload_bytes,
+            auto_repairs_total: self
+                .auto_repairs_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            auto_repair_failures_total: self
+                .auto_repair_failures_total
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -2303,10 +2490,10 @@ impl Gateway {
                 continue;
             }
 
-            let (channels, _bytes_dl) =
-                get_object_up_to_layer(&self.gf, &manifest, &live, max_layer)
-                    .await
-                    .map_err(|e| GatewayError::Decode(format!("embed decode: {e}")))?;
+            let (channels, _bytes_dl) = self
+                .decode_with_autorepair(name, max_layer)
+                .await
+                .map_err(|e| GatewayError::Decode(format!("embed decode: {e}")))?;
             if channels.len() < 3 || channels.iter().any(|c| c.len() != n) {
                 return Err(GatewayError::Decode(
                     "embed decode: unexpected channel shape".into(),
@@ -2519,15 +2706,15 @@ impl Gateway {
 
         // Coarse pass (L0). Cheap — typically a tenth of the bytes of
         // the full decode.
-        let (lo_channels, lo_bytes) =
-            get_object_up_to_layer(&self.gf, &manifest, &live, 0)
-                .await
-                .map_err(|e| GatewayError::Decode(format!("spotlight L0: {e}")))?;
+        let (lo_channels, lo_bytes) = self
+            .decode_with_autorepair(name, 0)
+            .await
+            .map_err(|e| GatewayError::Decode(format!("spotlight L0: {e}")))?;
         // Full pass.
-        let (hi_channels, hi_bytes) =
-            get_object_up_to_layer(&self.gf, &manifest, &live, max_layer)
-                .await
-                .map_err(|e| GatewayError::Decode(format!("spotlight full: {e}")))?;
+        let (hi_channels, hi_bytes) = self
+            .decode_with_autorepair(name, max_layer)
+            .await
+            .map_err(|e| GatewayError::Decode(format!("spotlight full: {e}")))?;
 
         let w = manifest.width as usize;
         let h = manifest.height as usize;
@@ -3193,6 +3380,18 @@ pub struct ApiStats {
     pub dedup_savings_pct: f64,
     /// Approximate stored bytes across the cluster (sum of `n * (K + sym_len)`).
     pub bytes_total: u64,
+    /// Number of times a GET path hit a [`ClientError::LayerLost`] and
+    /// kicked off an inline `repair_node` pass to heal the cluster.
+    /// Incremented in [`Gateway::decode_with_autorepair`] each time the
+    /// first attempt fails. A non-zero value here means the cluster is
+    /// silently fixing itself on the read path — useful for spotting
+    /// upstream shard-loss (audit reputation cascade, GC race, etc.).
+    pub auto_repairs_total: u64,
+    /// Subset of [`Self::auto_repairs_total`] where the post-repair
+    /// retry ALSO failed — i.e. the object is irrecoverable from the
+    /// shards currently on disk. The GET ultimately surfaces a 5xx to
+    /// the caller.
+    pub auto_repair_failures_total: u64,
 }
 
 /// Result of [`Gateway::fingerprint_of`].
