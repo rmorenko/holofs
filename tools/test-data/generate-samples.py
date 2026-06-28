@@ -219,6 +219,130 @@ def make_pixel_art(seed: int, w: int = 256, h: int = 256) -> list[list[tuple[int
     return px
 
 
+# ---------------------------------------------------------------------------
+# Unambiguous shape+colour fixtures for the semantic-search demo.
+#
+# These are deliberately *boring* — a single shape in a single colour on a
+# neutral grey background. The semantic-search test corpus is otherwise
+# either randomly-coloured (`mandala`, `brand-pairs`) or texture-only
+# (`gradient`, `noise`, `pixel-blocks`), so a query like "сиреневый круг"
+# has nothing concrete to anchor on. With these fixtures present, queries
+# like "purple circle", "red square", "yellow star" land on a single
+# obvious top hit.
+# ---------------------------------------------------------------------------
+
+
+_BG = (255, 255, 255)  # pure white — matches "icon on white" CLIP training distribution
+
+
+def _solid_disk(w: int, h: int, color: tuple[int, int, int]) -> list[list[tuple[int, int, int]]]:
+    """A large filled circle in `color` on white. Fills ~85% of the
+    image diameter so the shape dominates CLIP's visual encoding."""
+    cx, cy, r = w // 2, h // 2, int(min(w, h) * 0.42)
+    out = [[_BG for _ in range(w)] for _ in range(h)]
+    for y in range(h):
+        for x in range(w):
+            if (x - cx) ** 2 + (y - cy) ** 2 <= r * r:
+                out[y][x] = color
+    return out
+
+
+def _solid_square(w: int, h: int, color: tuple[int, int, int]) -> list[list[tuple[int, int, int]]]:
+    """A large filled axis-aligned square in `color`. ~80% side length."""
+    s = int(min(w, h) * 0.40)
+    x0, y0 = w // 2 - s, h // 2 - s
+    out = [[_BG for _ in range(w)] for _ in range(h)]
+    for y in range(h):
+        for x in range(w):
+            if x0 <= x < x0 + 2 * s and y0 <= y < y0 + 2 * s:
+                out[y][x] = color
+    return out
+
+
+def _solid_triangle(w: int, h: int, color: tuple[int, int, int]) -> list[list[tuple[int, int, int]]]:
+    """A filled equilateral-ish triangle pointing up, in `color`.
+    Sized to fill ~80% of the canvas vertically."""
+    out = [[_BG for _ in range(w)] for _ in range(h)]
+    cx = w // 2
+    apex_y = h // 10
+    base_y = h * 9 // 10
+    half_base = (base_y - apex_y) * 7 // 8
+    for y in range(apex_y, base_y + 1):
+        t = (y - apex_y) / max(1, base_y - apex_y)
+        hw = int(half_base * t)
+        for x in range(max(0, cx - hw), min(w, cx + hw + 1)):
+            out[y][x] = color
+    return out
+
+
+def _solid_star(w: int, h: int, color: tuple[int, int, int]) -> list[list[tuple[int, int, int]]]:
+    """A filled 5-pointed star in `color`. Outer radius = 45% of the
+    image (so the star fills almost the whole canvas)."""
+    import math
+    out = [[_BG for _ in range(w)] for _ in range(h)]
+    cx, cy = w / 2.0, h / 2.0
+    r_outer = min(w, h) * 0.45
+    r_inner = r_outer * 0.4
+    pts: list[tuple[float, float]] = []
+    for i in range(10):
+        r = r_outer if i % 2 == 0 else r_inner
+        a = -math.pi / 2 + i * math.pi / 5
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    for y in range(h):
+        for x in range(w):
+            inside = False
+            j = len(pts) - 1
+            for i in range(len(pts)):
+                xi, yi = pts[i]
+                xj, yj = pts[j]
+                if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+                    inside = not inside
+                j = i
+            if inside:
+                out[y][x] = color
+    return out
+
+
+def _solid_hexagon(w: int, h: int, color: tuple[int, int, int]) -> list[list[tuple[int, int, int]]]:
+    """A filled regular hexagon (pointy-top) in `color`. Outer
+    radius = 45% of the image."""
+    import math
+    out = [[_BG for _ in range(w)] for _ in range(h)]
+    cx, cy = w / 2.0, h / 2.0
+    r = min(w, h) * 0.45
+    pts = []
+    for i in range(6):
+        a = -math.pi / 2 + i * math.pi / 3
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    for y in range(h):
+        for x in range(w):
+            inside = False
+            j = len(pts) - 1
+            for i in range(len(pts)):
+                xi, yi = pts[i]
+                xj, yj = pts[j]
+                if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+                    inside = not inside
+                j = i
+            if inside:
+                out[y][x] = color
+    return out
+
+
+# (filename suffix, shape-constructor, RGB colour). The combinations are
+# deliberately one-of-each so a query can pin down both colour AND shape
+# unambiguously. Resolution 256×256 — matches the rest of the catalog;
+# the gateway upscales to 512×512 at PUT time.
+COLOURED_SHAPES: list[tuple[str, callable, tuple[int, int, int]]] = [  # type: ignore[type-arg]
+    ("purple-circle.png", _solid_disk, (160, 80, 220)),     # сиреневый круг
+    ("red-square.png", _solid_square, (220, 60, 60)),       # красный квадрат
+    ("blue-triangle.png", _solid_triangle, (60, 110, 220)), # синий треугольник
+    ("yellow-star.png", _solid_star, (240, 210, 50)),       # жёлтая звезда
+    ("green-hexagon.png", _solid_hexagon, (70, 180, 90)),   # зелёный шестиугольник
+    ("orange-circle.png", _solid_disk, (240, 130, 40)),     # оранжевый круг
+]
+
+
 def make_brand_logo(seed: int) -> list[list[tuple[int, int, int]]]:
     """Solid-colour circle on a contrasting background + a per-pixel
     pseudo-random texture inside the circle. The texture is essential
@@ -439,6 +563,13 @@ def collect_samples(out_root: Path) -> list[Sample]:
         base = make_brand_logo(50 + i)
         photo_specs.append((f"brand-pairs/logo-{i + 1}.png", base))
         photo_specs.append((f"brand-pairs/logo-{i + 1}-wm.png", make_brand_watermark(base, 50 + i)))
+
+    # Coloured shapes: unambiguous shape + colour fixtures so the
+    # multilingual semantic-search demo has clear anchor images for
+    # queries like "purple circle" / "сиреневый круг" /
+    # "красный квадрат".
+    for name, ctor, colour in COLOURED_SHAPES:
+        photo_specs.append((f"coloured-shapes/{name}", ctor(256, 256, colour)))
 
     for rel, px in photo_specs:
         target = write_under / "photos" / rel
