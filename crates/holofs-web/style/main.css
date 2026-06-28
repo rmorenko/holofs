@@ -54,9 +54,16 @@ code, .mono {
   display: flex;
   align-items: center;
   gap: 18px;
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 24px 24px 18px 24px;
+  /* Span the full viewport so the divider line below the topbar
+     runs edge-to-edge on every route. Inner content is still
+     capped to ~1280 px and visually centred via a left/right
+     padding clamp: 24 px minimum gutter, or half of the
+     overflow past 1280 px on wider viewports. */
+  width: 100%;
+  padding-top: 24px;
+  padding-bottom: 18px;
+  padding-left: max(24px, calc((100% - 1280px) / 2 + 24px));
+  padding-right: max(24px, calc((100% - 1280px) / 2 + 24px));
   border-bottom: 1px solid var(--bord);
 }
 
@@ -1150,23 +1157,7 @@ body.catalog-page {
   display: flex;
   flex-direction: column;
 }
-body.catalog-page > header.topbar {
-  flex-shrink: 0;
-  /* The base `.topbar` rule centers itself via `margin: 0 auto`,
-     which works when the body is a normal block container but
-     misfires when the body is a flex column (Stage 11.x catalog
-     layout). In a flex column auto-margins SUPPRESS cross-axis
-     stretch and shrink the element to its content width — visible
-     as the topbar being narrower than the viewport with empty
-     space on both sides on `/` but full-width on every other
-     page. Reset the auto margins and re-center the contents via
-     a padding clamp so the visual width is uniform across routes. */
-  margin: 0;
-  width: 100%;
-  max-width: none;
-  padding-left: max(24px, calc((100% - 1280px) / 2 + 24px));
-  padding-right: max(24px, calc((100% - 1280px) / 2 + 24px));
-}
+body.catalog-page > header.topbar { flex-shrink: 0; }
 body.catalog-page > main.container {
   flex: 1 1 auto;
   min-height: 0;
