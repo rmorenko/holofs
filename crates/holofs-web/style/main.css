@@ -1150,7 +1150,23 @@ body.catalog-page {
   display: flex;
   flex-direction: column;
 }
-body.catalog-page > header.topbar { flex-shrink: 0; }
+body.catalog-page > header.topbar {
+  flex-shrink: 0;
+  /* The base `.topbar` rule centers itself via `margin: 0 auto`,
+     which works when the body is a normal block container but
+     misfires when the body is a flex column (Stage 11.x catalog
+     layout). In a flex column auto-margins SUPPRESS cross-axis
+     stretch and shrink the element to its content width — visible
+     as the topbar being narrower than the viewport with empty
+     space on both sides on `/` but full-width on every other
+     page. Reset the auto margins and re-center the contents via
+     a padding clamp so the visual width is uniform across routes. */
+  margin: 0;
+  width: 100%;
+  max-width: none;
+  padding-left: max(24px, calc((100% - 1280px) / 2 + 24px));
+  padding-right: max(24px, calc((100% - 1280px) / 2 + 24px));
+}
 body.catalog-page > main.container {
   flex: 1 1 auto;
   min-height: 0;
