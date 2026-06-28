@@ -53,6 +53,76 @@ async fn direct_url_navigation_renders_diff_body() -> Result<()> {
 }
 
 #[tokio::test]
+async fn title_filename_link_serves_the_raw_image() -> Result<()> {
+    // Second user-reported regression on /diff: the title h2 has
+    // two `<a>` elements wrapping the filenames. They point at
+    // `/<filename>` — the axum catch-all GET route, NOT a leptos
+    // route. Without rel="external" the leptos Router intercepts
+    // the click and renders its "not found" fallback. A refresh
+    // works because the full navigation reaches axum.
+    let harness = TestHarness::fresh().await?;
+    harness.mkdir_p("photos/abstract").await?;
+    harness
+        .put_bytes(
+            "photos/abstract/a.png",
+            holofs_e2e::fixtures::textured_image_png().to_vec(),
+        )
+        .await?;
+    harness
+        .put_bytes(
+            "photos/abstract/b.png",
+            holofs_e2e::fixtures::tiny_image_png().to_vec(),
+        )
+        .await?;
+    harness
+        .goto("/diff?a=photos/abstract/a.png&b=photos/abstract/b.png")
+        .await?;
+    harness.wait_for("h2", Duration::from_secs(10)).await?;
+    // Find the first title-anchor (linked filename, NOT an action row).
+    let title_link = harness
+        .wait_until(
+            async |drv| {
+                let anchors = drv.find_all(By::Css("h2 a")).await?;
+                for a in anchors {
+                    let href = a.attr("href").await.unwrap_or_default().unwrap_or_default();
+                    if href.ends_with("a.png") || href.ends_with("b.png") {
+                        return Ok(Some(a));
+                    }
+                }
+                Ok(None)
+            },
+            Duration::from_secs(10),
+        )
+        .await?;
+    title_link.click().await?;
+
+    harness
+        .wait_until(
+            async |drv| {
+                let url = drv.current_url().await?;
+                let path = url.path();
+                Ok(if path.ends_with(".png") {
+                    // Browser navigated to the raw file URL; if the
+                    // click had been hijacked we'd still be on /diff.
+                    Some(())
+                } else {
+                    None
+                })
+            },
+            Duration::from_secs(10),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "after clicking the title-anchor filename on /diff, the URL did \
+                 not change to /<filename>.png. Leptos Router probably intercepted \
+                 the click — make sure the title anchors carry rel=\"external\"."
+            )
+        })?;
+    harness.close().await
+}
+
+#[tokio::test]
 async fn click_from_similar_navigates_to_diff_with_data() -> Result<()> {
     // The bug we're guarding against: clicking the `diff →` action
     // on `/similar/<a>` had no `rel="external"`, so leptos Router

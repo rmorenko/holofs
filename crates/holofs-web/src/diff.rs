@@ -160,9 +160,15 @@ fn DiffBody(data: DiffReportView) -> impl IntoView {
     view! {
         <h2 style="margin-top:0">
             {t!("diff.title_prefix")} " "
-            <a href={format!("/{enc_a}")}>{name_a.clone()}</a>
+            // `rel="external"` because `/<filename>` is the gateway's
+            // axum catch-all GET route, NOT a leptos route. Without
+            // the attribute the SPA router tries to client-route the
+            // click, fails to find a matching leptos Route, and
+            // renders the fallback "not found". A refresh (full
+            // navigation) lets axum serve the bytes correctly.
+            <a href={format!("/{enc_a}")} rel="external">{name_a.clone()}</a>
             " ↔ "
-            <a href={format!("/{enc_b}")}>{name_b.clone()}</a>
+            <a href={format!("/{enc_b}")} rel="external">{name_b.clone()}</a>
         </h2>
         <p class="mut">{t!("diff.intro")}</p>
         <p class="mut">{t!("diff.not_visual_warn")}</p>
@@ -203,9 +209,9 @@ fn DiffBody(data: DiffReportView) -> impl IntoView {
         </p>
 
         <p style="margin-top:24px">
-            <a href={format!("/similar/{footer_enc_a}")}>{t!("diff.footer.similar_a")}</a>
+            <a href={format!("/similar/{footer_enc_a}")} rel="external">{t!("diff.footer.similar_a")}</a>
             " · "
-            <a href="/">{t!("generic.back_to_catalog")}</a>
+            <a href="/" rel="external">{t!("generic.back_to_catalog")}</a>
         </p>
     }
 }

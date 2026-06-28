@@ -160,6 +160,11 @@ pub fn EscrowSplitResultView(
                                 <a
                                     href={format!("/escrow/download/{}", s.download_path)}
                                     download=s.filename.clone()
+                                    // `/escrow/download/...` is an axum-only route,
+                                    // not in the leptos Route table. Without
+                                    // rel="external" the SPA router intercepts the
+                                    // click and shows the "not found" fallback.
+                                    rel="external"
                                 >
                                     {t!("escrow.result.action.download")}
                                 </a>
