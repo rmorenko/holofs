@@ -488,18 +488,33 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
                     // before we declare the tree fully open. Earlier
                     // value (8 × 200ms = 1.6s) wasn't enough for chains
                     // 4-5 levels deep on a busy cluster.
-                    "window.holofsExpandAll=function(root){\
-                    if(!root)return;var tries=25;function step(){\
+                    //
+                    // Stage 11.30 fix (user-reported "клик ⊖ blinks
+                    // and re-opens"): a pending step() from the user's
+                    // earlier ⊕ click would race a later ⊖ click,
+                    // find descendants with open=false, and forcibly
+                    // re-open them via `if(!d.open){d.open=true}`.
+                    // Use a global epoch counter that BOTH helpers
+                    // bump on entry; every queued step() checks the
+                    // epoch it captured and exits if a newer call
+                    // (expand or collapse) has since started. The
+                    // root-is-DETAILS check stays as a fast path so
+                    // a closed-from-summary-click also aborts.
+                    "(function(){var ep=0;\
+                    window.holofsExpandAll=function(root){\
+                    if(!root)return;ep++;var my=ep,tries=25;function step(){\
+                    if(my!==ep)return;\
+                    if(root.tagName==='DETAILS'&&!root.open)return;\
                     var any=false;\
-                    if(root.tagName==='DETAILS'&&!root.open){root.open=true;any=true;}\
                     root.querySelectorAll('details').forEach(function(d){\
                     if(!d.open){d.open=true;any=true;}});\
                     if(any){tries=25;setTimeout(step,200);}\
                     else if(--tries>0){setTimeout(step,200);}\
-                    }step();};\
-                    window.holofsCollapseAll=function(root){if(!root)return;\
+                    }if(root.tagName==='DETAILS')root.open=true;step();};\
+                    window.holofsCollapseAll=function(root){if(!root)return;ep++;\
                     if(root.tagName==='DETAILS')root.open=false;\
-                    root.querySelectorAll('details').forEach(function(d){d.open=false;});};"
+                    root.querySelectorAll('details').forEach(function(d){d.open=false;});};\
+                    })();"
                 }</script>
                 <HydrationScripts options/>
                 // Stage 11.28: catalog-tree sticky H-scrollbar
@@ -1332,6 +1347,28 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
         });
     }
 
+    // Authoritative signal → DOM sync. We can't bind `open=move ||
+    // open_sig.get()` directly on the `<details>` because leptos
+    // 0.7's attribute writer sometimes renders `open="false"`
+    // (attribute present → browser keeps the disclosure open) when
+    // the closure returns false. `set_open(bool)` on the typed
+    // HtmlDetailsElement bypasses that quirk and toggles the
+    // attribute presence correctly. Runs on every signal flip after
+    // hydrate.
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let want = open_sig.get();
+        if let Some(el) = details_ref.get() {
+            use wasm_bindgen::JsCast;
+            let el: web_sys::Element = (*el).clone().into();
+            if let Ok(d) = el.dyn_into::<web_sys::HtmlDetailsElement>() {
+                if d.open() != want {
+                    d.set_open(want);
+                }
+            }
+        }
+    });
+
     let on_toggle = move |ev: leptos::ev::Event| {
         #[cfg(feature = "hydrate")]
         {
@@ -1353,19 +1390,16 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
     let inner_path = path.clone();
     view! {
         <li class="tree-branch">
-            // `open` binds reactively to `open_sig` so:
-            //   1. SSR renders the initial value of the signal
-            //      (`initial_open`) into the attribute — top-level
-            //      folders open, deeper ones closed — same as before.
-            //   2. After hydrate, any signal update (native toggle,
-            //      `holofsExpandAll`, `holofsCollapseAll`,
-            //      `?open=<path>` autoload) is mirrored to the DOM
-            //      and survives subsequent re-renders of the
-            //      surrounding `<ul class="tree-children">`. Without
-            //      this, programmatically setting `details.open` via
-            //      JS used to be silently reverted when a sibling
-            //      lazy-fetch resolved and recreated the row.
-            <details node_ref=details_ref open=move || open_sig.get() on:toggle=on_toggle>
+            // SSR-time `open` attribute mirrors the initial signal
+            // value: top-level folders ship open in the HTML,
+            // deeper ones closed. After hydrate the Effect above
+            // becomes the single source of truth and re-applies
+            // `set_open(open_sig.get())` whenever the signal flips
+            // — that's what makes JS-driven `holofsExpandAll` /
+            // `holofsCollapseAll` survive the surrounding
+            // `<ul class="tree-children">` re-renders that follow
+            // a lazy-fetch resolution.
+            <details node_ref=details_ref open=initial_open on:toggle=on_toggle>
                 <summary class="tree-summary">
                     <span class="tree-icon">"📁"</span>
                     <span class="tree-name">{basename}</span>
