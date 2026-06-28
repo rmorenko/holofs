@@ -38,3 +38,7 @@ lcov.info
 # Local tool caches
 __pycache__/
 .pkgconfig/
+
+# e2e suite leaves chromedriver / gateway logs in /tmp; locally-built
+# screenshots and dumps land in this scratch dir.
+/crates/holofs-e2e/.scratch/

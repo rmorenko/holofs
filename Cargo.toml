@@ -14,6 +14,7 @@ members = [
     "crates/holofs-web",
     "crates/holofs-mcp",
     "crates/holofs-embed",
+    "crates/holofs-e2e",
 ]
 
 [workspace.package]

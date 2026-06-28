@@ -1,0 +1,26 @@
+[package]
+name = "holofs-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Browser-driven end-to-end tests for the holofs gateway. Run via `cargo test -p holofs-e2e`; requires a running chromedriver (see crates/holofs-e2e/README.md)."
+
+# This crate is test-only. The library target exposes the TestHarness +
+# fixtures; every integration test under `tests/` consumes it.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+thirtyfour = { version = "0.32", default-features = false, features = ["rustls-tls"] }
+tokio = { workspace = true, features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+serde_json = "1"
+tempfile = "3"
+url = "2"
+
+# Tests use the public API; nothing here needs the [dev-dependencies] split.
+[lints]
+workspace = true
