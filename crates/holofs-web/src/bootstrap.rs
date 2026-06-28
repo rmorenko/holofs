@@ -344,6 +344,46 @@ pub async fn bootstrap_cluster(
         audit::run_periodic(aud_catalog, aud_rep, audit_cfg, log_audit).await;
     });
 
+    // Background shard scrub. Walks the catalog every
+    // HOLOFS_SCRUB_INTERVAL seconds (default 600 = 10 min) and
+    // proactively repairs any object whose `place_shard`-expected
+    // hashes are missing from their canonical node. Catches damage
+    // from the old reputation cascade, stale node failures, etc.
+    // *before* any user GET trips a 503. Set the interval to 0 to
+    // disable entirely (the auto-repair-on-read path stays active).
+    let scrub_interval_secs: u64 = std::env::var("HOLOFS_SCRUB_INTERVAL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
+    if scrub_interval_secs > 0 {
+        let scrub_gw = Arc::clone(&gateway);
+        let interval = std::time::Duration::from_secs(scrub_interval_secs);
+        info!(
+            interval_secs = scrub_interval_secs,
+            "background shard scrub configured"
+        );
+        tokio::spawn(async move {
+            // First tick fires after the interval so we don't hammer
+            // the cluster at boot before audit has even started.
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await; // immediate, but the next is interval-from-now
+            loop {
+                ticker.tick().await;
+                let report = scrub_gw.scrub_tick().await;
+                if report.objects_repaired > 0 || report.objects_repair_failed > 0 {
+                    info!(
+                        scanned = report.objects_scanned,
+                        repaired = report.objects_repaired,
+                        failed = report.objects_repair_failed,
+                        "scrub tick"
+                    );
+                }
+            }
+        });
+    } else {
+        info!("background shard scrub disabled (HOLOFS_SCRUB_INTERVAL=0)");
+    }
+
     info!(width = w, height = h, k = K, layers = NLAYERS, "frame parameters");
 
     // Install the global client TLS config so every gateway RPC honours it.
