@@ -199,17 +199,27 @@ pub async fn tick_once(
         )
         .await;
 
-        // MissingShard is the one ambiguous outcome: "we don't know if the
-        // node is at fault". For the prototype we treat it as negative: the
-        // hash came from manifest.shard_hashes and the position from
-        // place_shard, so if the node did not deliver, something is wrong
-        // with its state (full `shard_idx` ↔ `target_hash` correspondence is
-        // guaranteed only right after PUT; repaired shards may land elsewhere.
-        // Fine for a prototype.)
-        let success = outcome.is_success();
+        // MissingShard is ambiguous: the chosen node either really
+        // lost the shard, OR the shard physically lives elsewhere
+        // because PUT-time dedup steered it to the node that
+        // received the FIRST PUT for that hash. Synthetic 256×256
+        // samples upscaled to 512×512 by the gateway produce a lot
+        // of layer-3 all-zero systematic shards that hash-collide
+        // across unrelated images, so `place_shard` keeps pointing
+        // at the *canonical* node while the bytes live on a *dedup*
+        // node. Earlier we counted that as a reputation hit; the
+        // resulting feedback loop dropped every node's reputation
+        // below threshold and decode 503s spread across the catalog
+        // overnight. Treat MissingShard as a *neutral* observation
+        // — no reputation update either way. Genuine shard loss
+        // would have to surface through HashMismatch or via the
+        // monitor's per-layer margin, which is still active.
         let score_after = {
             let mut rep = reputation.lock().await;
-            rep.observe(node, success);
+            match outcome {
+                AuditOutcome::MissingShard => { /* neutral — see comment above */ }
+                _ => rep.observe(node, outcome.is_success()),
+            }
             rep.score(node)
         };
 
