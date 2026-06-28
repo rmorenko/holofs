@@ -88,6 +88,47 @@ code, .mono {
   color: var(--fg);
 }
 
+/* Stage 16: top-of-viewport busy indicator. Lives at the very top
+   of the page, doesn't reflow layout (position: fixed), and only
+   becomes visible while `holofsBusy()` reports something in
+   flight (the JS toggles `.holofs-busy` on <html>). The animation
+   is a left-to-right "indeterminate progress" bar — same idiom
+   YouTube / NProgress use. */
+#holofs-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 2px;
+  width: 0;
+  background: var(--accent);
+  z-index: 9999;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease-out;
+}
+html.holofs-busy #holofs-progress {
+  opacity: 1;
+  animation: holofs-progress-sweep 1.4s ease-in-out infinite;
+}
+@keyframes holofs-progress-sweep {
+  0%   { left: 0;    width: 0;    }
+  40%  { left: 0;    width: 60%;  }
+  100% { left: 100%; width: 0;    }
+}
+
+/* Disabled-while-submitting visual: muted text + tiny spinner
+   glyph in place of the button's icon. Honours any control that
+   the global submit handler flagged via `data-holofs-was-busy`. */
+button[data-holofs-was-busy="1"],
+input[type="submit"][data-holofs-was-busy="1"] {
+  opacity: 0.55;
+  cursor: progress;
+}
+button[data-holofs-was-busy="1"]::after {
+  content: " …";
+  letter-spacing: 0.1em;
+}
+
 .topbar nav {
   display: flex;
   gap: 16px;

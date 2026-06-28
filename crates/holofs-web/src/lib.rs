@@ -523,6 +523,12 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
                 // page the script is a no-op (init finds no
                 // `.tree-scroll` element).
                 <script defer="defer" src="/assets/tree-hscroll.js"></script>
+                // Stage 16: global "something is loading" indicator
+                // — patches fetch/XHR/form-submit so 95 % of the
+                // async UI gets a top-of-viewport progress bar
+                // for free. See `assets/busy-indicator.js` for the
+                // counter-based gate + `<form>` auto-disable.
+                <script defer="defer" src="/assets/busy-indicator.js"></script>
                 <Stylesheet id="leptos" href="/pkg/holofs.css"/>
                 <Title text="holofs"/>
             </head>
