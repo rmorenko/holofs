@@ -35,8 +35,13 @@
 
     // 1. fetch wrapper. Most leptos server-fn calls go through
     //    this; we want every one of them to ping the indicator.
+    // We bind `origFetch` to `window` explicitly via `.bind` so
+    // wasm-bindgen-generated callsites (which often invoke fetch
+    // as a free function with `this === undefined`) don't trip
+    // Chrome's "Illegal invocation" guard on Window.fetch.
     var origFetch = window.fetch;
     if (typeof origFetch === "function") {
+        var bound = origFetch.bind(window);
         window.fetch = function () {
             window.holofsBusy(true);
             var done = false;
@@ -46,7 +51,12 @@
                 window.holofsBusy(false);
             };
             try {
-                return origFetch.apply(this, arguments).then(
+                var p = bound.apply(null, arguments);
+                if (!p || typeof p.then !== "function") {
+                    release();
+                    return p;
+                }
+                return p.then(
                     function (r) { release(); return r; },
                     function (e) { release(); throw e; }
                 );

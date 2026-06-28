@@ -1308,36 +1308,38 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
     let is_open_target = !open_target.is_empty() && open_target == path;
     let details_ref: NodeRef<leptos::html::Details> = NodeRef::new();
     let open_sig = RwSignal::new(initial_open);
-    let children_state: RwSignal<Option<Result<ListDirPage, ServerFnError>>> =
-        RwSignal::new(None);
+    // Replace the previous spawn_local + RwSignal pattern with a
+    // keyed `Resource`. Reason: under streaming-hydrate the
+    // `Effect::new(...)` that used to kick off `spawn_local` never
+    // ran its initial pass for components mounted late in the
+    // hydration stream — so depth-0 `initial_open=true` folders
+    // sat under a stuck "loading catalog…" placeholder until the
+    // user clicked. Resource is what the root catalog already
+    // uses (see `CatalogTreeLazy`), and its hydrate behaviour is
+    // well-trodden: it picks up the SSR-resolved payload if any,
+    // or fetches eagerly post-mount.
+    //
+    // The key is `(open, path, sort)`; while `open=false` we hand
+    // back a sentinel `None`-ish value so no fetch fires until the
+    // user opens the folder.
     let path_for_load = path.clone();
-    let load_children = move || {
-        // Snapshot under `_untracked` so the surrounding effect
-        // doesn't get pulled into a dependency cycle. Re-loading
-        // after a load completes only happens via another toggle.
-        if children_state.with_untracked(|v| matches!(v, Some(Ok(_)))) {
-            return;
-        }
-        let p = path_for_load.clone();
-        let srt = sort.as_str().to_string();
-        leptos::task::spawn_local(async move {
-            let r = list_dir_page(p, 0, LAZY_PAGE_SIZE, srt).await;
-            children_state.set(Some(r));
-        });
-    };
-
-    // Drive the fetch entirely from the hydrate side. Whenever
-    // `open_sig` is true, kick off `list_dir_page` (idempotent via
-    // the `children_state` guard inside `load_children`). For
-    // depth==0 folders this fires once on hydrate; deeper folders
-    // fire on the first user toggle. Effects are no-ops during SSR,
-    // so the initial server-rendered HTML shows empty children even
-    // for `initial_open` folders — they fill in once JS takes over.
-    Effect::new(move |_| {
-        if open_sig.get() {
-            load_children();
-        }
-    });
+    let sort_str = sort.as_str().to_string();
+    // Key the resource on (path, sort) only. Every folder fetches
+    // its direct children eagerly during SSR so the initial HTML
+    // arrives populated end-to-end — no hydrate-side refetch
+    // required, which matters because `Effect::new` for
+    // late-mounted lazy components doesn't reliably fire its
+    // initial pass under streaming hydration (proven empirically:
+    // both the old `spawn_local` path and a `(open, …)`-keyed
+    // Resource left every depth-0 row stuck at "loading catalog…").
+    // For the dev cluster's 17 directories this is one paginated
+    // RPC per folder during SSR; the user perceives a single
+    // initial page render. The disclosure triangle then just toggles
+    // the native `<details>` visibility — data is already there.
+    let children_res = Resource::new(
+        move || (path_for_load.clone(), sort_str.clone()),
+        |(p, srt)| async move { list_dir_page(p, 0, LAZY_PAGE_SIZE, srt).await },
+    );
 
     // Stage 11.25: scroll the open-target folder into view once it
     // mounts on the client. Without this the redirect after mkdir
@@ -1493,12 +1495,13 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                     // resource state transition (pending / resolved).
                     {move || {
                         let p = inner_path.clone();
-                        let val = children_state.get();
+                        let val = children_res.get();
                         let is_open = open_sig.get();
                         match val {
-                            // Folder closed and never opened: render nothing.
+                            // Resource never resolved yet AND folder
+                            // never opened — render nothing.
                             None if !is_open => ().into_any(),
-                            // Open but the fetch is still in flight.
+                            // Open but the resource is still pending.
                             None => view! {
                                 <li class="mut">{t!("catalog.loading")}</li>
                             }.into_any(),
