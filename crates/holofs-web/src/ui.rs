@@ -35,7 +35,28 @@ pub fn Topbar(active: &'static str) -> impl IntoView {
     };
     view! {
         <header class="topbar">
-            <h1>"holofs"</h1>
+            <h1>
+                // Wavelet-pyramid emblem: four nested rotated squares
+                // mirror the four DWT layers the cluster encodes;
+                // the centre dot is the LL band — the slice that
+                // always decodes regardless of how much detail
+                // arrived. `currentColor` ties the strokes to the
+                // active theme's `--fg`; the dot uses `--accent`.
+                <svg class="holofs-emblem" viewBox="0 0 32 32"
+                     xmlns="http://www.w3.org/2000/svg"
+                     aria-hidden="true" focusable="false">
+                    <polygon points="16,3 29,16 16,29 3,16"
+                             fill="none" stroke="currentColor" stroke-width="1.6"/>
+                    <polygon points="16,6.5 25.5,16 16,25.5 6.5,16"
+                             fill="none" stroke="currentColor" stroke-width="1.4"/>
+                    <polygon points="16,9.5 22.5,16 16,22.5 9.5,16"
+                             fill="none" stroke="currentColor" stroke-width="1.2"/>
+                    <polygon points="16,12 20,16 16,20 12,16"
+                             fill="none" stroke="currentColor" stroke-width="1"/>
+                    <circle cx="16" cy="16" r="1.7" fill="var(--accent)"/>
+                </svg>
+                "holofs"
+            </h1>
             <nav>
                 // Stage 14.3: every topbar link gets `rel="external"`
                 // so the browser does a full-page navigation instead

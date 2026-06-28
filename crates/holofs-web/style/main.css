@@ -65,6 +65,20 @@ code, .mono {
   font-size: 18px;
   font-weight: 600;
   letter-spacing: 0.3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+/* Wavelet-pyramid emblem next to the wordmark. Sized to the cap
+   height of the `holofs` text. `currentColor` keeps the strokes in
+   sync with the foreground colour, so it inverts cleanly with the
+   light/dark theme toggle. */
+.holofs-emblem {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  color: var(--fg);
 }
 
 .topbar nav {
