@@ -1,39 +1,51 @@
-//! CLIP-base wrapper. Lazy-initialised on first call to [`Embedder::new`].
+//! Multilingual CLIP wrapper. Image side stays on the original
+//! `openai/clip-vit-base-patch32` vision encoder; text side is
+//! replaced with the
+//! `sentence-transformers/clip-ViT-B-32-multilingual-v1` recipe —
+//! distilbert-base-multilingual-cased + a learned 768 → 512 linear
+//! projection that lands in the CLIP image embedding space. The
+//! original CLIP text encoder is *not* loaded.
 //!
-//! Weights and tokenizer come from `openai/clip-vit-base-patch32`
-//! (HF Hub) — first run downloads ~155 MB into `~/.cache/huggingface/hub`,
-//! every subsequent process boot reads from the cache.
+//! Why two repos / three artifacts:
 //!
-//! The actual inference path is pure CPU (no CUDA / accelerate feature).
-//! On Apple silicon CLIP-base runs in ≈150 ms per image, which is fast
-//! enough that batching isn't worth the API surface — embedding lives
-//! on a background `spawn_blocking` and the user-visible side reads
-//! from the index file.
+//! * **Images.** `openai/clip-vit-base-patch32` — same vision tower
+//!   as before. Image embeddings on disk from previous index runs
+//!   stay valid; we don't need to reindex.
+//! * **Text.** The multilingual DistilBERT under
+//!   `sentence-transformers/clip-ViT-B-32-multilingual-v1/model.safetensors`
+//!   produces a 768-d sequence; mean-pooling the real (non-padded)
+//!   tokens and applying the projection in
+//!   `2_Dense/model.safetensors` lands in the SAME 512-d space the
+//!   CLIP image encoder writes into. Cosine similarity between an
+//!   image vector and a query vector is therefore comparable across
+//!   the encoder swap.
+//!
+//! First-call cost on a cold HuggingFace cache: 155 MiB (CLIP) +
+//! 538 MiB (DistilBERT) + 1.5 MiB (Dense). Subsequent boots read
+//! from `~/.cache/huggingface/hub/` in a few seconds.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::clip;
+use candle_transformers::models::{clip, distilbert};
 use hf_hub::api::sync::Api;
 use hf_hub::{Repo, RepoType};
 use tokenizers::Tokenizer;
 
 use crate::error::EmbedError;
-use crate::text::tokenize_for_clip;
+use crate::text::tokenize_for_distilbert;
 use crate::EMBED_DIM;
 
-/// Repo on HF Hub. Pinned by name — version drift would invalidate the
-/// existing index file, so any swap goes through a `Stage 12.x: bump
-/// CLIP repo` commit + reindex.
-const HF_REPO: &str = "openai/clip-vit-base-patch32";
-/// The official `openai/clip-vit-base-patch32` weights ship only as
-/// `pytorch_model.bin` on `main`. PR #15 added a `model.safetensors`
-/// conversion; we pin to that revision so candle's safetensors loader
-/// has a clean path. Same revision the upstream candle CLIP example
-/// uses.
-const HF_REVISION: &str = "refs/pr/15";
+/// Image repo — unchanged. Pinned to the safetensors-conversion PR
+/// so candle's safetensors loader has a clean path.
+const HF_IMAGE_REPO: &str = "openai/clip-vit-base-patch32";
+const HF_IMAGE_REVISION: &str = "refs/pr/15";
+
+/// Multilingual text encoder + projection.
+const HF_TEXT_REPO: &str = "sentence-transformers/clip-ViT-B-32-multilingual-v1";
+const HF_TEXT_REVISION: &str = "main";
 
 /// Image input side of CLIP. The vision tower wants 224×224 RGB,
 /// normalised by per-channel mean/std baked into the model.
@@ -41,72 +53,116 @@ const IMAGE_SIZE: usize = 224;
 const IMAGE_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_72];
 const IMAGE_STD: [f32; 3] = [0.268_629_54, 0.261_302_8, 0.275_777_1];
 
-/// CLIP-base image + text encoder. Cheap to clone (`Arc` inside).
+/// DistilBERT hidden size (`dim` in config.json). The Dense
+/// projection then maps to [`EMBED_DIM`].
+const TEXT_HIDDEN: usize = 768;
+
+/// CLIP-base image encoder + multilingual DistilBERT text encoder +
+/// 768→512 projection. Cheap to clone (`Arc` inside).
 pub struct Embedder {
     inner: Arc<EmbedderInner>,
 }
 
 struct EmbedderInner {
-    model: clip::ClipModel,
+    image_model: clip::ClipModel,
+    text_model: distilbert::DistilBertModel,
+    text_proj: Tensor, // (512, 768), no bias
     tokenizer: Tokenizer,
     device: Device,
 }
 
 impl Embedder {
-    /// Load (or download then load) the CLIP-base model + tokenizer.
+    /// Load (or download then load) the image + text encoders.
     /// Blocking — call from `spawn_blocking`.
-    ///
-    /// First invocation hits HF Hub for ~155 MB of weights. Repeat
-    /// invocations after that read from `~/.cache/huggingface/hub`
-    /// in a few ms.
     pub fn new() -> Result<Self, EmbedError> {
-        // Weights come from HF Hub at `refs/pr/15` (the revision that
-        // added the `model.safetensors` conversion of openai/clip-vit-
-        // base-patch32). Tokenizer is vendored in `assets/tokenizer.json`
-        // because hf-hub 0.3 errors out with a misleading
-        // "RelativeUrlWithoutBase" when alternating between revisions
-        // — and the tokenizer JSON is only 2.2 MiB, well below the
-        // threshold where vendoring becomes silly.
-        let weights_api = Api::new().map_err(|e| EmbedError::HfHub(e.to_string()))?;
-        let weights_repo = weights_api.repo(Repo::with_revision(
-            HF_REPO.to_string(),
-            RepoType::Model,
-            HF_REVISION.to_string(),
-        ));
-        let weights_path: PathBuf = weights_repo
-            .get("model.safetensors")
-            .map_err(|e| EmbedError::HfHub(format!("weights: {e}")))?;
+        let api = Api::new().map_err(|e| EmbedError::HfHub(e.to_string()))?;
+        let device = Device::Cpu;
 
+        // ---- Image side ---------------------------------------------------
+        let image_repo = api.repo(Repo::with_revision(
+            HF_IMAGE_REPO.to_string(),
+            RepoType::Model,
+            HF_IMAGE_REVISION.to_string(),
+        ));
+        let image_weights: PathBuf = image_repo
+            .get("model.safetensors")
+            .map_err(|e| EmbedError::HfHub(format!("image weights: {e}")))?;
+        let image_tensors = candle_core::safetensors::load(&image_weights, &device)?;
+        let image_vb = VarBuilder::from_tensors(image_tensors, DType::F32, &device);
+        let image_cfg = clip::ClipConfig::vit_base_patch32();
+        let image_model = clip::ClipModel::new(image_vb, &image_cfg)?;
+
+        // ---- Text side ----------------------------------------------------
+        // Tokenizer is vendored — at ~2 MiB it's cheap, and hf-hub
+        // 0.3 has a known bug with alternating revisions on the same
+        // Api handle that the vendoring sidesteps (see
+        // feedback_workflow Rule 1).
         const TOKENIZER_BYTES: &[u8] = include_bytes!("../assets/tokenizer.json");
         let tokenizer = Tokenizer::from_bytes(TOKENIZER_BYTES)
             .map_err(|e| EmbedError::Tokenizer(e.to_string()))?;
 
-        let device = Device::Cpu;
-        // candle_core::safetensors::load reads the whole file into
-        // owned tensors — slower than mmap but safe (no unsafe block,
-        // workspace forbids them). For a ~155 MiB CLIP-base this is
-        // sub-second on Apple silicon and only runs on the lazy first
-        // call.
-        let tensors = candle_core::safetensors::load(&weights_path, &device)?;
-        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
-        let cfg = clip::ClipConfig::vit_base_patch32();
-        let model = clip::ClipModel::new(vb, &cfg)?;
+        let text_repo = api.repo(Repo::with_revision(
+            HF_TEXT_REPO.to_string(),
+            RepoType::Model,
+            HF_TEXT_REVISION.to_string(),
+        ));
+        // DistilBERT config — vendored (~0.5 KiB) for the same
+        // reason as the tokenizer: hf-hub 0.3 falls over with a
+        // misleading `RelativeUrlWithoutBase` error when an `Api`
+        // handle has touched two different revisions (here:
+        // `refs/pr/15` for the CLIP image weights, then `main` for
+        // the text encoder). See `feedback_workflow` Rule 1.
+        const TEXT_CONFIG: &str = include_str!("../assets/text_config.json");
+        let text_cfg: distilbert::Config = serde_json::from_str(TEXT_CONFIG)
+            .map_err(|e| EmbedError::Candle(format!("DistilBERT config parse: {e}")))?;
+
+        let text_weights: PathBuf = text_repo
+            .get("model.safetensors")
+            .map_err(|e| EmbedError::HfHub(format!("text weights: {e}")))?;
+        let text_tensors = candle_core::safetensors::load(&text_weights, &device)?;
+        let text_vb = VarBuilder::from_tensors(text_tensors, DType::F32, &device);
+        let text_model = distilbert::DistilBertModel::load(text_vb, &text_cfg)?;
+
+        // Linear projection 768 → 512. Single tensor named
+        // `linear.weight` in the safetensors file shipped under
+        // `2_Dense/model.safetensors`. No bias, no activation.
+        let proj_weights: PathBuf = text_repo
+            .get("2_Dense/model.safetensors")
+            .map_err(|e| EmbedError::HfHub(format!("text projection: {e}")))?;
+        let proj_tensors = candle_core::safetensors::load(&proj_weights, &device)?;
+        let text_proj = proj_tensors
+            .get("linear.weight")
+            .cloned()
+            .ok_or_else(|| {
+                EmbedError::Candle(
+                    "2_Dense/model.safetensors missing `linear.weight` tensor".into(),
+                )
+            })?;
+        // Sanity-check the projection shape so a future repo rev
+        // that changes dimensions surfaces here rather than as a
+        // garbled cosine ranking.
+        let shape = text_proj.dims();
+        if shape != [EMBED_DIM, TEXT_HIDDEN] {
+            return Err(EmbedError::Candle(format!(
+                "text projection shape {shape:?} ≠ expected [{EMBED_DIM}, {TEXT_HIDDEN}]"
+            )));
+        }
 
         Ok(Self {
             inner: Arc::new(EmbedderInner {
-                model,
+                image_model,
+                text_model,
+                text_proj,
                 tokenizer,
                 device,
             }),
         })
     }
 
-    /// Embed a single image into a 512-d L2-normalised vector.
-    ///
-    /// `rgb` is a row-major `width × height × 3` byte buffer (0..=255
-    /// per channel). The function does its own resize / normalise so
-    /// the gateway can hand us whatever resolution the coarse-layer
-    /// decode produced.
+    /// Embed a single image into a 512-d L2-normalised vector. The
+    /// vision tower is `openai/clip-vit-base-patch32` — unchanged
+    /// across the multilingual swap, so existing index records stay
+    /// valid.
     pub fn embed_image(
         &self,
         rgb: &[u8],
@@ -120,8 +176,6 @@ impl Embedder {
                 (width as usize) * (height as usize) * 3
             )));
         }
-        // Resize to 224×224 via `image` crate (uses Lanczos by default,
-        // which is what the original CLIP preprocessing uses).
         let img = image::RgbImage::from_raw(width, height, rgb.to_vec()).ok_or_else(|| {
             EmbedError::BadInput("image::RgbImage::from_raw failed".into())
         })?;
@@ -132,8 +186,6 @@ impl Embedder {
             image::imageops::FilterType::Lanczos3,
         );
 
-        // Normalise to f32 with CLIP's per-channel mean/std and lay out
-        // as [3, H, W] (candle expects channel-first).
         let mut chw = vec![0f32; 3 * IMAGE_SIZE * IMAGE_SIZE];
         for (i, pixel) in resized.pixels().enumerate() {
             let r = (pixel.0[0] as f32) / 255.0;
@@ -144,7 +196,7 @@ impl Embedder {
             chw[2 * IMAGE_SIZE * IMAGE_SIZE + i] = (b - IMAGE_MEAN[2]) / IMAGE_STD[2];
         }
         let t = Tensor::from_vec(chw, (1, 3, IMAGE_SIZE, IMAGE_SIZE), &self.inner.device)?;
-        let feats = self.inner.model.get_image_features(&t)?;
+        let feats = self.inner.image_model.get_image_features(&t)?;
         let v = feats.to_vec2::<f32>()?;
         let mut out = v
             .into_iter()
@@ -160,15 +212,65 @@ impl Embedder {
         Ok(out)
     }
 
-    /// Embed a text query (the user's natural-language search) into
-    /// the same 512-d space. L2-normalised so cosine-similarity is a
-    /// plain dot product.
+    /// Embed a text query (in any of the 50+ languages
+    /// `distilbert-base-multilingual-cased` was trained on) into the
+    /// same 512-d space as the image embeddings, L2-normalised so
+    /// cosine-similarity collapses to a dot product.
+    ///
+    /// Pipeline: tokenize → DistilBERT forward (returns full
+    /// sequence) → mean-pool over real (non-padded) tokens via the
+    /// attention mask → linear projection 768 → 512 → L2-normalise.
+    /// The mean-pool + projection layout matches what the upstream
+    /// sentence-transformers recipe does at training time.
     pub fn embed_text(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
-        let ids = tokenize_for_clip(&self.inner.tokenizer, text)?;
-        let len = ids.len();
-        let t = Tensor::from_vec(ids, (1, len), &self.inner.device)?;
-        let feats = self.inner.model.get_text_features(&t)?;
-        let v = feats.to_vec2::<f32>()?;
+        let (ids, mask) = tokenize_for_distilbert(&self.inner.tokenizer, text)?;
+        let n = ids.len();
+        let input_ids = Tensor::from_vec(ids, (1, n), &self.inner.device)?;
+
+        // candle's DistilBERT attention does
+        //   masked_fill(scores, attn_mask, NEG_INFINITY)
+        //   .broadcast_as(scores.shape())
+        // where `scores` is (B, n_heads, T, T). Two implications:
+        //   1. The mask values are INVERTED vs the HuggingFace
+        //      Python convention: `1 = ignore this token` (it gets
+        //      NEG_INFINITY-filled), `0 = real token, attend`.
+        //   2. The mask has to be shaped (B, 1, 1, T) so it
+        //      broadcasts across heads and query positions to the
+        //      4-D scores tensor.
+        // Without that, every query gets a near-identical vector
+        // because attention either drops everything (always-mask)
+        // or pays attention exclusively to the right-padded zero
+        // slots (always-keep with shape mismatch).
+        let inverted: Vec<u32> = mask.iter().map(|m| 1u32 - *m).collect();
+        let pad_mask_4d = Tensor::from_vec(inverted, (1, 1, 1, n), &self.inner.device)?;
+
+        // DistilBERT.forward returns (B, T, H). Shape is (1, n, 768).
+        let seq = self
+            .inner
+            .text_model
+            .forward(&input_ids, &pad_mask_4d)?;
+
+        // Mean-pool the real positions. Reuse the original
+        // (un-inverted) attention mask — 1 for real token, 0 for
+        // pad — broadcast it to (B, T, H) and elementwise-mul into
+        // `seq` before summing.
+        let real_mask = Tensor::from_vec(mask, (1, n), &self.inner.device)?
+            .to_dtype(DType::F32)?
+            .unsqueeze(2)?
+            .broadcast_as(seq.shape())?;
+        let mask_f32 = real_mask;
+        let masked = (seq * &mask_f32)?;
+        let summed = masked.sum(1)?; // (B, H)
+        let counts = mask_f32.sum(1)?.clamp(1f32, f32::INFINITY)?; // (B, 1)
+        let pooled = summed.broadcast_div(&counts)?; // (B, H)
+
+        // Linear projection 768 → 512 (no bias). `text_proj` is
+        // (512, 768); `pooled` is (1, 768). We want pooled @ proj.T
+        // = (1, 512).
+        let proj = self.inner.text_proj.t()?; // (768, 512)
+        let projected = pooled.matmul(&proj)?; // (1, 512)
+
+        let v = projected.to_vec2::<f32>()?;
         let mut out = v
             .into_iter()
             .next()

@@ -725,7 +725,10 @@ the best-scoring band per name; explicit bands filter to that
 abstraction level.
 
 Requires `--enable-embed`. On the first call after process start
-the gateway downloads ~155 MiB of CLIP weights from HuggingFace
+the gateway downloads ~155 MiB of CLIP image weights (for the
+ViT-B/32 vision tower) + ~538 MiB of multilingual text encoder
+(distilbert-base-multilingual-cased + a 768→512 projection from
+`sentence-transformers/clip-ViT-B-32-multilingual-v1`) from HuggingFace
 into `~/.cache/huggingface/hub/` — subsequent restarts read from
 cache.
 
@@ -849,7 +852,7 @@ layer's per-shard file count is brought under control.
 
 | Flag                      | Default | Purpose |
 |---------------------------|---------|---------|
-| `--enable-embed`          | off     | Stage 12.8 CLIP semantic search. First-call cost: ~155 MiB weights download. |
+| `--enable-embed`          | off     | Stage 12.8 semantic search. ViT-B/32 image encoder + multilingual DistilBERT text encoder (50+ languages: ru / en / de / fr / es / zh / ja / …). First-call cost: ~700 MiB weights download (155 MiB CLIP image + 540 MiB DistilBERT text + 1.5 MiB projection). Cached under `~/.cache/huggingface/hub/`. |
 | `--enable-versions`       | off     | Stage 13.4 per-object versioning. Storage grows monotonically while on; run `/api/gc` to reclaim. |
 
 Both have matching env vars (`HOLOFS_ENABLE_EMBED`,

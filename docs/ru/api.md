@@ -580,7 +580,7 @@ blob_base64}`.
 | Метод + путь                              | Stage  | Что делает |
 |-------------------------------------------|--------|------------|
 | `GET /api/file_metrics?name=<path>`       | 12.7   | JSON-метрики файла: dedup, originality по слоям, top-N соседей по shared shards, энергия слоёв (image/audio), audio bands. |
-| `GET /api/search?q=<text>&band=<...>&limit=N` | 12.8 → 13.3 | CLIP-поиск. `band ∈ {any, coarse, mid, full}`. По умолчанию `any` — лучшая оценка на файл. Требует `--enable-embed`. |
+| `GET /api/search?q=<text>&band=<...>&limit=N` | 12.8 → 13.3 | Семантический поиск. ViT-B/32 image-encoder + multilingual DistilBERT text-encoder (поддерживает ru / en / de / fr / es / zh / ja / 50+ языков). `band ∈ {any, coarse, mid, full}`. По умолчанию `any` — лучшая оценка на файл. Требует `--enable-embed`. |
 | `POST /api/embed_all`                     | 12.8   | Синхронный bulk-индекс: проходит по каталогу, embed-ит всё новое. Возвращает `{new, skipped}`. |
 | `GET /preview/stream/<name>`              | 13.1   | `multipart/x-mixed-replace` поток PNG-кадров от L0 к полному разрешению. Каждый кадр — отдельный part с `X-Holofs-Layer: <N>`. |
 | `GET /api/spotlight.png?name=...&x,y,w,h&mode=<spatial\|coeff>` | 13.2 + 14.1 | ROI-композит. `spatial` — двухпроходная композиция; `coeff` — Haar reverse-map, зануление коэффициентов вне ROI. |
@@ -634,7 +634,7 @@ GC ждёт пока все in-flight writers закончат, и блокир�
 
 | Флаг                  | Default | Назначение |
 |-----------------------|---------|------------|
-| `--enable-embed`      | off     | Stage 12.8 — CLIP semantic search. Первый запрос: скачивает ~155 MiB весов. |
+| `--enable-embed`      | off     | Stage 12.8 — мультилингвальный семантический поиск (50+ языков). Первый запуск качает ~700 MiB весов (155 MiB ViT-B/32 image + 540 MiB DistilBERT-multilingual text + 1.5 MiB projection) в `~/.cache/huggingface/hub/`. |
 | `--enable-versions`   | off     | Stage 13.4 — per-object versions. Storage растёт монотонно пока флаг включён; `POST /api/gc` чистит. |
 
 ### HOLOFSM9 + `ObjectEncoding` (Stage 15.0)
