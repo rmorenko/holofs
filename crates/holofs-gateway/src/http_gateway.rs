@@ -200,6 +200,15 @@ impl Gateway {
         s.root = Some(dir);
     }
 
+    /// Cap the per-object version history at `n` archived versions.
+    /// When more than `n` versions exist for a name, the oldest ones
+    /// are pruned (shards GC'd) at the next `archive_version` call.
+    /// `n = 0` disables the cap (unlimited history).
+    pub async fn set_versions_keep_last(&self, n: usize) {
+        let mut s = self.versions.lock().await;
+        s.keep_last = if n == 0 { None } else { Some(n) };
+    }
+
     /// Whether version history is wired up.
     pub async fn versions_enabled(&self) -> bool {
         self.versions.lock().await.enabled
@@ -3052,6 +3061,11 @@ impl Gateway {
 struct VersionsState {
     enabled: bool,
     root: Option<std::path::PathBuf>,
+    /// Retention cap: when set, `archive_version` prunes the oldest
+    /// versions until at most `keep_last` remain (the newly-archived
+    /// one counts). `None` (default) means unlimited — versions
+    /// accumulate forever until manually deleted via `delete_version`.
+    keep_last: Option<usize>,
 }
 
 /// One row of [`Gateway::list_versions`].
@@ -3115,6 +3129,12 @@ impl Gateway {
         let bytes = manifest.encode();
         std::fs::write(&path, &bytes)
             .map_err(|e| GatewayError::BadRequest(format!("versions write: {e}")))?;
+        // Trim oldest archives if a retention cap is configured. The
+        // prune runs under the same gc_barrier read guard the caller
+        // holds (archive_version is invoked from ingest_bytes /
+        // restore_version, both of which take the guard), so the
+        // purge_orphans_of inside delete_version sees a stable view.
+        self.prune_versions_to_cap(name).await;
         Ok(())
     }
 
@@ -3230,6 +3250,141 @@ impl Gateway {
             restored_cid_hex: restored_cid,
         })
     }
+
+    /// Permanently delete an archived version of `name`. The on-disk
+    /// `.bin` is removed and any shards it uniquely held (not
+    /// referenced by the current catalog entry nor by any other
+    /// surviving archive) are GC'd from the cluster.
+    ///
+    /// Returns `NotFound` if the version id doesn't exist. Returns
+    /// `BadRequest` if versions are disabled.
+    pub async fn delete_version(
+        &self,
+        name: &str,
+        id: &str,
+    ) -> Result<DeleteVersionResult, GatewayError> {
+        // Hold the GC barrier read guard — we mutate the on-disk
+        // archive AND call purge_orphans_of, which walks catalog +
+        // remaining archives. If a full GC ran in the middle it
+        // could double-purge or race the orphan diff.
+        let _gc_guard = self.gc_barrier.read().await;
+        self.delete_version_inner(name, id).await
+    }
+
+    /// Same as `delete_version` but assumes the caller already holds
+    /// the `gc_barrier` read guard. Used internally by
+    /// `prune_versions_to_cap`, which runs underneath the writer's
+    /// barrier in `ingest_bytes` / `restore_version`. Re-acquiring
+    /// `gc_barrier.read()` while a writer is queued can deadlock on
+    /// tokio's RwLock — hence the split.
+    async fn delete_version_inner(
+        &self,
+        name: &str,
+        id: &str,
+    ) -> Result<DeleteVersionResult, GatewayError> {
+        let s = self.versions.lock().await;
+        let Some(root) = s.root.clone() else {
+            return Err(GatewayError::BadRequest(
+                "versions disabled — start with --enable-versions".into(),
+            ));
+        };
+        drop(s);
+        let dir = Self::version_dir_for(&root, name);
+        let path = dir.join(format!("{id}.bin"));
+        if !path.exists() {
+            return Err(GatewayError::NotFound);
+        }
+        // Read + decode the manifest BEFORE deleting so we know
+        // which shard hashes were tied to this version. If decode
+        // fails (corrupt file) we still drop the file — better to
+        // free disk space than leave a poisoned archive entry.
+        let bytes = std::fs::read(&path)
+            .map_err(|e| GatewayError::BadRequest(format!("versions read: {e}")))?;
+        let manifest = Manifest::decode(&bytes).ok();
+        std::fs::remove_file(&path)
+            .map_err(|e| GatewayError::BadRequest(format!("versions delete: {e}")))?;
+        // Best-effort orphan GC. purge_orphans_of walks catalog +
+        // the remaining version archives on disk; the file we just
+        // deleted will not show up in that walk, so its uniquely-
+        // owned shards become the orphan set.
+        let mut shards_purged = 0u64;
+        if let Some(m) = manifest {
+            let live = self.effective_live().await;
+            if !live.is_empty() {
+                // Count owned hashes before purge for the report.
+                let mut owned: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+                for chan in &m.shard_hashes {
+                    for per_l in chan {
+                        for h in per_l {
+                            owned.insert(*h);
+                        }
+                    }
+                }
+                shards_purged = owned.len() as u64;
+                if let Err(e) = self.purge_orphans_of(&m, &live, None).await {
+                    eprintln!("delete_version {name} {id}: orphan purge failed (continuing): {e}");
+                }
+            }
+        }
+        Ok(DeleteVersionResult {
+            name: name.to_string(),
+            id: id.to_string(),
+            shards_owned: shards_purged,
+        })
+    }
+
+    /// Prune the oldest archives beyond `keep_last` for `name`.
+    /// Called from `archive_version` right after a new version file
+    /// is written. No-op when retention is unset or the current
+    /// archive count is at or below the cap.
+    async fn prune_versions_to_cap(&self, name: &str) {
+        let (root, cap) = {
+            let s = self.versions.lock().await;
+            match (s.root.clone(), s.keep_last) {
+                (Some(r), Some(n)) => (r, n),
+                _ => return,
+            }
+        };
+        let dir = Self::version_dir_for(&root, name);
+        if !dir.exists() {
+            return;
+        }
+        // Sort archive files by mtime-encoded timestamp in filename
+        // (`vTS_CID.bin`). Newest first; anything past `cap` gets dropped.
+        let mut entries: Vec<(u64, String)> = Vec::new();
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let Some(file_name) = e.path().file_name().and_then(|s| s.to_str()).map(str::to_string)
+            else {
+                continue;
+            };
+            let Some(stem) = file_name.strip_suffix(".bin") else {
+                continue;
+            };
+            let Some(after_v) = stem.strip_prefix('v') else {
+                continue;
+            };
+            let Some((ts, _)) = after_v.split_once('_') else {
+                continue;
+            };
+            let Ok(ts) = ts.parse::<u64>() else {
+                continue;
+            };
+            entries.push((ts, stem.to_string()));
+        }
+        if entries.len() <= cap {
+            return;
+        }
+        entries.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+        let to_drop: Vec<String> = entries.into_iter().skip(cap).map(|(_, id)| id).collect();
+        for id in to_drop {
+            if let Err(e) = self.delete_version_inner(name, &id).await {
+                eprintln!("prune_versions_to_cap {name} {id}: {e}");
+            }
+        }
+    }
 }
 
 /// Result of [`Gateway::restore_version`].
@@ -3238,6 +3393,17 @@ pub struct RestoreResult {
     pub name: String,
     /// Hex `data_cid` of the now-live manifest after the swap.
     pub restored_cid_hex: String,
+}
+
+/// Result of [`Gateway::delete_version`]. `shards_owned` is the count
+/// of shard hashes the deleted manifest claimed — most of those will
+/// have been GC'd from the cluster (some may have survived if other
+/// archives still reference them).
+#[derive(Debug, Clone)]
+pub struct DeleteVersionResult {
+    pub name: String,
+    pub id: String,
+    pub shards_owned: u64,
 }
 
 /// Stage 14.0: per-node breakdown of one GC pass.

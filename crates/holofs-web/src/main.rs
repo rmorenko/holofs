@@ -149,6 +149,10 @@ async fn main() {
         .route("/api/spotlight.png", get(handlers::spotlight_png))
         // Stage 13.4: form-friendly version restore.
         .route("/api/restore", post(handlers::restore_version_form))
+        // Stage 15.x: form-friendly version deletion (per-row "delete"
+        // button on /versions/<name>). Removes the .bin archive and
+        // GCs any shards it uniquely held.
+        .route("/api/versions/delete", post(handlers::delete_version_form))
         // Stage 14.0: orphan-shard garbage collector.
         .route("/api/gc", post(handlers::gc_orphans))
         .route("/api/mv", post(handlers::mv))

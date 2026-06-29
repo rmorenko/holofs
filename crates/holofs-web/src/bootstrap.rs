@@ -299,7 +299,20 @@ pub async fn bootstrap_cluster(
     if config.enable_versions {
         let versions_root = config.storage.clone();
         gateway.enable_versions(versions_root.clone()).await;
-        info!(?versions_root, "version history enabled");
+        // Optional retention cap. `HOLOFS_VERSIONS_KEEP_LAST=N` trims
+        // each name's archive to the N most-recent versions on every
+        // PUT. Unset / 0 → unlimited history (manual /api/versions/delete
+        // remains the only way to free shards).
+        let keep_last: usize = std::env::var("HOLOFS_VERSIONS_KEEP_LAST")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if keep_last > 0 {
+            gateway.set_versions_keep_last(keep_last).await;
+            info!(?versions_root, keep_last, "version history enabled (retention capped)");
+        } else {
+            info!(?versions_root, "version history enabled");
+        }
     }
 
     let interval_secs: u64 = std::env::var("HOLOFS_MONITOR_INTERVAL")

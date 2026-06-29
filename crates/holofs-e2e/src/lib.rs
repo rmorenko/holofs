@@ -62,6 +62,11 @@ pub struct HarnessConfig {
     /// Quiet the gateway's background scanners — they're noisy and
     /// not the system under test for any E2E scenario.
     pub quiet_background_scanners: bool,
+    /// Extra `(key, value)` env vars to set on the spawned gateway
+    /// process. Used to flip env-knob features (e.g.
+    /// `HOLOFS_VERSIONS_KEEP_LAST`) in a single test without
+    /// polluting the process-wide env of the test runner.
+    pub extra_env: Vec<(String, String)>,
 }
 
 impl Default for HarnessConfig {
@@ -74,6 +79,7 @@ impl Default for HarnessConfig {
                 .unwrap_or_else(|_| "http://localhost:9515".to_string()),
             window: (1280, 900),
             quiet_background_scanners: true,
+            extra_env: Vec::new(),
         }
     }
 }
@@ -465,6 +471,9 @@ fn spawn_gateway(
         // unrelated noise and removes one source of network races.
         cmd.env("HOLOFS_MONITOR_INTERVAL", "3600");
         cmd.env("HOLOFS_AUDIT_INTERVAL", "3600");
+    }
+    for (k, v) in &config.extra_env {
+        cmd.env(k, v);
     }
     if std::env::var("HOLOFS_E2E_VERBOSE_GATEWAY").is_err() {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());

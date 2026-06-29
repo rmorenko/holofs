@@ -735,6 +735,29 @@ pub async fn restore_version_form(
     }
 }
 
+/// `POST /api/versions/delete` — form-friendly version deletion.
+/// Body: `name=<path>&id=<version_id>&return_to=<url>`. On success
+/// 303-redirects to `return_to` (defaults to `/versions/<name>`).
+/// The deleted version's uniquely-owned shards are GC'd from the
+/// cluster in the same call.
+pub async fn delete_version_form(
+    Extension(gw): Extension<Arc<Gateway>>,
+    body: String,
+) -> Response {
+    let Some(name) = parse_urlencoded_field(&body, "name") else {
+        return bad_request("missing 'name'");
+    };
+    let Some(id) = parse_urlencoded_field(&body, "id") else {
+        return bad_request("missing 'id'");
+    };
+    let return_to = parse_urlencoded_field(&body, "return_to")
+        .unwrap_or_else(|| format!("/versions/{}", url_encode_simple(&name)));
+    match gw.delete_version(&name, &id).await {
+        Ok(_) => redirect_to(&return_to),
+        Err(e) => error_to_response(e),
+    }
+}
+
 /// `POST /api/embed_all` — kick off a one-shot bulk embed of every
 /// image in the catalog that isn't in `embeddings.bin` yet. Synchronous
 /// — the request hangs until the walk finishes — because the typical

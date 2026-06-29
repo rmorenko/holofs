@@ -155,10 +155,15 @@ fn VersionsBody(data: VersionListView) -> impl IntoView {
                         } else {
                             "-".into()
                         };
-                        let confirm_js = format!(
+                        let confirm_restore = format!(
                             "return confirm('{}');",
                             t!("versions.restore_confirm").replace('\'', "\\'")
                         );
+                        let confirm_delete = format!(
+                            "return confirm('{}');",
+                            t!("versions.delete_confirm").replace('\'', "\\'")
+                        );
+                        let id_for_delete = v.id.clone();
                         view! {
                             <tr>
                                 <td class="name"><code>{when}</code></td>
@@ -170,12 +175,25 @@ fn VersionsBody(data: VersionListView) -> impl IntoView {
                                         method="POST"
                                         action="/api/restore"
                                         class="inline-form"
-                                        onsubmit=confirm_js
+                                        onsubmit=confirm_restore
                                     >
                                         <input type="hidden" name="name" value=name_for_form.clone()/>
                                         <input type="hidden" name="id" value=v.id/>
                                         <button type="submit" class="link-btn">
                                             {t!("versions.action.restore")}
+                                        </button>
+                                    </form>
+                                    " · "
+                                    <form
+                                        method="POST"
+                                        action="/api/versions/delete"
+                                        class="inline-form"
+                                        onsubmit=confirm_delete
+                                    >
+                                        <input type="hidden" name="name" value=name_for_form.clone()/>
+                                        <input type="hidden" name="id" value=id_for_delete/>
+                                        <button type="submit" class="link-btn bad">
+                                            {t!("versions.action.delete")}
                                         </button>
                                     </form>
                                 </td>

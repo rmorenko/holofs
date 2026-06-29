@@ -1419,6 +1419,14 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
          "Diese Version wiederherstellen? Das aktuelle Manifest wird zuerst archiviert.",
          "Restaurer cette version ? Le manifeste actuel sera d'abord archivé.",
          "¿Restaurar esta versión? El manifiesto actual se archivará primero."]),
+    ("versions.action.delete",
+        ["delete", "удалить", "löschen", "supprimer", "eliminar"]),
+    ("versions.delete_confirm",
+        ["Permanently delete this version? Its uniquely-held shards will be garbage-collected.",
+         "Удалить эту версию навсегда? Её уникальные шарды будут собраны GC.",
+         "Diese Version endgültig löschen? Ihre exklusiv gehaltenen Shards werden per GC entfernt.",
+         "Supprimer cette version définitivement ? Ses shards uniques seront récupérés par le GC.",
+         "¿Eliminar esta versión permanentemente? Sus shards exclusivos se recolectarán por GC."]),
 
     // ---- Stage 13.2: /spotlight ROI page -------------------------------
     ("spotlight.link_label",
