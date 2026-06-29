@@ -294,4 +294,127 @@ mod tests {
         assert!(leaf2.cert_pem.contains("BEGIN CERTIFICATE"));
         assert_ne!(leaf2.cert_pem, mat.leaf.cert_pem);
     }
+
+    // --- server_name_for ----------------------------------------------------
+
+    #[test]
+    fn server_name_for_ipv4_yields_ip_address_sni() {
+        let n = server_name_for("127.0.0.1:9000").unwrap();
+        // The rustls API doesn't expose the kind directly; we Debug-stringify
+        // and confirm IpAddress(...) is the discriminant.
+        assert!(
+            format!("{n:?}").contains("IpAddress"),
+            "expected IpAddress SNI, got {n:?}"
+        );
+    }
+
+    #[test]
+    fn server_name_for_dns_name_yields_dns_sni() {
+        let n = server_name_for("node-7.holofs.test:9000").unwrap();
+        assert!(
+            format!("{n:?}").contains("DnsName"),
+            "expected DnsName SNI, got {n:?}"
+        );
+    }
+
+    #[test]
+    fn server_name_for_handles_missing_port() {
+        // `discover_live_with_whitelist` may hand us a bare hostname.
+        // The fallback should still build a sensible SNI.
+        let n = server_name_for("localhost").unwrap();
+        assert!(format!("{n:?}").contains("DnsName"));
+    }
+
+    #[test]
+    fn server_name_for_rejects_invalid_dns_label() {
+        // A space is not legal in a DNS hostname; rustls rejects it.
+        assert!(server_name_for("not a host:9000").is_err());
+    }
+
+    // --- TlsMaterial::write_to_dir + load round-trip ------------------------
+
+    #[test]
+    fn write_to_dir_then_load_roundtrip() {
+        let (mat, _signer) =
+            TlsMaterial::self_signed("rt-node", &["127.0.0.1".into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        mat.write_to_dir(dir.path(), "rt-node").unwrap();
+        // Files must exist on disk.
+        for f in ["ca.crt", "ca.key", "rt-node.crt", "rt-node.key"] {
+            assert!(dir.path().join(f).exists(), "missing {f}");
+        }
+        // Load round-trip: cert and key should parse back as PEM.
+        let loaded = TlsMaterial::load(
+            &dir.path().join("rt-node.crt"),
+            &dir.path().join("rt-node.key"),
+            &dir.path().join("ca.crt"),
+            Some(&dir.path().join("ca.key")),
+        )
+        .unwrap();
+        assert_eq!(loaded.leaf.cert_pem, mat.leaf.cert_pem);
+        assert_eq!(loaded.ca.ca_cert_pem, mat.ca.ca_cert_pem);
+    }
+
+    #[test]
+    fn load_without_ca_key_succeeds_for_verifier_only_use() {
+        let (mat, _signer) =
+            TlsMaterial::self_signed("vonly", &["127.0.0.1".into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        mat.write_to_dir(dir.path(), "vonly").unwrap();
+        // Pass `ca_key = None` — supported for runtime mTLS verifiers.
+        let loaded = TlsMaterial::load(
+            &dir.path().join("vonly.crt"),
+            &dir.path().join("vonly.key"),
+            &dir.path().join("ca.crt"),
+            None,
+        )
+        .unwrap();
+        assert!(loaded.ca.ca_key_pem.is_empty());
+    }
+
+    #[test]
+    fn load_from_missing_path_returns_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.crt");
+        let res = TlsMaterial::load(&missing, &missing, &missing, None);
+        assert!(res.is_err());
+    }
+
+    // --- PEM parser error surfaces ----------------------------------------
+
+    #[test]
+    fn parse_certs_on_input_without_pem_markers_returns_empty_vec() {
+        // The iterator only yields blocks enclosed by BEGIN/END markers.
+        // Garbage with no markers produces Ok(empty), not Err — that's
+        // the actual contract the callers depend on, so pin it.
+        let res = parse_certs("not a certificate at all").unwrap();
+        assert!(res.is_empty(), "expected no certs, got {} block(s)", res.len());
+    }
+
+    #[test]
+    fn parse_certs_rejects_malformed_pem_block() {
+        // A BEGIN/END pair with non-base64 garbage between them — the
+        // PEM decoder errors out with a real Pem variant.
+        let bad = "-----BEGIN CERTIFICATE-----\n\
+                   not base64 at all!@#$%\n\
+                   -----END CERTIFICATE-----\n";
+        let res = parse_certs(bad);
+        assert!(matches!(res, Err(TlsBuildError::Pem(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn parse_private_key_rejects_garbage_pem() {
+        let res = parse_private_key("definitely not a private key");
+        assert!(matches!(res, Err(TlsBuildError::Pem(_))));
+    }
+
+    #[test]
+    fn tls_build_error_display_includes_message() {
+        let pem = TlsBuildError::Pem("bad header".into());
+        let other = TlsBuildError::Other("rustls said no".into());
+        assert!(format!("{pem}").contains("bad header"));
+        assert!(format!("{other}").contains("rustls said no"));
+        // Debug also works (auto-derived).
+        let _ = format!("{pem:?}");
+    }
 }

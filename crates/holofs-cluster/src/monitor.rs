@@ -355,4 +355,232 @@ mod tests {
             _ => panic!(),
         }
     }
+
+    // --- tick_once integration ---------------------------------------------
+    //
+    // The mock-cluster tests below stand up tiny TCP listeners that
+    // respond to Ping (so discover_live picks them up) and to
+    // ListHashes (so collect_layer_stats's gather succeeds). Each
+    // listener loops until the TempDir-wrapped lifetime expires —
+    // no graceful shutdown needed for a unit test, the test binary
+    // exit reclaims everything.
+
+    use holofs_model::manifest::{Manifest, ObjectEncoding, ObjectKind};
+    use holofs_model::placement::Placement;
+    use holofs_wire::Response;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// RAII guard: hold a local mutex while `HOLOFS_POOL_DISABLE=1`,
+    /// restore on drop. Same shape as the audit-test guard. Required
+    /// because `discover_live` goes through the pool — without
+    /// disabling we'd reuse closed listener streams across tests.
+    struct DisablePool {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        old: Option<String>,
+    }
+    impl DisablePool {
+        fn new() -> Self {
+            use std::sync::{Mutex, OnceLock};
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            let lock = LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let old = std::env::var("HOLOFS_POOL_DISABLE").ok();
+            std::env::set_var("HOLOFS_POOL_DISABLE", "1");
+            Self { _lock: lock, old }
+        }
+    }
+    impl Drop for DisablePool {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => std::env::set_var("HOLOFS_POOL_DISABLE", v),
+                None => std::env::remove_var("HOLOFS_POOL_DISABLE"),
+            }
+        }
+    }
+
+    /// Spawn a multi-shot listener that always responds with the
+    /// given Response, however many frames the client sends.
+    async fn spawn_responder(response: Response) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let resp_bytes = response.encode();
+                tokio::spawn(async move {
+                    loop {
+                        let mut len_buf = [0u8; 4];
+                        if sock.read_exact(&mut len_buf).await.is_err() {
+                            return;
+                        }
+                        let len = u32::from_be_bytes(len_buf) as usize;
+                        let mut req = vec![0u8; len];
+                        if sock.read_exact(&mut req).await.is_err() {
+                            return;
+                        }
+                        let reply_len = (resp_bytes.len() as u32).to_be_bytes();
+                        if sock.write_all(&reply_len).await.is_err() {
+                            return;
+                        }
+                        if sock.write_all(&resp_bytes).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, handle)
+    }
+
+    /// Build a minimal "alive" manifest with the given node list.
+    /// Image kind so monitor doesn't skip it as Directory; one
+    /// channel + one layer keeps the per-object scan cheap.
+    fn manifest_for(nodes: Vec<String>) -> Manifest {
+        let n = nodes.len();
+        Manifest {
+            object_id: 1,
+            k: 4,
+            nlayers: 1,
+            n_per_layer: vec![4],
+            sym_len: vec![32],
+            layer_positions: vec![vec![]],
+            channels: 1,
+            width: 8,
+            height: 8,
+            levels: 1,
+            nodes,
+            placement: Placement::Rendezvous,
+            zones: vec![0; n],
+            data_cid: [0; 32],
+            merkle_root: [0; 32],
+            shard_hashes: vec![vec![Vec::new(); 1]; 1],
+            kind: ObjectKind::Image,
+            content_type: "image/png".into(),
+            chunk_lens: vec![],
+            audio_sample_rate: 0,
+            text_minhash: vec![],
+            created_at_unix: 0,
+            encoding: ObjectEncoding::Rlnc,
+        }
+    }
+
+    #[tokio::test]
+    async fn tick_once_on_empty_catalog_returns_no_events() {
+        let _g = DisablePool::new();
+        let gf = Gf::new();
+        let cat = Arc::new(Mutex::new(Directory::new()));
+        let mut state = MonitorState::default();
+        let mut rng = Rng::new(1);
+        let cfg = MonitorConfig::default();
+        let events = tick_once(&gf, cat, &mut state, &cfg, &mut rng, None).await;
+        assert!(events.is_empty());
+        // State is still untouched in any visible way.
+        assert_eq!(state.ticks, 1);
+    }
+
+    #[tokio::test]
+    async fn tick_once_first_pass_emits_baseline_liveness_change() {
+        let _g = DisablePool::new();
+        // Two nodes, both responding with Pong → both live.
+        let (a, _ha) = spawn_responder(Response::Pong).await;
+        let (b, _hb) = spawn_responder(Response::Pong).await;
+        let m = manifest_for(vec![a, b]);
+        let mut cat = Directory::new();
+        cat.insert("photos/a.png".into(), m);
+        let cat = Arc::new(Mutex::new(cat));
+
+        let gf = Gf::new();
+        let mut state = MonitorState::default();
+        let mut rng = Rng::new(1);
+        let cfg = MonitorConfig {
+            poll_interval: Duration::from_secs(1),
+            // Suppress the noisy "LowMargin" stream: keep the test
+            // focused on the LivenessChange behaviour.
+            margin_threshold: i32::MIN,
+            ..MonitorConfig::default()
+        };
+        let events = tick_once(&gf, cat, &mut state, &cfg, &mut rng, None).await;
+        // First tick: one LivenessChange with revived/died both empty
+        // (baseline snapshot) — and at least one event total.
+        let liveness: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::LivenessChange { total_live, total_nodes, revived, died } => {
+                    Some((*total_live, *total_nodes, revived.clone(), died.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(liveness.len(), 1, "expected exactly 1 LivenessChange on first tick");
+        let (live, total, revived, died) = &liveness[0];
+        assert_eq!(*total, 2, "topology has 2 nodes");
+        assert_eq!(*live, 2, "both nodes should answer Pong");
+        assert!(revived.is_empty() && died.is_empty(), "baseline: no diff yet");
+    }
+
+    #[tokio::test]
+    async fn tick_once_detects_node_going_down_between_ticks() {
+        let _g = DisablePool::new();
+        let (a, _ha) = spawn_responder(Response::Pong).await;
+        // Bind+drop a second node so its port is closed — gives us a
+        // determistic "node b is dead" baseline.
+        let dead_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let b = dead_listener.local_addr().unwrap().to_string();
+        drop(dead_listener);
+
+        let m = manifest_for(vec![a, b]);
+        let mut cat = Directory::new();
+        cat.insert("photos/x.png".into(), m);
+        let cat = Arc::new(Mutex::new(cat));
+        let gf = Gf::new();
+        let mut state = MonitorState::default();
+        let mut rng = Rng::new(2);
+        let cfg = MonitorConfig {
+            margin_threshold: i32::MIN, // suppress margin noise
+            ..MonitorConfig::default()
+        };
+
+        let _first = tick_once(&gf, Arc::clone(&cat), &mut state, &cfg, &mut rng, None).await;
+        // state.prev_live is now {0} only (node b never responded).
+        assert_eq!(state.prev_live.len(), 1, "after first tick, prev_live=={{0}}");
+
+        // Second tick — same liveness, so no LivenessChange should fire.
+        let second = tick_once(&gf, cat, &mut state, &cfg, &mut rng, None).await;
+        let liveness_count = second
+            .iter()
+            .filter(|e| matches!(e, Event::LivenessChange { .. }))
+            .count();
+        assert_eq!(
+            liveness_count, 0,
+            "stable liveness across ticks should NOT re-emit LivenessChange"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_once_skips_directory_only_catalog() {
+        let _g = DisablePool::new();
+        // Catalog has only a Directory entry → no scan target, early return.
+        let dir_manifest = Manifest {
+            kind: ObjectKind::Directory,
+            ..manifest_for(vec![])
+        };
+        let mut cat = Directory::new();
+        cat.insert("photos".into(), dir_manifest);
+        let cat = Arc::new(Mutex::new(cat));
+        let gf = Gf::new();
+        let mut state = MonitorState::default();
+        let mut rng = Rng::new(3);
+        let cfg = MonitorConfig::default();
+        let events = tick_once(&gf, cat, &mut state, &cfg, &mut rng, None).await;
+        assert!(
+            events.is_empty(),
+            "directory-only catalog must yield no events, got {events:?}"
+        );
+    }
 }

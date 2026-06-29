@@ -18,5 +18,9 @@ rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rcgen = { workspace = true }
 
+[dev-dependencies]
+# tls.rs round-trip tests write certs to a TempDir and read them back.
+tempfile = "3"
+
 [lints]
 workspace = true
