@@ -41,6 +41,7 @@ use thirtyfour::prelude::*;
 pub mod fixtures;
 
 /// Configuration knobs for a single `TestHarness` instance.
+#[derive(Clone)]
 pub struct HarnessConfig {
     /// Hand the gateway `--enable-embed`. Note: the first
     /// `/api/search` call downloads ~155 MiB of CLIP weights from
@@ -99,6 +100,10 @@ pub struct TestHarness {
     gateway: GatewayProcess,
     _storage: TempDir,
     http: reqwest::Client,
+    /// Cached config so `restart()` can re-spawn the gateway with
+    /// the same flags. Cloning is cheap — a few bools + the env
+    /// extras vector.
+    config: HarnessConfig,
 }
 
 impl TestHarness {
@@ -130,6 +135,7 @@ impl TestHarness {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()?;
+        let cached_config = config.clone();
         Ok(Self {
             base_url,
             driver,
@@ -137,7 +143,31 @@ impl TestHarness {
             gateway,
             _storage: storage,
             http,
+            config: cached_config,
         })
+    }
+
+    /// Kill the gateway child process and respawn it against the SAME
+    /// on-disk storage (TempDir is kept) with the SAME flags. Used to
+    /// test persistence — anything the gateway flushed to disk before
+    /// the restart should re-appear after.
+    ///
+    /// The new gateway binds a *different* free TCP port to dodge
+    /// `TIME_WAIT` on the old one, so `self.base_url` is rewritten.
+    /// The WebDriver session is untouched (the browser-side state is
+    /// orthogonal to gateway lifecycle).
+    pub async fn restart(&mut self) -> Result<()> {
+        self.gateway.kill_and_wait();
+        let new_port = pick_free_port()
+            .context("could not find a free TCP port for the restarted gateway")?;
+        let new_gateway = spawn_gateway(new_port, self._storage.path(), &self.config)
+            .context("respawning holofs-web")?;
+        self.base_url = format!("http://127.0.0.1:{new_port}");
+        wait_for_gateway(&self.base_url)
+            .await
+            .context("restarted gateway never became reachable")?;
+        self.gateway = new_gateway;
+        Ok(())
     }
 
     /// Absolute URL for a path on the test gateway.
