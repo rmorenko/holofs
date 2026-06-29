@@ -183,7 +183,9 @@ async fn placement_lands_shards_only_on_chosen_node() {
                     layer: l,
                     shard_idx: idx,
                 };
-                expected[place(manifest.placement, key, 4, &live)] += 1;
+                let node =
+                    place(manifest.placement, key, 4, &live).expect("non-empty live in test");
+                expected[node] += 1;
             }
         }
     }
@@ -512,7 +514,9 @@ async fn audit_detects_silent_deletion_and_tanks_reputation() {
     let mut hits_on_node3 = 0usize;
     let mut misses = 0usize;
     for (idx, hash) in manifest.shard_hashes[0][0].iter().enumerate() {
-        let node = manifest.place_shard(0, 0, idx as u32, &live);
+        let node = manifest
+            .place_shard(0, 0, idx as u32, &live)
+            .expect("live set is non-empty in this test");
         if node != 3 {
             continue;
         }
@@ -540,7 +544,9 @@ async fn audit_detects_silent_deletion_and_tanks_reputation() {
 
     // Node 5 (alive) — PASS, score stays near 1.
     for (idx, hash) in manifest.shard_hashes[0][0].iter().enumerate() {
-        let node = manifest.place_shard(0, 0, idx as u32, &live);
+        let node = manifest
+            .place_shard(0, 0, idx as u32, &live)
+            .expect("live set is non-empty in this test");
         if node != 5 {
             continue;
         }
