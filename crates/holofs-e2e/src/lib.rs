@@ -446,6 +446,42 @@ struct GatewayProcess {
 impl GatewayProcess {
     fn kill_and_wait(&mut self) {
         if let Some(mut c) = self.child.take() {
+            // Coverage-instrumented binaries write their .profraw file
+            // in an atexit handler — SIGKILL skips it, so a SIGKILL'd
+            // gateway leaves no profile data behind. Send SIGTERM first,
+            // give the process up to 500 ms to flush, and only fall back
+            // to SIGKILL if it doesn't exit. Non-instrumented release
+            // builds shut down on SIGTERM too (axum graceful shutdown),
+            // so this path costs at most a few extra ms either way.
+            #[cfg(unix)]
+            {
+                // The workspace forbids unsafe, so libc::kill is off
+                // the table. Shell out to /bin/kill -TERM <pid>
+                // instead — same effect, no FFI. Best-effort; any
+                // failure is silently absorbed and the SIGKILL
+                // fallback below covers it.
+                let _ = std::process::Command::new("/bin/kill")
+                    .arg("-TERM")
+                    .arg(c.id().to_string())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = c.kill();
+            }
+            // Poll up to 500 ms for clean exit.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            loop {
+                match c.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if std::time::Instant::now() >= deadline => break,
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+                    Err(_) => break,
+                }
+            }
+            // Still running — fall back to SIGKILL.
             let _ = c.kill();
             let _ = c.wait();
         }
