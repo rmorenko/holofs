@@ -111,6 +111,81 @@ fn solid_png(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
     out
 }
 
+/// A 0.25s mono 16-bit 8 kHz PCM WAV. Deterministic sine-ish sweep
+/// so the audio decoder (`symphonia`) accepts it and the per-sample
+/// values are stable across runs. ~4 KB on the wire — small enough
+/// not to dominate the suite but big enough that a partial decode
+/// is observably different from a full one.
+pub fn tiny_wav() -> &'static [u8] {
+    static WAV: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    WAV.get_or_init(|| {
+        let sample_rate: u32 = 8000;
+        let n_samples: usize = (sample_rate / 4) as usize; // 0.25 s
+        let bits_per_sample: u16 = 16;
+        let channels: u16 = 1;
+        let byte_rate = sample_rate * u32::from(channels) * u32::from(bits_per_sample) / 8;
+        let block_align = channels * bits_per_sample / 8;
+        let data_size = (n_samples * usize::from(block_align)) as u32;
+        let chunk_size = 36 + data_size;
+
+        let mut samples: Vec<u8> = Vec::with_capacity(n_samples * 2);
+        // Cheap deterministic sine substitute — half-amplitude
+        // triangle wave at ~440 Hz.
+        let period = (sample_rate / 440) as usize;
+        for i in 0..n_samples {
+            let phase = (i % period) as i32;
+            let half = (period / 2) as i32;
+            let raw = if phase < half {
+                phase * 200
+            } else {
+                (period as i32 - phase) * 200
+            };
+            let v = (raw - 5_000) as i16;
+            samples.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut out = Vec::with_capacity(44 + samples.len());
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&chunk_size.to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&channels.to_le_bytes());
+        out.extend_from_slice(&sample_rate.to_le_bytes());
+        out.extend_from_slice(&byte_rate.to_le_bytes());
+        out.extend_from_slice(&block_align.to_le_bytes());
+        out.extend_from_slice(&bits_per_sample.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_size.to_le_bytes());
+        out.extend_from_slice(&samples);
+        out
+    })
+}
+
+/// A small opaque blob — not a valid image, not a valid WAV, not
+/// valid UTF-8. The gateway's `put_any` falls through every kind
+/// check and lands on the opaque branch, preserving the bytes byte-
+/// for-byte. Used for the round-trip preservation tests in Batch F.
+pub fn tiny_opaque() -> &'static [u8] {
+    static BLOB: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BLOB.get_or_init(|| {
+        // Leading bytes that don't match any known magic; interior
+        // 0xFE bytes guarantee the body is not valid UTF-8 (those
+        // bytes never occur in well-formed UTF-8). Length picked so
+        // it crosses the K=16-shard threshold comfortably.
+        let mut out: Vec<u8> = Vec::with_capacity(2048);
+        for i in 0..2048u32 {
+            out.push(((i.wrapping_mul(0x9E37_79B1)) ^ 0xFE) as u8);
+        }
+        // Tag the very first bytes so a debugger can spot them.
+        out[0] = 0xCA;
+        out[1] = 0xFE;
+        out[2] = 0xBA;
+        out[3] = 0xBE;
+        out
+    })
+}
+
 fn write_chunk(buf: &mut Vec<u8>, tag: [u8; 4], data: &[u8]) {
     buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
     let crc_start = buf.len();
