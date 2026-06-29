@@ -264,24 +264,30 @@ pub fn clear() {
     }
 }
 
+/// Shared mutex serialising every test in this crate that touches
+/// the global pool cache or the env vars driving it. Pool tests and
+/// the RPC-level tests in `client::rpc_tests` both acquire it so
+/// they never overlap — without serialisation, a `HOLOFS_POOL_DISABLE=1`
+/// set by one test bleeds into a parallel test asserting reuse.
+#[cfg(test)]
+pub(crate) fn test_pool_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| StdMutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
-    use std::sync::Mutex as StdMutex;
 
     use holofs_storage::node_service::spawn_node;
     use holofs_wire::{read_frame, write_frame, Request, Response};
 
-    /// All pool tests touch process-wide state (env vars + the global
-    /// pool cache), so they must run one at a time even when the test
-    /// runner uses multiple threads. This mutex serialises them
-    /// without forcing `--test-threads=1` on every cargo invocation.
     fn pool_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| StdMutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        super::test_pool_lock()
     }
 
     /// Restores a process env var on drop, even if the test panics.

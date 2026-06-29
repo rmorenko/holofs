@@ -1247,3 +1247,191 @@ mod error_variant_tests {
         assert!(!e.is_timeout());
     }
 }
+
+#[cfg(test)]
+mod rpc_tests {
+    //! Exercise the wire-touching helpers (list_node_hashes /
+    //! purge_node_by_hash / discover_live / auth_check) against
+    //! tiny in-process mock servers. Same pattern as the auditor
+    //! tests in holofs-cluster.
+
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Spin up an ephemeral TCP listener that replies to every
+    /// accepted connection with the same `response`, until the
+    /// returned handle is dropped (which closes the listener).
+    async fn spawn_multi_shot_node(response: Response) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let resp_bytes = response.encode();
+                tokio::spawn(async move {
+                    // Loop on the same socket — the pool may keep it
+                    // alive across calls.
+                    loop {
+                        let mut len_buf = [0u8; 4];
+                        if sock.read_exact(&mut len_buf).await.is_err() {
+                            return;
+                        }
+                        let len = u32::from_be_bytes(len_buf) as usize;
+                        let mut req = vec![0u8; len];
+                        if sock.read_exact(&mut req).await.is_err() {
+                            return;
+                        }
+                        let reply_len = (resp_bytes.len() as u32).to_be_bytes();
+                        if sock.write_all(&reply_len).await.is_err() {
+                            return;
+                        }
+                        if sock.write_all(&resp_bytes).await.is_err() {
+                            return;
+                        }
+                        let _ = sock.flush().await;
+                    }
+                });
+            }
+        });
+        (addr, handle)
+    }
+
+    /// RAII guard combining (a) the crate-wide pool test mutex
+    /// (serialises with `pool::tests`) and (b) `HOLOFS_POOL_DISABLE=1`
+    /// scoped to the test. The combination prevents this test's env
+    /// var from bleeding into a parallel pool-reuse test.
+    struct DisablePool {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        old: Option<String>,
+    }
+    impl DisablePool {
+        fn new() -> Self {
+            let lock = crate::pool::test_pool_lock();
+            let old = std::env::var("HOLOFS_POOL_DISABLE").ok();
+            std::env::set_var("HOLOFS_POOL_DISABLE", "1");
+            Self { _lock: lock, old }
+        }
+    }
+    impl Drop for DisablePool {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => std::env::set_var("HOLOFS_POOL_DISABLE", v),
+                None => std::env::remove_var("HOLOFS_POOL_DISABLE"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn list_node_hashes_decodes_response() {
+        let _g = DisablePool::new();
+        let payload = vec![[0x11u8; 32], [0x22u8; 32]];
+        let (addr, _h) = spawn_multi_shot_node(Response::Hashes(payload.clone())).await;
+        let got = list_node_hashes(&addr).await.unwrap();
+        assert_eq!(got, payload);
+    }
+
+    #[tokio::test]
+    async fn list_node_hashes_surfaces_remote_error() {
+        let _g = DisablePool::new();
+        let (addr, _h) = spawn_multi_shot_node(Response::Error("disk full".into())).await;
+        let err = list_node_hashes(&addr).await.unwrap_err();
+        assert!(matches!(err, ClientError::RemoteError(s) if s == "disk full"));
+    }
+
+    #[tokio::test]
+    async fn list_node_hashes_unexpected_response_surfaces_typed_error() {
+        let _g = DisablePool::new();
+        let (addr, _h) = spawn_multi_shot_node(Response::Pong).await;
+        let err = list_node_hashes(&addr).await.unwrap_err();
+        assert!(matches!(err, ClientError::UnexpectedResponse { .. }));
+    }
+
+    #[tokio::test]
+    async fn purge_node_by_hash_acks_successfully() {
+        let _g = DisablePool::new();
+        let (addr, _h) = spawn_multi_shot_node(Response::Ack).await;
+        purge_node_by_hash(&addr, vec![[0xAB; 32]]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discover_live_picks_only_pong_nodes() {
+        let _g = DisablePool::new();
+        // One node responds with Pong, one with Error. Only the first
+        // should land in the live set.
+        let (good_addr, _g) = spawn_multi_shot_node(Response::Pong).await;
+        let (bad_addr, _b) = spawn_multi_shot_node(Response::Error("oh no".into())).await;
+        // Spoof a manifest with just these two nodes.
+        let mut m = Manifest {
+            object_id: 0,
+            k: 4,
+            nlayers: 1,
+            n_per_layer: vec![4],
+            sym_len: vec![32],
+            layer_positions: vec![vec![]],
+            channels: 1,
+            width: 8,
+            height: 8,
+            levels: 1,
+            nodes: vec![good_addr.clone(), bad_addr.clone()],
+            placement: holofs_model::placement::Placement::Rendezvous,
+            zones: vec![0, 0],
+            data_cid: [0; 32],
+            merkle_root: [0; 32],
+            shard_hashes: vec![vec![Vec::new(); 1]; 1],
+            kind: holofs_model::manifest::ObjectKind::Image,
+            content_type: "image/png".into(),
+            chunk_lens: vec![],
+            audio_sample_rate: 0,
+            text_minhash: vec![],
+            created_at_unix: 0,
+            encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
+        };
+        // Tag for ignored warnings on read-only fields.
+        m.object_id = 1;
+        let live = discover_live(&m).await;
+        assert_eq!(live, vec![0], "expected only the Pong-responding node");
+    }
+
+    #[tokio::test]
+    async fn discover_live_returns_empty_when_all_unreachable() {
+        let _g = DisablePool::new();
+        // Bind+drop to get two closed ports.
+        let l1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let a1 = l1.local_addr().unwrap().to_string();
+        let l2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let a2 = l2.local_addr().unwrap().to_string();
+        drop(l1);
+        drop(l2);
+        let m = Manifest {
+            object_id: 0,
+            k: 4,
+            nlayers: 1,
+            n_per_layer: vec![4],
+            sym_len: vec![32],
+            layer_positions: vec![vec![]],
+            channels: 1,
+            width: 8,
+            height: 8,
+            levels: 1,
+            nodes: vec![a1, a2],
+            placement: holofs_model::placement::Placement::Rendezvous,
+            zones: vec![0, 0],
+            data_cid: [0; 32],
+            merkle_root: [0; 32],
+            shard_hashes: vec![vec![Vec::new(); 1]; 1],
+            kind: holofs_model::manifest::ObjectKind::Image,
+            content_type: "image/png".into(),
+            chunk_lens: vec![],
+            audio_sample_rate: 0,
+            text_minhash: vec![],
+            created_at_unix: 0,
+            encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
+        };
+        let live = discover_live(&m).await;
+        assert!(live.is_empty());
+    }
+}

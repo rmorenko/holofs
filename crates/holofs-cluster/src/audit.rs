@@ -281,6 +281,9 @@ fn _link_error() -> Option<ClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use holofs_core::rlnc::Shard;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn config_defaults_are_sane() {
@@ -301,5 +304,147 @@ mod tests {
         ] {
             assert!(!o.is_success());
         }
+    }
+
+    /// Spawn a tiny TCP server on an ephemeral port that responds to
+    /// the first incoming wire request with `response`. Returns the
+    /// bound address ("127.0.0.1:NNNN") and the JoinHandle (kept so
+    /// the listener stays alive until the test ends).
+    ///
+    /// Lives in tests/ rather than the public surface because the
+    /// auditor is the only consumer right now — gateway/monitor tests
+    /// will fork or upgrade this when they need richer behaviours.
+    async fn spawn_one_shot_node(response: Response) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let handle = tokio::spawn(async move {
+            // Accept exactly one connection. Inline the framing dance
+            // — no TLS for the test, raw u32 length prefix.
+            let (mut sock, _) = match listener.accept().await {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            let mut len_buf = [0u8; 4];
+            if sock.read_exact(&mut len_buf).await.is_err() {
+                return;
+            }
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut req = vec![0u8; len];
+            if sock.read_exact(&mut req).await.is_err() {
+                return;
+            }
+            // Don't bother decoding — we always reply with the
+            // configured response. The auditor cares about what comes
+            // BACK on the wire.
+            let bytes = response.encode();
+            let reply_len = (bytes.len() as u32).to_be_bytes();
+            let _ = sock.write_all(&reply_len).await;
+            let _ = sock.write_all(&bytes).await;
+            let _ = sock.flush().await;
+        });
+        (addr, handle)
+    }
+
+    fn shard(coeffs: &[u8], payload: &[u8]) -> Shard {
+        Shard {
+            coeffs: coeffs.to_vec(),
+            payload: payload.to_vec(),
+        }
+    }
+
+    /// RAII guard: hold a local mutex while `HOLOFS_POOL_DISABLE=1`
+    /// is set, restore the env var on drop. The local lock serialises
+    /// the audit tests with each other (so two concurrent
+    /// `disable_pool` regions can't fight); cross-crate leaks aren't
+    /// a concern because `cargo test` builds a separate test binary
+    /// per crate, so this env var stays inside this process.
+    struct DisablePool {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        old: Option<String>,
+    }
+    impl DisablePool {
+        fn new() -> Self {
+            use std::sync::{Mutex, OnceLock};
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            let lock = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|p| p.into_inner());
+            let old = std::env::var("HOLOFS_POOL_DISABLE").ok();
+            std::env::set_var("HOLOFS_POOL_DISABLE", "1");
+            Self { _lock: lock, old }
+        }
+    }
+    impl Drop for DisablePool {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => std::env::set_var("HOLOFS_POOL_DISABLE", v),
+                None => std::env::remove_var("HOLOFS_POOL_DISABLE"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_shard_returns_pass_for_matching_shard() {
+        let _g = DisablePool::new();
+        let s = shard(&[1, 2, 3], &[10, 20, 30, 40]);
+        let h = shard_hash(&s);
+        let (addr, handle) = spawn_one_shot_node(Response::AuditResp { shard: Some(s) }).await;
+        let outcome = audit_shard(&addr, 0xABCD, 0, 0, h).await;
+        assert_eq!(outcome, AuditOutcome::Pass);
+        assert!(outcome.is_success());
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn audit_shard_returns_missing_for_none_response() {
+        let _g = DisablePool::new();
+        let (addr, handle) = spawn_one_shot_node(Response::AuditResp { shard: None }).await;
+        let outcome = audit_shard(&addr, 0xABCD, 0, 0, [0u8; 32]).await;
+        assert_eq!(outcome, AuditOutcome::MissingShard);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn audit_shard_returns_hash_mismatch_for_wrong_bytes() {
+        let _g = DisablePool::new();
+        let expected = shard(&[1, 2, 3], &[10, 20, 30]);
+        let expected_hash = shard_hash(&expected);
+        // Node replies with a *different* shard than the caller asked for.
+        let actual = shard(&[9, 9, 9], &[7, 7, 7]);
+        let (addr, handle) = spawn_one_shot_node(Response::AuditResp {
+            shard: Some(actual),
+        })
+        .await;
+        let outcome = audit_shard(&addr, 0xABCD, 0, 0, expected_hash).await;
+        assert_eq!(outcome, AuditOutcome::HashMismatch);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn audit_shard_returns_protocol_error_for_wrong_response_kind() {
+        let _g = DisablePool::new();
+        let (addr, handle) = spawn_one_shot_node(Response::Pong).await;
+        let outcome = audit_shard(&addr, 0xABCD, 0, 0, [0u8; 32]).await;
+        assert_eq!(outcome, AuditOutcome::ProtocolError);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn audit_shard_returns_unreachable_for_closed_port() {
+        let _g = DisablePool::new();
+        // Bind then immediately drop to grab a port that nobody listens on.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let outcome = audit_shard(&addr, 0xABCD, 0, 0, [0u8; 32]).await;
+        assert_eq!(outcome, AuditOutcome::Unreachable);
+    }
+
+    #[tokio::test]
+    async fn tick_once_returns_no_events_for_empty_catalog() {
+        let cat = Arc::new(Mutex::new(Directory::new()));
+        let rep = Arc::new(Mutex::new(Reputation::new(4, 1.0)));
+        let cfg = AuditConfig::default();
+        let mut rng = Rng::new(0xCA75);
+        let events = tick_once(cat, rep, &cfg, &mut rng).await;
+        assert!(events.is_empty());
     }
 }
