@@ -391,7 +391,7 @@ impl Gateway {
         let manifest = {
             let cat = self.catalog.lock().await;
             cat.get(name).cloned().ok_or_else(|| {
-                ClientError::Protocol(format!("decode_with_autorepair: {name} not in catalog"))
+                ClientError::RemoteError(format!("decode_with_autorepair: {name} not in catalog"))
             })?
         };
         match get_object_up_to_layer(&self.gf, &manifest, &live, max_layer).await {
@@ -417,7 +417,7 @@ impl Gateway {
                 let repaired = {
                     let cat = self.catalog.lock().await;
                     cat.get(name).cloned().ok_or_else(|| {
-                        ClientError::Protocol(format!(
+                        ClientError::RemoteError(format!(
                             "decode_with_autorepair: {name} disappeared from catalog mid-repair"
                         ))
                     })?
@@ -454,7 +454,7 @@ impl Gateway {
         let mut manifest = {
             let cat = self.catalog.lock().await;
             cat.get(name).cloned().ok_or_else(|| {
-                ClientError::Protocol(format!("repair_object_inplace: {name} not in catalog"))
+                ClientError::RemoteError(format!("repair_object_inplace: {name} not in catalog"))
             })?
         };
         let mut rng = holofs_core::rng::Rng::new(u64::from_be_bytes(

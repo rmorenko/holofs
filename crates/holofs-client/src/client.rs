@@ -24,8 +24,22 @@ use holofs_wire::{read_frame, write_frame, Request, Response};
 #[derive(Debug)]
 pub enum ClientError {
     Io(io::Error),
-    Protocol(String),
-    LayerLost { channel: u8, layer: u8 },
+    /// The remote node accepted our request and explicitly reported a
+    /// failure (`Response::Error`). The string is the node's message.
+    /// This is the "expected" failure mode for things like missing
+    /// shards on a peer.
+    RemoteError(String),
+    /// The remote responded with a `Response` variant the caller
+    /// didn't expect (e.g. asking for a Shard and getting an Ack).
+    /// Indicates a wire-protocol mismatch, not a remote-side failure.
+    UnexpectedResponse {
+        expected: &'static str,
+        got: String,
+    },
+    LayerLost {
+        channel: u8,
+        layer: u8,
+    },
     /// Two manifests handed to a mix/blend operation don't agree on
     /// the fields the DWT-aware decoder needs to interleave their
     /// shards (dimensions, channel count, layer count, k, etc.).
@@ -41,7 +55,10 @@ impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClientError::Io(e) => write!(f, "io: {e}"),
-            ClientError::Protocol(s) => write!(f, "protocol: {s}"),
+            ClientError::RemoteError(s) => write!(f, "remote: {s}"),
+            ClientError::UnexpectedResponse { expected, got } => {
+                write!(f, "unexpected response: expected {expected}, got {got}")
+            }
             ClientError::LayerLost { channel, layer } => {
                 write!(f, "layer (c={channel}, l={layer}) is not decodable")
             }
@@ -50,6 +67,15 @@ impl std::fmt::Display for ClientError {
     }
 }
 impl std::error::Error for ClientError {}
+
+impl ClientError {
+    /// True iff the error came from a timed-out RPC. Lets callers
+    /// (and our /metrics counters) distinguish "node slow / hung"
+    /// from other IO trouble without re-parsing strings.
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, ClientError::Io(e) if e.kind() == io::ErrorKind::TimedOut)
+    }
+}
 
 /// List of "live" node indices in the cluster (within `manifest.nodes`).
 pub type LiveNodes = Vec<usize>;
@@ -213,11 +239,9 @@ pub async fn put_object(
                 };
                 match rpc(&manifest.nodes[node], req).await? {
                     Response::Ack => {}
-                    Response::Error(msg) => return Err(ClientError::Protocol(msg)),
+                    Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
                     other => {
-                        return Err(ClientError::Protocol(format!(
-                            "expected Ack, got {other:?}"
-                        )))
+                        return Err(ClientError::UnexpectedResponse { expected: "Ack", got: format!("{other:?}") })
                     }
                 }
             }
@@ -531,11 +555,9 @@ pub async fn put_text_object(
         };
         match rpc(&manifest.nodes[node], req).await? {
             Response::Ack => {}
-            Response::Error(msg) => return Err(ClientError::Protocol(msg)),
+            Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
             other => {
-                return Err(ClientError::Protocol(format!(
-                    "expected Ack, got {other:?}"
-                )))
+                return Err(ClientError::UnexpectedResponse { expected: "Ack", got: format!("{other:?}") })
             }
         }
     }
@@ -645,11 +667,9 @@ pub async fn put_audio_object(
                 };
                 match rpc(&manifest.nodes[node], req).await? {
                     Response::Ack => {}
-                    Response::Error(msg) => return Err(ClientError::Protocol(msg)),
+                    Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
                     other => {
-                        return Err(ClientError::Protocol(format!(
-                            "expected Ack, got {other:?}"
-                        )))
+                        return Err(ClientError::UnexpectedResponse { expected: "Ack", got: format!("{other:?}") })
                     }
                 }
             }
@@ -868,11 +888,9 @@ pub async fn put_opaque_object(
         };
         match rpc(&manifest.nodes[node], req).await? {
             Response::Ack => {}
-            Response::Error(msg) => return Err(ClientError::Protocol(msg)),
+            Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
             other => {
-                return Err(ClientError::Protocol(format!(
-                    "expected Ack, got {other:?}"
-                )))
+                return Err(ClientError::UnexpectedResponse { expected: "Ack", got: format!("{other:?}") })
             }
         }
     }
@@ -927,11 +945,9 @@ pub async fn gather_layer(
         };
         match rpc(&manifest.nodes[node], req).await? {
             Response::Shards(mut v) => acc.append(&mut v),
-            Response::Error(msg) => return Err(ClientError::Protocol(msg)),
+            Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
             other => {
-                return Err(ClientError::Protocol(format!(
-                    "expected Shards, got {other:?}"
-                )))
+                return Err(ClientError::UnexpectedResponse { expected: "Shards", got: format!("{other:?}") })
             }
         }
     }
@@ -976,11 +992,9 @@ pub async fn repair_node(
     .await?
     {
         Response::Ack => {}
-        Response::Error(msg) => return Err(ClientError::Protocol(msg)),
+        Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
         other => {
-            return Err(ClientError::Protocol(format!(
-                "expected Ack from Purge, got {other:?}"
-            )))
+            return Err(ClientError::UnexpectedResponse { expected: "Ack from Purge", got: format!("{other:?}") })
         }
     }
 
@@ -1024,11 +1038,9 @@ pub async fn repair_node(
                             }
                         }
                     }
-                    Response::Error(msg) => return Err(ClientError::Protocol(msg)),
+                    Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
                     other => {
-                        return Err(ClientError::Protocol(format!(
-                            "expected Shards, got {other:?}"
-                        )))
+                        return Err(ClientError::UnexpectedResponse { expected: "Shards", got: format!("{other:?}") })
                     }
                 }
                 if donors.len() >= d {
@@ -1068,11 +1080,9 @@ pub async fn repair_node(
                     Response::Ack => {
                         stats.shards_generated += 1;
                     }
-                    Response::Error(msg) => return Err(ClientError::Protocol(msg)),
+                    Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
                     other => {
-                        return Err(ClientError::Protocol(format!(
-                            "expected Ack, got {other:?}"
-                        )))
+                        return Err(ClientError::UnexpectedResponse { expected: "Ack", got: format!("{other:?}") })
                     }
                 }
             }
@@ -1102,11 +1112,9 @@ pub async fn purge_object(manifest: &Manifest, live: &LiveNodes) -> Result<(), C
         };
         match rpc(&manifest.nodes[node], req).await? {
             Response::Ack => {}
-            Response::Error(msg) => return Err(ClientError::Protocol(msg)),
+            Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
             other => {
-                return Err(ClientError::Protocol(format!(
-                    "expected Ack from Purge, got {other:?}"
-                )))
+                return Err(ClientError::UnexpectedResponse { expected: "Ack from Purge", got: format!("{other:?}") })
             }
         }
     }
@@ -1121,10 +1129,8 @@ pub async fn purge_object(manifest: &Manifest, live: &LiveNodes) -> Result<(), C
 pub async fn list_node_hashes(addr: &str) -> Result<Vec<Hash>, ClientError> {
     match rpc(addr, Request::ListHashes).await? {
         Response::Hashes(hs) => Ok(hs),
-        Response::Error(msg) => Err(ClientError::Protocol(msg)),
-        other => Err(ClientError::Protocol(format!(
-            "expected Hashes from ListHashes, got {other:?}"
-        ))),
+        Response::Error(msg) => Err(ClientError::RemoteError(msg)),
+        other => Err(ClientError::UnexpectedResponse { expected: "Hashes from ListHashes", got: format!("{other:?}") }),
     }
 }
 
@@ -1138,10 +1144,8 @@ pub async fn purge_node_by_hash(
 ) -> Result<(), ClientError> {
     match rpc(addr, Request::PurgeByHash { hashes }).await? {
         Response::Ack => Ok(()),
-        Response::Error(msg) => Err(ClientError::Protocol(msg)),
-        other => Err(ClientError::Protocol(format!(
-            "expected Ack from PurgeByHash, got {other:?}"
-        ))),
+        Response::Error(msg) => Err(ClientError::RemoteError(msg)),
+        other => Err(ClientError::UnexpectedResponse { expected: "Ack from PurgeByHash", got: format!("{other:?}") }),
     }
 }
 
@@ -1198,4 +1202,37 @@ pub async fn discover_live_with_whitelist(
         }
     }
     live
+}
+
+#[cfg(test)]
+mod error_variant_tests {
+    use super::*;
+
+    #[test]
+    fn remote_error_displays_remote_prefix() {
+        let e = ClientError::RemoteError("shard missing".into());
+        assert_eq!(format!("{e}"), "remote: shard missing");
+        assert!(!e.is_timeout());
+    }
+
+    #[test]
+    fn unexpected_response_records_expected_and_got() {
+        let e = ClientError::UnexpectedResponse {
+            expected: "Ack",
+            got: "Pong".into(),
+        };
+        let s = format!("{e}");
+        assert!(s.contains("expected Ack"), "{s}");
+        assert!(s.contains("got Pong"), "{s}");
+    }
+
+    #[test]
+    fn is_timeout_keys_on_io_kind_only() {
+        let e = ClientError::Io(io::Error::new(io::ErrorKind::TimedOut, "slow peer"));
+        assert!(e.is_timeout());
+        let e = ClientError::Io(io::Error::new(io::ErrorKind::BrokenPipe, "EPIPE"));
+        assert!(!e.is_timeout());
+        let e = ClientError::RemoteError("nope".into());
+        assert!(!e.is_timeout());
+    }
 }
