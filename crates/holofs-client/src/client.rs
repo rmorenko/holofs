@@ -56,6 +56,29 @@ pub type LiveNodes = Vec<usize>;
 
 // === RPC helper ============================================================
 
+/// Per-RPC overall budget. Without this a flapping node can wedge
+/// any caller for minutes because `read_frame` will happily await
+/// forever. The default (8 s) is generous enough for the heaviest
+/// PutBatch / Gather operations we ship today, but caps the
+/// damage from a half-dead peer at one user-visible 8 s instead
+/// of a TCP-stack timeout (typically 75 s+ on Linux, 60+ on macOS).
+///
+/// Override via `HOLOFS_RPC_TIMEOUT_MS`. Set to 0 to disable.
+fn rpc_timeout() -> Option<std::time::Duration> {
+    static CACHED: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let ms: u64 = std::env::var("HOLOFS_RPC_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8_000);
+        if ms == 0 {
+            None
+        } else {
+            Some(std::time::Duration::from_millis(ms))
+        }
+    })
+}
+
 async fn rpc(addr: &str, req: Request) -> io::Result<Response> {
     let encoded = req.encode();
     match rpc_attempt(addr, &encoded).await {
@@ -68,32 +91,62 @@ async fn rpc(addr: &str, req: Request) -> io::Result<Response> {
         // is harmless), so a single retry against a freshly-dialed
         // connection is safe and lets the keepalive pool degrade
         // gracefully without bubbling spurious failures up to callers.
-        Err(e) if is_likely_stale_connection(&e) => rpc_attempt(addr, &encoded).await,
+        // The same applies to a timeout — a hung peer might recover
+        // before the second attempt, OR the second attempt gets a
+        // fresh socket (pooled stream was poisoned on the timeout
+        // path) and reaches a different ephemeral port quickly.
+        Err(e) if is_likely_transient(&e) => rpc_attempt(addr, &encoded).await,
         Err(e) => Err(e),
     }
 }
 
 async fn rpc_attempt(addr: &str, encoded_req: &[u8]) -> io::Result<Response> {
     let mut s = pool::acquire(addr).await?;
-    if let Err(e) = write_frame(&mut s, encoded_req).await {
-        s.poison();
-        return Err(e);
-    }
-    let buf = match read_frame(&mut s).await {
-        Ok(b) => b,
-        Err(e) => {
+    let inner = async {
+        if let Err(e) = write_frame(&mut s, encoded_req).await {
             s.poison();
             return Err(e);
         }
+        let buf = match read_frame(&mut s).await {
+            Ok(b) => b,
+            Err(e) => {
+                s.poison();
+                return Err(e);
+            }
+        };
+        Response::decode(&buf)
     };
-    Response::decode(&buf)
+    match rpc_timeout() {
+        Some(timeout) => match tokio::time::timeout(timeout, inner).await {
+            Ok(r) => r,
+            Err(_) => {
+                // tokio::time::timeout drops the future on expiry —
+                // the in-flight write/read got cancelled mid-frame,
+                // so the pooled stream is at an undefined byte
+                // boundary. Mark it poisoned so it's not returned
+                // to the pool, then surface the timeout to the
+                // caller (rpc() retries on TimedOut via
+                // is_likely_transient).
+                io::Result::Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("rpc to {addr} exceeded {:?}", timeout),
+                ))
+            }
+        },
+        None => inner.await,
+    }
 }
 
-fn is_likely_stale_connection(e: &io::Error) -> bool {
+fn is_likely_transient(e: &io::Error) -> bool {
     use io::ErrorKind::*;
     matches!(
         e.kind(),
-        UnexpectedEof | BrokenPipe | ConnectionReset | ConnectionAborted | NotConnected
+        UnexpectedEof
+            | BrokenPipe
+            | ConnectionReset
+            | ConnectionAborted
+            | NotConnected
+            | TimedOut
     )
 }
 
