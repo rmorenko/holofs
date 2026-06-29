@@ -305,4 +305,168 @@ mod tests {
         assert!(!idx.has(&rec.data_cid, LayerBand::Full).unwrap());
         let _ = std::fs::remove_file(&tmp);
     }
+
+    /// Helper: temp path that the test's Drop tidies up.
+    struct TempPath(std::path::PathBuf);
+    impl TempPath {
+        fn new(stem: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "holofs-embed-{stem}-{}.bin",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&p);
+            Self(p)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TempPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn rec(seed: u8, band: LayerBand, name: &str) -> EmbedRecord {
+        EmbedRecord {
+            data_cid: [seed; 32],
+            band,
+            name: name.to_string(),
+            vec: vec![(seed as f32) / 100.0; EMBED_DIM],
+        }
+    }
+
+    #[test]
+    fn multiple_appends_iterate_in_insertion_order() {
+        let t = TempPath::new("multi");
+        let idx = Index::open(t.path()).unwrap();
+        idx.append(&rec(1, LayerBand::Coarse, "a.png")).unwrap();
+        idx.append(&rec(2, LayerBand::Mid, "b.png")).unwrap();
+        idx.append(&rec(3, LayerBand::Full, "c.png")).unwrap();
+        let names: Vec<String> = idx
+            .iter()
+            .unwrap()
+            .map(|r| r.unwrap().name)
+            .collect();
+        assert_eq!(names, vec!["a.png", "b.png", "c.png"]);
+        assert_eq!(idx.len().unwrap(), 3);
+    }
+
+    #[test]
+    fn has_distinguishes_band_per_cid() {
+        let t = TempPath::new("hasband");
+        let idx = Index::open(t.path()).unwrap();
+        idx.append(&rec(1, LayerBand::Coarse, "x.png")).unwrap();
+        idx.append(&rec(1, LayerBand::Mid, "x.png")).unwrap();
+        let cid = [1u8; 32];
+        assert!(idx.has(&cid, LayerBand::Coarse).unwrap());
+        assert!(idx.has(&cid, LayerBand::Mid).unwrap());
+        assert!(!idx.has(&cid, LayerBand::Full).unwrap());
+        // Different CID — none of the bands match.
+        let other = [9u8; 32];
+        assert!(!idx.has(&other, LayerBand::Coarse).unwrap());
+    }
+
+    #[test]
+    fn reopening_existing_index_preserves_records() {
+        let t = TempPath::new("reopen");
+        {
+            let idx = Index::open(t.path()).unwrap();
+            idx.append(&rec(5, LayerBand::Coarse, "first.png")).unwrap();
+        }
+        // Drop the handle and re-open from the same path.
+        let idx = Index::open(t.path()).unwrap();
+        assert_eq!(idx.len().unwrap(), 1);
+        let collected: Vec<_> = idx.iter().unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(collected[0].name, "first.png");
+    }
+
+    #[test]
+    fn opening_file_with_wrong_magic_returns_corrupt() {
+        let t = TempPath::new("badmagic");
+        std::fs::write(t.path(), b"NOTHOLO\0lots of junk follows").unwrap();
+        let err = Index::open(t.path()).err().expect("expected Corrupt error");
+        assert!(matches!(err, EmbedError::Corrupt(_)));
+    }
+
+    #[test]
+    fn opening_file_shorter_than_magic_returns_corrupt() {
+        let t = TempPath::new("short");
+        std::fs::write(t.path(), b"HO").unwrap();
+        let err = Index::open(t.path()).err().expect("expected Corrupt error");
+        assert!(matches!(err, EmbedError::Corrupt(_)));
+    }
+
+    #[test]
+    fn rewrite_keep_drops_filtered_records_and_tombstones() {
+        let t = TempPath::new("rewrite");
+        let idx = Index::open(t.path()).unwrap();
+        idx.append(&rec(1, LayerBand::Coarse, "keep.png")).unwrap();
+        idx.append(&rec(2, LayerBand::Coarse, "drop.png")).unwrap();
+        // Hand-write a tombstone record (dim=0). The public `append`
+        // refuses dim≠EMBED_DIM, so tombstones get into the file via
+        // the gateway's batch path (or this raw write). rewrite_keep
+        // must always drop them regardless of the keep predicate.
+        {
+            use std::io::Write;
+            let mut f = OpenOptions::new().append(true).open(t.path()).unwrap();
+            let cid = [9u8; 32];
+            let band = LayerBand::Coarse as u8;
+            let name = b"tomb.png";
+            f.write_all(&cid).unwrap();
+            f.write_all(&[band]).unwrap();
+            f.write_all(&(name.len() as u16).to_le_bytes()).unwrap();
+            f.write_all(name).unwrap();
+            f.write_all(&0u16.to_le_bytes()).unwrap(); // dim = 0 → tombstone
+        }
+        let (kept, dropped) = idx.rewrite_keep(|cid| cid[0] == 1).unwrap();
+        assert_eq!(kept, 1);
+        assert!(dropped >= 2, "expected to drop drop.png + tomb.png, got {dropped}");
+        let names: Vec<String> = idx
+            .iter()
+            .unwrap()
+            .map(|r| r.unwrap().name)
+            .collect();
+        assert_eq!(names, vec!["keep.png"]);
+    }
+
+    #[test]
+    fn rewrite_keep_with_all_true_predicate_keeps_everything() {
+        let t = TempPath::new("rewriteall");
+        let idx = Index::open(t.path()).unwrap();
+        idx.append(&rec(1, LayerBand::Coarse, "a.png")).unwrap();
+        idx.append(&rec(2, LayerBand::Mid, "b.png")).unwrap();
+        let (kept, dropped) = idx.rewrite_keep(|_| true).unwrap();
+        assert_eq!(kept, 2);
+        assert_eq!(dropped, 0);
+        assert_eq!(idx.len().unwrap(), 2);
+    }
+
+    #[test]
+    fn path_accessor_returns_the_open_path() {
+        let t = TempPath::new("pathaccess");
+        let idx = Index::open(t.path()).unwrap();
+        assert_eq!(idx.path(), t.path());
+    }
+
+    #[test]
+    fn iter_on_corrupt_band_byte_returns_error() {
+        // Hand-craft an index file: valid magic + one record header
+        // with a deliberately bogus band discriminant.
+        let t = TempPath::new("corruptband");
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"HOLOFEM1");
+        buf.extend_from_slice(&[0u8; 32]); // data_cid
+        buf.push(0xFF); // bad band
+        buf.extend_from_slice(&3u16.to_le_bytes());
+        buf.extend_from_slice(b"abc");
+        buf.extend_from_slice(&(EMBED_DIM as u16).to_le_bytes());
+        for _ in 0..EMBED_DIM {
+            buf.extend_from_slice(&0f32.to_le_bytes());
+        }
+        std::fs::write(t.path(), &buf).unwrap();
+        let idx = Index::open(t.path()).unwrap();
+        let first = idx.iter().unwrap().next().unwrap();
+        assert!(matches!(first, Err(EmbedError::Corrupt(_))));
+    }
 }

@@ -333,4 +333,46 @@ mod tests {
         let res = decode_audio_from_bytes(b"not audio at all");
         assert!(res.is_err());
     }
+
+    #[test]
+    fn empty_bytes_return_error() {
+        assert!(decode_audio_from_bytes(&[]).is_err());
+    }
+
+    #[test]
+    fn encode_clamps_out_of_range_samples() {
+        // Values outside [-1, 1] must be clamped before 16-bit quantisation
+        // — otherwise `(s * i16::MAX) as i16` wraps and we get inverted
+        // garbage at the peaks. Round-trip a deliberately oversize input
+        // and assert the decoded peak is at the i16 saturation point.
+        let sr = 8000;
+        let oversize: Vec<f32> = vec![5.0; 32];
+        let bytes = encode_wav_16bit(&[oversize], sr);
+        let dec = decode_audio_from_bytes(&bytes).expect("decode wav");
+        let peak = dec.channels[0].iter().cloned().fold(f32::MIN, f32::max);
+        // After clamp+quantise, the peak rounds to ≥ 0.999 (one quant
+        // step below 1.0 due to 16-bit truncation).
+        assert!(peak >= 0.999, "expected saturated peak ≈ 1.0, got {peak}");
+    }
+
+    #[test]
+    fn encode_with_empty_channel_list_produces_valid_header() {
+        // 0 frames → header-only WAV (44 bytes). Decoding it back should
+        // still parse (some symphonia versions may reject; the assertion
+        // is on the encoder side, not the decoder).
+        let bytes = encode_wav_16bit(&[], 8000);
+        assert_eq!(bytes.len(), 44, "header-only WAV expected, got {} bytes", bytes.len());
+        assert!(bytes.starts_with(b"RIFF"));
+        assert_eq!(&bytes[8..12], b"WAVE");
+    }
+
+    #[test]
+    fn n_channels_matches_channel_vec_len_under_u8() {
+        let dec = DecodedAudio {
+            sample_rate: 8000,
+            sample_count: 1,
+            channels: vec![vec![0.0]; 5],
+        };
+        assert_eq!(dec.n_channels(), 5);
+    }
 }

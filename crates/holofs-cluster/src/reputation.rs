@@ -137,4 +137,47 @@ mod tests {
         // Fast forgets quicker → lower score after the same 3 failures.
         assert!(fast.score(0) < slow.score(0));
     }
+
+    #[test]
+    fn new_clamps_initial_into_unit_interval() {
+        let r_low = Reputation::new(3, -0.5);
+        let r_high = Reputation::new(3, 1.5);
+        assert_eq!(r_low.score(0), 0.0);
+        assert_eq!(r_high.score(0), 1.0);
+    }
+
+    #[test]
+    fn with_alpha_clamps_outside_unit_interval() {
+        // The factor must stay in [0, 1]; out-of-range values get
+        // clamped silently so the EMA stays a contraction.
+        let r_low = Reputation::new(1, 0.5).with_alpha(-0.2);
+        let r_high = Reputation::new(1, 0.5).with_alpha(2.0);
+        // α = 0 → observe is a no-op
+        let mut a = r_low.clone();
+        a.observe(0, true);
+        assert!((a.score(0) - 0.5).abs() < 1e-6);
+        // α = 1 → observe snaps to the outcome
+        let mut b = r_high.clone();
+        b.observe(0, true);
+        assert!((b.score(0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_on_out_of_bounds_node_returns_zero() {
+        let r = Reputation::new(2, 1.0);
+        assert_eq!(r.score(99), 0.0);
+        // `alive` for a missing node returns false at any positive threshold.
+        assert!(!r.alive(99, 0.5));
+    }
+
+    #[test]
+    fn len_and_is_empty_reflect_constructor_size() {
+        let r0 = Reputation::new(0, 0.5);
+        assert_eq!(r0.len(), 0);
+        assert!(r0.is_empty());
+        let r3 = Reputation::new(3, 0.5);
+        assert_eq!(r3.len(), 3);
+        assert!(!r3.is_empty());
+        assert_eq!(r3.scores().len(), 3);
+    }
 }

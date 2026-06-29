@@ -569,4 +569,107 @@ mod tests {
         let got = read_frame(&mut b).await.unwrap();
         assert_eq!(got, payload);
     }
+
+    // --- Stage-14/15 ops that previously had no round-trip coverage. ---
+
+    #[test]
+    fn request_list_hashes_roundtrip() {
+        let r = Request::ListHashes;
+        assert_eq!(Request::decode(&r.encode()).unwrap(), r);
+    }
+
+    #[test]
+    fn request_purge_by_hash_roundtrip() {
+        let r = Request::PurgeByHash {
+            hashes: vec![[0x11; 32], [0x22; 32], [0x33; 32]],
+        };
+        assert_eq!(Request::decode(&r.encode()).unwrap(), r);
+    }
+
+    #[test]
+    fn request_put_batch_roundtrip() {
+        let r = Request::PutBatch {
+            object_id: 0xC0FFEE,
+            channel: 1,
+            layer: 2,
+            shards: vec![s(&[1, 2, 3], &[10, 20]), s(&[4, 5], &[30])],
+        };
+        assert_eq!(Request::decode(&r.encode()).unwrap(), r);
+    }
+
+    #[test]
+    fn response_hashes_roundtrip_including_empty() {
+        let r1 = Response::Hashes(vec![]);
+        let r2 = Response::Hashes(vec![[0xA5; 32], [0x5A; 32]]);
+        assert_eq!(Response::decode(&r1.encode()).unwrap(), r1);
+        assert_eq!(Response::decode(&r2.encode()).unwrap(), r2);
+    }
+
+    // --- Decode error paths. These weigh heavily on coverage because
+    //     each `take` / cursor read has its own truncation branch.    ---
+
+    #[test]
+    fn request_put_truncated_at_each_field_returns_error() {
+        let full = Request::Put {
+            object_id: 0x1234,
+            channel: 1,
+            layer: 2,
+            shard: s(&[1, 2], &[3, 4]),
+        }
+        .encode();
+        // Step through each prefix length below the full encoding; every
+        // truncation must surface as Err — no panic, no silent default.
+        for cut in 1..full.len() {
+            assert!(
+                Request::decode(&full[..cut]).is_err(),
+                "truncated PUT of len {cut} decoded successfully"
+            );
+        }
+    }
+
+    #[test]
+    fn response_shards_truncated_returns_error() {
+        let full = Response::Shards(vec![s(&[1, 2, 3], &[10, 20, 30])]).encode();
+        assert!(Response::decode(&full[..full.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn empty_buffer_decodes_to_error() {
+        assert!(Request::decode(&[]).is_err());
+        assert!(Response::decode(&[]).is_err());
+    }
+
+    // --- Frame-layer error paths (write_frame / read_frame too-large). ---
+
+    #[tokio::test]
+    async fn write_frame_rejects_oversize_payload() {
+        let (mut a, _b) = tokio::io::duplex(64);
+        let oversize = vec![0u8; MAX_FRAME + 1];
+        let e = write_frame(&mut a, &oversize).await.unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn read_frame_rejects_oversize_header() {
+        // Hand-craft a frame whose length prefix declares MAX+1 bytes.
+        // read_frame must bail before allocating that buffer.
+        let (mut a, mut b) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let len = (MAX_FRAME as u32) + 1;
+            let _ = a.write_all(&len.to_be_bytes()).await;
+        });
+        let e = read_frame(&mut b).await.unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn read_frame_returns_eof_on_closed_stream() {
+        // Drop the writer side without sending anything; read_u32 should
+        // surface UnexpectedEof, not hang or panic.
+        let (a, mut b) = tokio::io::duplex(64);
+        drop(a);
+        let e = read_frame(&mut b).await.unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+    }
 }
