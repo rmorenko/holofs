@@ -119,13 +119,24 @@ async fn put_and_get_with_partial_node_loss_still_works() -> Result<()> {
         nodes_live(&harness).await? < total,
         "kill should have lowered nodes_live"
     );
+    // Baseline: PUT the same fixture under a different name on the
+    // (still-fully-live, before any kills) configuration would be
+    // ideal, but we already killed nodes. Instead PUT the body under
+    // two names AFTER the kill — both must decode to the same bytes.
+    // If degradation perturbed the redundancy enough to corrupt one
+    // copy, the two-decode equality assertion catches it.
     let body = holofs_e2e::fixtures::textured_image_png().to_vec();
-    harness.put_bytes("photos/degraded.png", body).await?;
-    let bytes = harness.get_bytes("photos/degraded.png").await?;
-    assert!(
-        bytes.len() > 100,
-        "GET under partial degradation returned {} bytes",
-        bytes.len()
+    harness.put_bytes("photos/degraded.png", body.clone()).await?;
+    harness.put_bytes("photos/degraded-twin.png", body).await?;
+    let a = harness.get_bytes("photos/degraded.png").await?;
+    let b = harness.get_bytes("photos/degraded-twin.png").await?;
+    assert_eq!(
+        a, b,
+        "two PUTs of identical bytes under partial degradation decoded \
+         to different bytes (a={}, b={}) — redundancy may be partially \
+         corrupted",
+        a.len(),
+        b.len()
     );
     harness.close().await
 }
@@ -161,7 +172,7 @@ async fn cluster_recovers_after_unkilling_all_nodes() -> Result<()> {
     // Retry — should succeed.
     let resp = raw_client()
         .put(harness.url("photos/recover.png"))
-        .body(body)
+        .body(body.clone())
         .send()
         .await?;
     assert!(
@@ -169,8 +180,21 @@ async fn cluster_recovers_after_unkilling_all_nodes() -> Result<()> {
         "PUT after recovery: expected 2xx, got {}",
         resp.status()
     );
-    let bytes = harness.get_bytes("photos/recover.png").await?;
-    assert!(bytes.len() > 100);
+    // The recovered object must decode AND match a baseline PUT of
+    // the same bytes under a different name. A length-only check
+    // wouldn't catch a regression that wrote the wrong manifest.
+    harness
+        .put_bytes("photos/recover-baseline.png", body)
+        .await?;
+    let recovered = harness.get_bytes("photos/recover.png").await?;
+    let baseline = harness.get_bytes("photos/recover-baseline.png").await?;
+    assert_eq!(
+        recovered, baseline,
+        "post-recovery decode bytes differ from baseline-fresh PUT \
+         (recovered={}, baseline={})",
+        recovered.len(),
+        baseline.len()
+    );
     harness.close().await
 }
 

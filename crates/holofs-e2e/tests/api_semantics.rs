@@ -19,13 +19,22 @@ fn raw_client() -> reqwest::Client {
 }
 
 async fn get_stats(harness: &TestHarness) -> Result<Value> {
-    let body = raw_client()
+    let resp = raw_client()
         .get(harness.url("/api/stats"))
         .send()
         .await?
-        .error_for_status()?
-        .text()
-        .await?;
+        .error_for_status()?;
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        ct.contains("application/json"),
+        "/api/stats content-type should be application/json, got {ct:?}"
+    );
+    let body = resp.text().await?;
     Ok(serde_json::from_str(&body)?)
 }
 
@@ -187,15 +196,22 @@ async fn gc_on_healthy_cluster_purges_nothing() -> Result<()> {
             holofs_e2e::fixtures::textured_image_png().to_vec(),
         )
         .await?;
+    // Snapshot the pre-GC decode so we can prove the harmless GC
+    // didn't perturb the bytes (not just "still decodes to >100 b").
+    let before = harness.get_bytes("photos/g.png").await?;
     let report = run_gc(&harness).await?;
     let purged = report["purged_total"].as_u64().unwrap_or(u64::MAX);
     assert_eq!(
         purged, 0,
         "healthy GC should purge zero shards, got {purged}; report = {report}"
     );
-    // After the harmless GC, the object must still decode.
-    let bytes = harness.get_bytes("photos/g.png").await?;
-    assert!(bytes.len() > 100, "post-GC decode size = {}", bytes.len());
+    let after = harness.get_bytes("photos/g.png").await?;
+    assert_eq!(
+        after, before,
+        "GC on healthy cluster changed the bytes — before={} after={}",
+        before.len(),
+        after.len()
+    );
     harness.close().await
 }
 

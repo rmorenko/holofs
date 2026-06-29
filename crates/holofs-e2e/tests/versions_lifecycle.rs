@@ -38,6 +38,10 @@ async fn delete_version_removes_archive_and_drops_listing() -> Result<()> {
 
     harness.put_bytes(name, body_a.clone()).await?;
     harness.put_bytes(name, body_b.clone()).await?; // archives `a`
+    // Snapshot the live object's decode BEFORE the version-delete so
+    // we can prove deleting the archive didn't perturb the live entry
+    // — not just that it "still decodes to >100 bytes".
+    let live_before = harness.get_bytes(name).await?;
     let before = list_versions(&harness, name).await?;
     assert_eq!(before.len(), 1, "expected one archived version, got {}", before.len());
     let id = before[0]
@@ -70,13 +74,16 @@ async fn delete_version_removes_archive_and_drops_listing() -> Result<()> {
         after.len()
     );
 
-    // The current catalog entry must still decode — deleting an
-    // archived version should never disturb the live object.
-    let bytes = harness.get_bytes(name).await?;
-    assert!(
-        bytes.len() > 100,
-        "live object decode after version delete returned {} bytes",
-        bytes.len()
+    // The current catalog entry must still decode AND match the
+    // pre-delete decode byte-for-byte — deleting an archived
+    // version must never disturb the live object.
+    let live_after = harness.get_bytes(name).await?;
+    assert_eq!(
+        live_after, live_before,
+        "live object bytes changed after archived version was deleted \
+         (before={} after={})",
+        live_before.len(),
+        live_after.len()
     );
 
     harness.close().await

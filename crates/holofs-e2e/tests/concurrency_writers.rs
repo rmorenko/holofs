@@ -42,14 +42,37 @@ async fn parallel_puts_to_distinct_names_all_succeed() -> Result<()> {
             resp.status()
         );
     }
-    // Every uploaded object must decode.
+    // Every uploaded object must decode AND — since the 8 names all
+    // received the same fixture bytes — must decode to the exact same
+    // byte string. A weaker `len() > 100` check used to let a partial-
+    // corruption regression slip (different sizes, all > 100). The
+    // first survivor sets the baseline; the rest must match it.
+    let mut baseline: Option<Vec<u8>> = None;
     for name in &names {
-        let bytes = harness.get_bytes(name).await?;
+        let resp = reqwest::Client::new().get(harness.url(name)).send().await?;
+        assert!(resp.status().is_success());
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         assert!(
-            bytes.len() > 100,
-            "parallel PUT survivor {name} decoded to {} bytes — expected real PNG",
-            bytes.len()
+            ct.starts_with("image/"),
+            "parallel PUT survivor {name} returned content-type {ct:?}"
         );
+        let bytes = resp.bytes().await?.to_vec();
+        match &baseline {
+            None => baseline = Some(bytes),
+            Some(b0) => assert_eq!(
+                &bytes, b0,
+                "parallel PUT survivors decoded to *different* bytes — \
+                 expected identical decode since all 8 PUTs sent the \
+                 same fixture (got {} vs baseline {})",
+                bytes.len(),
+                b0.len()
+            ),
+        }
     }
     harness.close().await
 }
@@ -139,9 +162,22 @@ async fn gc_during_put_does_not_eat_fresh_shards() -> Result<()> {
         )
         .await?;
 
+    // Capture a reference decode of the same body, BEFORE the race,
+    // by writing it to a separate name. Whatever the race-with-gc
+    // PUT decodes to later must equal this baseline byte-for-byte —
+    // a weaker `len() > 100` check used to let off-by-one shard
+    // corruption slip past.
+    let race_body = holofs_e2e::fixtures::tiny_image_png().to_vec();
+    harness
+        .put_bytes("photos/abstract/baseline-tiny.png", race_body.clone())
+        .await?;
+    let baseline_decode = harness
+        .get_bytes("photos/abstract/baseline-tiny.png")
+        .await?;
+
     let put_task = {
         let base = harness.base_url.clone();
-        let body = holofs_e2e::fixtures::tiny_image_png().to_vec();
+        let body = race_body.clone();
         tokio::spawn(async move {
             let client = reqwest::Client::new();
             // Tiny delay so GC has a chance to fire first.
@@ -171,14 +207,20 @@ async fn gc_during_put_does_not_eat_fresh_shards() -> Result<()> {
         gc_resp.is_ok() && gc_resp.unwrap().status().is_success(),
         "concurrent GC failed"
     );
-    // The freshly-PUT shards must survive — read back to confirm.
+    // The freshly-PUT shards must survive AND decode to the same
+    // bytes the baseline did. A length-only check used to pass
+    // even if GC silently shaved a layer off the new manifest —
+    // the decode still produced a "PNG-ish" blob, just at a lower
+    // quality / different size.
     let bytes = harness
         .get_bytes("photos/abstract/race-with-gc.png")
         .await?;
-    assert!(
-        bytes.len() > 100,
-        "post-race decode returned {} bytes",
-        bytes.len()
+    assert_eq!(
+        bytes, baseline_decode,
+        "post-race decode bytes differ from baseline-tiny — GC may have \
+         eaten shards from the freshly-PUT object (post-race={}, baseline={})",
+        bytes.len(),
+        baseline_decode.len()
     );
     harness.close().await
 }
