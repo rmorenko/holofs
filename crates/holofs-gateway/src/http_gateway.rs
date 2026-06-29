@@ -310,7 +310,9 @@ impl Gateway {
                     for l in 0..manifest.nlayers {
                         let n = manifest.n_per_layer[l as usize];
                         for idx in 0..n {
-                            let node = manifest.place_shard(c, l, idx, &live);
+                            let Ok(node) = manifest.place_shard(c, l, idx, &live) else {
+                                continue;
+                            };
                             let hash = match manifest
                                 .shard_hashes
                                 .get(c as usize)
@@ -471,7 +473,7 @@ impl Gateway {
                 for l in 0..manifest.nlayers {
                     let n = manifest.n_per_layer[l as usize];
                     for idx in 0..n {
-                        if manifest.place_shard(c, l, idx, &live) == node {
+                        if manifest.place_shard(c, l, idx, &live) == Ok(node) {
                             if let Some(h) = manifest
                                 .shard_hashes
                                 .get(c as usize)
@@ -1108,6 +1110,16 @@ pub enum GatewayError {
     /// `rmdir` invoked on a directory that still has children. The frontend
     /// surfaces this as `409 Conflict`.
     DirectoryNotEmpty,
+    /// Placement asked for a node from an empty live set — the cluster
+    /// is fully down or hasn't been discovered yet. Frontends surface
+    /// this as `503 Service Unavailable` so clients know to retry.
+    ClusterDegraded,
+}
+
+impl From<holofs_model::placement::NoLiveNodes> for GatewayError {
+    fn from(_: holofs_model::placement::NoLiveNodes) -> Self {
+        GatewayError::ClusterDegraded
+    }
 }
 
 impl std::fmt::Display for GatewayError {
@@ -1121,6 +1133,7 @@ impl std::fmt::Display for GatewayError {
             GatewayError::AlreadyExists => write!(f, "already exists"),
             GatewayError::NotADirectory => write!(f, "not a directory"),
             GatewayError::DirectoryNotEmpty => write!(f, "directory not empty"),
+            GatewayError::ClusterDegraded => write!(f, "cluster has no live nodes"),
         }
     }
 }
@@ -1295,6 +1308,13 @@ impl Gateway {
             }
         }
         let live = self.effective_live().await;
+        // A fully-down cluster previously panicked inside `place_shard`
+        // ("live node set is empty"). Now we surface a clean 503 so
+        // clients can back off and retry without dragging the gateway
+        // down with them.
+        if live.is_empty() {
+            return Err(GatewayError::ClusterDegraded);
+        }
         let prev = self.catalog.lock().await.get(name).cloned();
         if let Some(old) = &prev {
             // Stage 13.4: when versioning is on we archive the prior
@@ -1751,7 +1771,13 @@ impl Gateway {
                 let n = manifest.n_per_layer[l as usize];
                 let mut shards = Vec::with_capacity(n as usize);
                 for idx in 0..n {
-                    let node_idx = manifest.place_shard(c, l, idx, &live);
+                    // Skip shards we can't place — happens when the
+                    // cluster is fully down. The inspect view is a
+                    // diagnostic; we'd rather render an incomplete
+                    // grid than 500 the whole page.
+                    let Ok(node_idx) = manifest.place_shard(c, l, idx, &live) else {
+                        continue;
+                    };
                     let node_addr = manifest
                         .nodes
                         .get(node_idx)
@@ -1807,7 +1833,9 @@ impl Gateway {
             .copied()
             .ok_or_else(|| GatewayError::BadRequest("shard out of range".into()))?;
         let live = self.effective_live().await;
-        let node_idx = manifest.place_shard(c, l, idx, &live);
+        let node_idx = manifest
+            .place_shard(c, l, idx, &live)
+            .map_err(|_| GatewayError::ClusterDegraded)?;
         let node_addr = manifest
             .nodes
             .get(node_idx)

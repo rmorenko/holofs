@@ -188,7 +188,13 @@ pub async fn tick_once(
         // that case `place_shard` points to the "canonical" node, and audit
         // there may return Missing — a normal outcome reflecting shard movement.
         let shard_idx = h_idx as u32;
-        let node = manifest.place_shard(c as u8, l as u8, shard_idx, &live_all);
+        // `live_all` is the index space of `manifest.nodes`, which is
+        // guaranteed non-empty by the snapshot filter above. The Ok
+        // branch is the only realistic outcome here; if it ever fires
+        // we skip this audit sample rather than panic.
+        let Ok(node) = manifest.place_shard(c as u8, l as u8, shard_idx, &live_all) else {
+            continue;
+        };
 
         let outcome = audit_shard(
             &manifest.nodes[node],

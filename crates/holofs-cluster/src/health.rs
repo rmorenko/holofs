@@ -128,7 +128,9 @@ pub async fn collect_layer_stats(
             let mut hosting: HashSet<usize> = HashSet::new();
             if !live_sorted.is_empty() {
                 for idx in 0..manifest.n_per_layer[l as usize] {
-                    hosting.insert(manifest.place_shard(c, l, idx, &live_sorted));
+                    if let Ok(node) = manifest.place_shard(c, l, idx, &live_sorted) {
+                        hosting.insert(node);
+                    }
                 }
             }
             out.push(LayerStats {
@@ -338,7 +340,9 @@ fn build_layout(manifest: &Manifest, live_sorted: &[usize]) -> Vec<Vec<Vec<usize
             let lay = &mut layout[c as usize][l as usize];
             lay.reserve(n as usize);
             for idx in 0..n {
-                lay.push(manifest.place_shard(c, l, idx, live_sorted));
+                if let Ok(node) = manifest.place_shard(c, l, idx, live_sorted) {
+                    lay.push(node);
+                }
             }
         }
     }

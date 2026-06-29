@@ -44,11 +44,21 @@ pub enum ClientError {
     /// the fields the DWT-aware decoder needs to interleave their
     /// shards (dimensions, channel count, layer count, k, etc.).
     Incompatible(String),
+    /// Placement was asked to pick a node from an empty live set —
+    /// the cluster is fully down or hasn't been discovered yet.
+    /// Callers should treat this as transient cluster degradation,
+    /// not a per-object failure.
+    NoLiveNodes,
 }
 
 impl From<io::Error> for ClientError {
     fn from(e: io::Error) -> Self {
         ClientError::Io(e)
+    }
+}
+impl From<holofs_model::placement::NoLiveNodes> for ClientError {
+    fn from(_: holofs_model::placement::NoLiveNodes) -> Self {
+        ClientError::NoLiveNodes
     }
 }
 impl std::fmt::Display for ClientError {
@@ -63,6 +73,7 @@ impl std::fmt::Display for ClientError {
                 write!(f, "layer (c={channel}, l={layer}) is not decodable")
             }
             ClientError::Incompatible(s) => write!(f, "incompatible manifests: {s}"),
+            ClientError::NoLiveNodes => write!(f, "no live nodes in cluster"),
         }
     }
 }
@@ -230,7 +241,7 @@ pub async fn put_object(
                 shard_hashes[c][l].push(h);
                 leaves_flat.push(h);
 
-                let node = manifest.place_shard(c as u8, l as u8, idx as u32, live);
+                let node = manifest.place_shard(c as u8, l as u8, idx as u32, live)?;
                 let req = Request::Put {
                     object_id: manifest.object_id,
                     channel: c as u8,
@@ -546,7 +557,7 @@ pub async fn put_text_object(
     for (idx, shard) in shards.into_iter().enumerate() {
         let h = shard_hash(&shard);
         hashes.push(h);
-        let node = manifest.place_shard(0, 0, idx as u32, live);
+        let node = manifest.place_shard(0, 0, idx as u32, live)?;
         let req = Request::Put {
             object_id: manifest.object_id,
             channel: 0,
@@ -658,7 +669,7 @@ pub async fn put_audio_object(
                 shard_hashes[c][l].push(h);
                 leaves_flat.push(h);
 
-                let node = manifest.place_shard(c as u8, l as u8, idx as u32, live);
+                let node = manifest.place_shard(c as u8, l as u8, idx as u32, live)?;
                 let req = Request::Put {
                     object_id: manifest.object_id,
                     channel: c as u8,
@@ -879,7 +890,7 @@ pub async fn put_opaque_object(
     for (idx, shard) in shards.into_iter().enumerate() {
         let h = shard_hash(&shard);
         hashes.push(h);
-        let node = manifest.place_shard(0, 0, idx as u32, live);
+        let node = manifest.place_shard(0, 0, idx as u32, live)?;
         let req = Request::Put {
             object_id: manifest.object_id,
             channel: 0,
@@ -1005,7 +1016,7 @@ pub async fn repair_node(
             let n_total = manifest.n_per_layer[l as usize] as usize;
             let mut need = 0usize;
             for idx in 0..n_total as u32 {
-                if manifest.place_shard(c, l, idx, live) == replacement {
+                if manifest.place_shard(c, l, idx, live)? == replacement {
                     need += 1;
                 }
             }

@@ -3,7 +3,7 @@
 
 use std::io;
 
-use crate::placement::{place, place_layer_zone_aware, Placement, ShardKey};
+use crate::placement::{place, place_layer_zone_aware, NoLiveNodes, Placement, ShardKey};
 use holofs_core::merkle::Hash;
 
 /// Object kind determines the PUT/GET path. Introduced in stage 8.
@@ -189,7 +189,17 @@ impl Manifest {
     /// For zone-aware placement this recomputes the whole-layer layout — that
     /// is `O(n_shards * live)`, which for our sizes (≤ 64 shards, ≤ 64 nodes)
     /// runs in microseconds.
-    pub fn place_shard(&self, channel: u8, layer: u8, shard_idx: u32, live: &[usize]) -> usize {
+    ///
+    /// Returns [`NoLiveNodes`] when `live` is empty — callers are expected
+    /// to surface this as a 503 / cluster-degraded error rather than letting
+    /// the gateway panic on a fully-down cluster.
+    pub fn place_shard(
+        &self,
+        channel: u8,
+        layer: u8,
+        shard_idx: u32,
+        live: &[usize],
+    ) -> Result<usize, NoLiveNodes> {
         match self.placement {
             Placement::RoundRobin | Placement::Rendezvous => {
                 let key = ShardKey {
@@ -209,8 +219,8 @@ impl Manifest {
                     self.nodes.len(),
                     live,
                     &self.zones,
-                );
-                layout[shard_idx as usize]
+                )?;
+                Ok(layout[shard_idx as usize])
             }
         }
     }

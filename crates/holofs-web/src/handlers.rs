@@ -1309,6 +1309,10 @@ fn error_to_response(e: GatewayError) -> Response {
         GatewayError::DirectoryNotEmpty => {
             (StatusCode::CONFLICT, "directory not empty".to_string())
         }
+        GatewayError::ClusterDegraded => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cluster has no live nodes".to_string(),
+        ),
     };
     (status, [(header::CONTENT_TYPE, "text/plain")], msg).into_response()
 }
