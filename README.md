@@ -182,6 +182,31 @@ The script spawns 8 `holofs-node` processes with persistent storage in
 admin keypair, signs the whitelist, and starts the gateway pointed at it.
 Ctrl-C stops everything.
 
+### Demo test data
+
+For a realistic walkthrough of `/search`, `/similar`, `/spotlight`,
+`/versions`, the cluster ships with a sample-tree pipeline under
+`tools/test-data/`:
+
+```sh
+# 1. Six 2560×1440 picsum.photos JPEGs go under photos/landscapes-xl/
+tools/test-data/fetch-real-landscapes.sh
+
+# 2. 44 synthetic images / WAVs / text / opaque blobs around them
+python3 tools/test-data/generate-samples.py
+
+# 3. PUT the whole tree into a running gateway
+tools/test-data/upload-samples.sh
+```
+
+The result is a 67-object catalog: 25+ images (real photos + synthetic
+patterns), 10 WAVs, 7 text, 4 opaque, 17 directories. The synthetic
+PNGs ship with deterministic LSB jitter so the highest-frequency DWT
+shards stay unique per file — without it the smooth gradient / mandala
+generators produce identical zero-coefficient shards across images
+and the dedup layer collapses them onto one canonical node, breaking
+every GET but the first.
+
 ### TLS / mTLS on the wire (optional)
 
 ```sh
