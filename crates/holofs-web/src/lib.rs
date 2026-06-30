@@ -604,12 +604,8 @@ fn RoutedApp() -> impl IntoView {
 ///   and deletes happen.
 #[component]
 fn CatalogPage() -> impl IntoView {
-    // The catalog is now a single tree view. The legacy
-    // single-directory focus page (`/?p=<path>`) is gone — clicking
-    // "open" on a folder now expands the branch inline via
-    // `?open=<path>`, no separate page. Old `?p=` bookmarks still
-    // work: TreeBranch falls back to `?p=` when `?open=` is unset,
-    // so the right folder still auto-expands and scrolls into view.
+    use leptos_router::hooks::use_query_map;
+    let query = use_query_map();
     view! {
         // Stage 11.28: tag `<body>` so the catalog page can opt into
         // `body { overflow: hidden; height: 100vh }` — kills the
@@ -619,7 +615,19 @@ fn CatalogPage() -> impl IntoView {
         <ui::Topbar active="catalog"/>
 
         <main class="container">
-            <CatalogTreeView/>
+            {move || {
+                // The catalog is one tree, but its ROOT can be any
+                // folder: `/?p=<path>` makes <path>'s children the
+                // top-level entries (proper "cd into folder"; "open"
+                // on a card lands here). `?open=` is kept as an
+                // alias for backward-compat with old bookmarks.
+                let prefix = query.with(|q| {
+                    q.get("p")
+                        .or_else(|| q.get("open"))
+                        .unwrap_or_default()
+                });
+                view! { <CatalogTreeView prefix=prefix/> }.into_any()
+            }}
         </main>
     }
 }
@@ -858,7 +866,7 @@ impl TreeSort {
 ///
 /// Sort key (`?sort=name|size|kind|date`) applies to both paths.
 #[component]
-fn CatalogTreeView() -> impl IntoView {
+fn CatalogTreeView(#[prop(into)] prefix: String) -> impl IntoView {
     use leptos_router::hooks::use_query_map;
     let query = use_query_map();
     let sort_signal = move || {
@@ -879,18 +887,31 @@ fn CatalogTreeView() -> impl IntoView {
     };
     let filter_sig = Signal::derive(filter_signal);
     let sort_sig = Signal::derive(sort_signal);
+    let prefix_breadcrumb = prefix.clone();
+    let prefix_filter = prefix.clone();
+    let prefix_lazy = prefix.clone();
 
     view! {
+        // Stage 15.x: when the tree root is not the catalog root,
+        // show a breadcrumb so the user can navigate back up.
+        {(!prefix_breadcrumb.is_empty()).then(|| view! {
+            <Breadcrumb prefix=prefix_breadcrumb.clone()/>
+        })}
         <p class="mut tree-intro">{t!("catalog.tree_intro")}</p>
-        <FilterBar prefix=String::new()/>
+        <FilterBar prefix=prefix_filter/>
         {move || {
+            let p = prefix_lazy.clone();
             if filter_active() {
+                // Eager / filter path stays prefix-agnostic for now —
+                // filters are a "search the whole catalog" affordance
+                // and rooting them at a subtree would surprise users.
+                let _ = p;
                 view! { <CatalogTreeEager
                     filter=filter_sig
                     sort=sort_sig
                 /> }.into_any()
             } else {
-                view! { <CatalogTreeLazy sort=sort_sig/> }.into_any()
+                view! { <CatalogTreeLazy prefix=p sort=sort_sig/> }.into_any()
             }
         }}
     }
@@ -939,20 +960,28 @@ const LAZY_PAGE_SIZE: u32 = 200;
 /// time it opens. The same controls bar (expand-all / sort / mkdir)
 /// is shared with the eager path.
 #[component]
-fn CatalogTreeLazy(#[prop(into)] sort: Signal<TreeSort>) -> impl IntoView {
-    // Reload the root level when the sort changes — deeper opened
-    // folders re-mount their resource when their own sort context
-    // changes, see `LazyDirNode`.
+fn CatalogTreeLazy(
+    #[prop(into)] prefix: String,
+    #[prop(into)] sort: Signal<TreeSort>,
+) -> impl IntoView {
+    // Reload the root level when the sort or prefix changes —
+    // deeper opened folders re-mount their resource when their own
+    // sort context changes, see `LazyDirNode`.
+    let prefix_for_shell = prefix.clone();
     let root = Resource::new(
-        move || sort.get().as_str(),
-        move |s| async move {
-            list_dir_page(String::new(), 0, LAZY_PAGE_SIZE, s.to_string()).await
+        {
+            let p = prefix.clone();
+            move || (p.clone(), sort.get().as_str())
+        },
+        |(p, s)| async move {
+            list_dir_page(p, 0, LAZY_PAGE_SIZE, s.to_string()).await
         },
     );
     view! {
         <Suspense fallback=move || view! { <p class="mut">{t!("catalog.loading")}</p> }>
             {move || {
                 let s = sort.get();
+                let p = prefix_for_shell.clone();
                 root.get().map(|res| match res {
                     Ok(page) if page.entries.is_empty() && !page.has_more => view! {
                         <p class="empty-state">
@@ -961,7 +990,7 @@ fn CatalogTreeLazy(#[prop(into)] sort: Signal<TreeSort>) -> impl IntoView {
                         </p>
                     }.into_any(),
                     Ok(page) => view! {
-                        <CatalogTreeLazyShell initial=page sort=s/>
+                        <CatalogTreeLazyShell prefix=p initial=page sort=s/>
                     }.into_any(),
                     Err(e) => view! {
                         <p class="bad">{t!("catalog.load_failed")} " " {e.to_string()}</p>
@@ -976,7 +1005,11 @@ fn CatalogTreeLazy(#[prop(into)] sort: Signal<TreeSort>) -> impl IntoView {
 /// mkdir / sort) the eager `CatalogTreeBody` renders, and mounts the
 /// root `LazyLevel` for the actual entries.
 #[component]
-fn CatalogTreeLazyShell(initial: ListDirPage, sort: TreeSort) -> impl IntoView {
+fn CatalogTreeLazyShell(
+    #[prop(into)] prefix: String,
+    initial: ListDirPage,
+    sort: TreeSort,
+) -> impl IntoView {
     let sort_link = |k: TreeSort| {
         if k == sort {
             "tree-sort-link active".to_string()
@@ -988,6 +1021,20 @@ fn CatalogTreeLazyShell(initial: ListDirPage, sort: TreeSort) -> impl IntoView {
     let s_size = sort_link(TreeSort::Size);
     let s_kind = sort_link(TreeSort::Kind);
     let s_date = sort_link(TreeSort::Date);
+    // The root mkdir + upload forms create entries inside the
+    // current tree root (catalog root when prefix is empty; the
+    // chosen subfolder otherwise). `return_to` brings the user back
+    // to the same root view so the new entry appears straight away.
+    let prefix_for_mkdir = prefix.clone();
+    let prefix_for_upload = prefix.clone();
+    let return_to = if prefix.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/?p={}", url_encode(&prefix))
+    };
+    let return_to_mkdir = return_to.clone();
+    let return_to_upload = return_to.clone();
+    let prefix_for_lazy = prefix.clone();
     view! {
         <div class="tree-controls">
             <button
@@ -1008,8 +1055,8 @@ fn CatalogTreeLazyShell(initial: ListDirPage, sort: TreeSort) -> impl IntoView {
             </button>
             <TreeZoomButtons/>
             <form class="tree-mkdir" method="POST" action="/api/mkdir">
-                <input type="hidden" name="parent" value=""/>
-                <input type="hidden" name="return_to" value="/"/>
+                <input type="hidden" name="parent" value=prefix_for_mkdir/>
+                <input type="hidden" name="return_to" value=return_to_mkdir/>
                 <input
                     type="text"
                     name="name"
@@ -1022,18 +1069,19 @@ fn CatalogTreeLazyShell(initial: ListDirPage, sort: TreeSort) -> impl IntoView {
                     <span class="tree-control-label">{t!("mkdir.submit")}</span>
                 </button>
             </form>
-            // Root upload form: drop a file at the catalog root with
-            // no folder prefix. Mirrors the per-folder inline upload
-            // a level down; the empty `parent` value is what
-            // `handlers::upload_form` expects for a top-level PUT.
+            // Root upload form: drops a file straight into the
+            // current tree root. When the catalog is at `/` the
+            // parent is empty (top-level PUT); when the user has
+            // cd'd into a subfolder via `?p=<path>`, the form is
+            // scoped to that folder.
             <form
                 class="tree-mkdir tree-root-upload"
                 method="POST"
                 action="/api/upload"
                 enctype="multipart/form-data"
             >
-                <input type="hidden" name="parent" value=""/>
-                <input type="hidden" name="return_to" value="/"/>
+                <input type="hidden" name="parent" value=prefix_for_upload/>
+                <input type="hidden" name="return_to" value=return_to_upload/>
                 <input type="file" name="file" required=true/>
                 <button type="submit" class="tree-control-btn">
                     <span class="tree-control-icon">"↑"</span>
@@ -1054,7 +1102,7 @@ fn CatalogTreeLazyShell(initial: ListDirPage, sort: TreeSort) -> impl IntoView {
         <div class="tree-scroll">
             <ul class="tree-root">
                 <LazyLevel
-                    path=String::new()
+                    path=prefix_for_lazy
                     initial=initial
                     sort=sort
                     depth=0
@@ -1477,7 +1525,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                             <input
                                 type="hidden"
                                 name="return_to"
-                                value={format!("/?open={enc_path}")}
+                                value={format!("/?p={enc_path}")}
                             />
                             <input
                                 type="text"
@@ -1505,13 +1553,13 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                             <input
                                 type="hidden"
                                 name="return_to"
-                                value={format!("/?open={enc_path}")}
+                                value={format!("/?p={enc_path}")}
                             />
                             <input type="file" name="file" required=true/>
                             <button type="submit" class="link-btn">"↑ " {t!("upload.submit")}</button>
                         </form>
                         <span class="tree-sep">"·"</span>
-                        <a href={format!("/?open={enc_path}")} rel="external">{t!("folder.open")} " →"</a>
+                        <a href={format!("/?p={enc_path}")} rel="external">{t!("folder.open")} " →"</a>
                         <span class="tree-sep">"·"</span>
                         <form
                             method="POST"
@@ -1949,7 +1997,7 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                                 <input
                                     type="hidden"
                                     name="return_to"
-                                    value={format!("/?open={enc_path}")}
+                                    value={format!("/?p={enc_path}")}
                                 />
                                 <input
                                     type="text"
@@ -1972,13 +2020,13 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                                 <input
                                     type="hidden"
                                     name="return_to"
-                                    value={format!("/?open={enc_path}")}
+                                    value={format!("/?p={enc_path}")}
                                 />
                                 <input type="file" name="file" required=true/>
                                 <button type="submit" class="link-btn">"↑ " {t!("upload.submit")}</button>
                             </form>
                             <span class="tree-sep">"·"</span>
-                            <a href={format!("/?open={enc_path}")} rel="external">{t!("folder.open")} " →"</a>
+                            <a href={format!("/?p={enc_path}")} rel="external">{t!("folder.open")} " →"</a>
                             <span class="tree-sep">"·"</span>
                             <form
                                 method="POST"
@@ -2038,7 +2086,7 @@ fn Breadcrumb(prefix: String) -> impl IntoView {
                     let enc = url_encode(&full);
                     view! {
                         <span>" / "</span>
-                        <a href={format!("/?open={enc}")} rel="external">{seg}</a>
+                        <a href={format!("/?p={enc}")} rel="external">{seg}</a>
                     }.into_any()
                 }
             }).collect_view()}
@@ -2139,17 +2187,17 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
         );
         return view! {
             <article class="card kind-directory">
-                <a class="thumb dir-thumb" href={format!("/?open={enc_full}")} rel="external">
+                <a class="thumb dir-thumb" href={format!("/?p={enc_full}")} rel="external">
                     <span class="icon">"📁"</span>
                 </a>
                 <div class="meta">
                     <div class="name">
-                        <a href={format!("/?open={enc_full}")} rel="external">{basename.clone()}</a>
+                        <a href={format!("/?p={enc_full}")} rel="external">{basename.clone()}</a>
                     </div>
                     <div class="row mut">{t!("folder.kind_label")}</div>
                 </div>
                 <div class="actions">
-                    <a href={format!("/?open={}", enc_full.clone())} rel="external">{t!("folder.open")}</a>
+                    <a href={format!("/?p={}", enc_full.clone())} rel="external">{t!("folder.open")}</a>
                     " · "
                     <form
                         method="POST"
