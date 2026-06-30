@@ -1,5 +1,9 @@
 # Escenarios de prueba
 
+
+> ⚠ **Translation may be stale.** This file was last synced before Stage 12-15 (versioning + deletion, HNSW-backed semantic search, /spotlight ROI, streaming /holo, /diff, /similar, auto-repair-on-read, background scrub, typed RPC layer with timeouts + NoLiveNodes panic-fix, per-folder inline upload). The English source under [../](../) is the canon for any new feature; the [Unreleased] block of [../../CHANGELOG.md](../../CHANGELOG.md) lists every delta this translation does not yet cover.
+
+
 Lista de verificación manual de extremo a extremo para holofs. Cubre cada subsistema importante:
 CRUD, catálogo jerárquico, HTTP Range, degradación holográfica,
 búsqueda perceptual, escrow, persistencia e i18n. Cada escenario detalla

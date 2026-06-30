@@ -1,5 +1,9 @@
 # Architecture
 
+
+> ⚠ **Translation may be stale.** This file was last synced before Stage 12-15 (versioning + deletion, HNSW-backed semantic search, /spotlight ROI, streaming /holo, /diff, /similar, auto-repair-on-read, background scrub, typed RPC layer with timeouts + NoLiveNodes panic-fix, per-folder inline upload). The English source under [../](../) is the canon for any new feature; the [Unreleased] block of [../../CHANGELOG.md](../../CHANGELOG.md) lists every delta this translation does not yet cover.
+
+
 Structure au niveau système de holofs, à destination des mainteneurs et des relecteurs.
 Pour les fondements mathématiques, voir [theory.md](./theory.md) ; pour les détails du
 protocole HTTP / filaire, voir [api.md](./api.md).
