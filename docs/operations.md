@@ -283,6 +283,26 @@ Every variable has a matching CLI flag (`--storage`, `--log`, etc.) — run
 | `HOLOFS_N_NODES`            | `40`           | Number of in-process nodes               |
 | `HOLOFS_EMBED_BASE_PORT`    | `9100`         | Stable base port (avoid ephemeral churn) |
 | `HOLOFS_ZONES`              | `5`            | Number of zones to assign                |
+| `HOLOFS_NO_SEED`            | `false`        | Skip the two-PNG demo seed on an empty catalog. Set to `true` when re-uploading from a known sample tree so the seed doesn't collide with your data. |
+
+### 5.5. Reliability (Stage 15.x)
+
+| Variable                    | Default | Description                                              |
+|-----------------------------|---------|----------------------------------------------------------|
+| `HOLOFS_RPC_TIMEOUT_MS`     | `8000`  | Per-RPC overall budget (`tokio::time::timeout`). `0` disables the cap; the OS-level TCP timeout (60-75 s) is then the only stop. |
+| `HOLOFS_SCRUB_INTERVAL`     | `600`   | Background shard scrub period (seconds). `0` disables. Scrubs walk the catalog, diff `list_node_hashes` vs `place_shard`, repair the mismatches before users hit them. |
+| `HOLOFS_VERSIONS_KEEP_LAST` | `0`     | Per-name version-history cap. Drops oldest archives on every PUT. `0` = unlimited (manual `/api/versions/delete` is then the only path to reclaim shards). Requires `--enable-versions`. |
+| `HOLOFS_POOL_PER_NODE`      | `8`     | Max idle pooled wire connections per node addr.         |
+| `HOLOFS_POOL_IDLE_SECS`     | `60`    | Drop pooled entries idle longer than this on `acquire`. |
+| `HOLOFS_POOL_DISABLE`       | `false` | Bypass the keepalive pool — every RPC dials fresh. Useful when chasing wire-level bugs. |
+
+### 5.6. Optional features
+
+| Variable                    | Default | Description                                              |
+|-----------------------------|---------|----------------------------------------------------------|
+| `HOLOFS_ENABLE_VERSIONS`    | `false` | Mirror of `--enable-versions`. Archives every PUT-replace as a side file under `<storage>/versions/<sanitized>/v…bin`. |
+| `HOLOFS_ENABLE_EMBED`       | `false` | Mirror of `--enable-embed`. Loads the CLIP-multilingual model on first PUT or first `/api/search`, then maintains `embeddings.bin`. |
+| `HOLOFS_MCP_TOKEN`          | —       | When set, the `/mcp` endpoint requires `Authorization: Bearer <token>` AND flips write tools on. Without the variable the endpoint stays open + read-only. |
 
 ---
 
@@ -295,20 +315,29 @@ The gateway exposes `GET /metrics` in Prometheus text exposition format
 `Gateway::api_stats` + admin-kill snapshot — no counters/histograms in the
 initial release.
 
-| Metric                          | Type  | Labels                       | Meaning |
-|---------------------------------|-------|------------------------------|---------|
-| `holofs_nodes_total`            | gauge | —                            | nodes in topology |
-| `holofs_nodes_live`             | gauge | —                            | nodes not admin-disabled |
-| `holofs_objects_total`          | gauge | `kind` (image/audio/text/opaque) | catalog size by kind |
-| `holofs_shards_total`           | gauge | —                            | planned shards across catalog |
-| `holofs_shards_unique`          | gauge | —                            | distinct shard hashes |
-| `holofs_dedup_savings_pct`      | gauge | —                            | `(1 − unique/total) × 100` |
-| `holofs_bytes_total`            | gauge | —                            | approximate stored bytes |
-| `holofs_node_admin_killed`      | gauge | `node`, `addr`, `zone`       | per-node admin-kill flag |
+| Metric                              | Type  | Labels                       | Meaning |
+|-------------------------------------|-------|------------------------------|---------|
+| `holofs_nodes_total`                | gauge | —                            | nodes in topology |
+| `holofs_nodes_live`                 | gauge | —                            | nodes not admin-disabled |
+| `holofs_objects_total`              | gauge | `kind` (image/audio/text/opaque/directory) | catalog size by kind |
+| `holofs_shards_total`               | gauge | —                            | planned shards across catalog |
+| `holofs_shards_unique`              | gauge | —                            | distinct shard hashes |
+| `holofs_dedup_savings_pct`          | gauge | —                            | `(1 − unique/total) × 100` |
+| `holofs_bytes_total`                | gauge | —                            | approximate stored bytes |
+| `holofs_node_admin_killed`          | gauge | `node`, `addr`, `zone`       | per-node admin-kill flag |
+| `holofs_auto_repairs_total`         | gauge | —                            | GETs that triggered `decode_with_autorepair`'s retry arm (Stage 14.3) |
+| `holofs_auto_repair_failures_total` | gauge | —                            | auto-repair passes that themselves failed |
+| `holofs_scrub_runs_total`           | gauge | —                            | background scrub ticks completed (`HOLOFS_SCRUB_INTERVAL`) |
+| `holofs_scrub_repairs_total`        | gauge | —                            | objects the scrub repaired *before* any user hit them |
 
-Future releases will add counters and histograms for wire RTT, repair
-throughput, decode latency, and reputation (currently logged via
-`tracing` only).
+A healthy cluster keeps the four self-healing counters at zero or
+near-zero; sustained non-zero rate on `auto_repair_failures_total`
+is the operator alert signal that placement / disk loss has gone
+beyond what the K threshold can absorb.
+
+Future releases will add counters and histograms for wire RTT,
+repair throughput, decode latency, and reputation (currently
+logged via `tracing` only).
 
 ### 6.2. Reference alert rules
 
