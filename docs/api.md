@@ -104,12 +104,39 @@ Status-code mapping for the dir ops:
   "shards_total": 5328,
   "shards_unique": 5326,
   "dedup_savings_pct": 0.04,
-  "bytes_total": 50266112
+  "bytes_total": 50266112,
+  "auto_repairs_total": 0,
+  "auto_repair_failures_total": 0,
+  "scrub_runs_total": 8,
+  "scrub_repairs_total": 0
 }
 ```
 
 `objects_total = sum(objects_by_kind)`; `directory` markers are counted
 but contribute nothing to `shards_total` / `bytes_total`.
+
+The four trailing counters (Stage 14.3 + 15.x) expose self-healing
+activity:
+
+- `auto_repairs_total` — GETs that triggered the
+  `decode_with_autorepair` retry arm (LayerLost on the first decode
+  → repair_object_inplace → second decode).
+- `auto_repair_failures_total` — auto-repair pass that itself
+  failed (too few donors, second decode still LayerLost, etc.).
+- `scrub_runs_total` — background scrub ticks completed
+  (`HOLOFS_SCRUB_INTERVAL`, default 600 s).
+- `scrub_repairs_total` — objects the scrub repaired *before* any
+  user hit them.
+
+A healthy cluster keeps all four at zero or near-zero; a sustained
+non-zero rate on `auto_repair_failures_total` is the operator alert
+signal.
+
+#### `GET /metrics` — Prometheus exposition
+
+`text/plain; version=0.0.4` body, one gauge per `/api/stats` field,
+each with `# HELP` + `# TYPE` lines. Drop-in compatible with the
+default scrape config; no labels except `holofs_objects_total{kind}`.
 
 ### Search and analytics
 
@@ -153,6 +180,108 @@ sits in front of the wildcard object path.
 `.holoshare` files are **not stored on the cluster** — the gateway computes
 them on demand and keeps them in memory until restart or until the user
 downloads them.
+
+### Versions, search, streaming (Stage 12.8 – 13.4)
+
+Behind opt-in flags (`--enable-versions`, `--enable-embed`) the
+gateway exposes per-object history, semantic search, and progressive
+HTTP streams. These endpoints are on by default once the feature is
+on; no per-request auth.
+
+#### Version history
+
+| Method | Path                              | Description |
+|--------|-----------------------------------|-------------|
+| `GET`  | `/versions/<name>`                | SSR page: timeline of archived manifests with restore + delete buttons |
+| `POST` | `/api/versions_list`              | Leptos server fn (form-encoded `name=…`). JSON `{versions:[{id, created_at_ms, cid_short, width, height, kind}]}` |
+| `POST` | `/api/restore`                    | Form-friendly restore. `name=…&id=…&return_to=…` → 303 redirect on success. |
+| `POST` | `/api/versions/delete`            | Form-friendly delete. `name=…&id=…&return_to=…` → 303 on success. Drops the `.bin` archive and GCs any shards it uniquely held. |
+
+`HOLOFS_VERSIONS_KEEP_LAST=N` (env knob) prunes the oldest archives on
+every PUT so each name's history stays bounded at `N`. Unset / `0`
+keeps history unbounded (manual `/api/versions/delete` is then the
+only way to free shards).
+
+#### Semantic search
+
+| Method | Path                                          | Description |
+|--------|-----------------------------------------------|-------------|
+| `GET`  | `/search`                                     | SSR page with result cards |
+| `GET`  | `/api/search?q=…&limit=…&band=…`              | JSON `{hits:[{name, score, band}]}` sorted by cosine descending |
+| `POST` | `/api/embed_all`                              | Bulk-embed every image in the catalog that isn't yet in `embeddings.bin` (synchronous, prints `(new, skipped)` counts) |
+
+`band` is one of `coarse` / `mid` / `full` / `any` (default `any` —
+search across all three and keep the best score per name). Empty
+`q=` returns 400 before paying the CLIP-encode cost. Disabled
+gateway (no `--enable-embed`) → 503 + hint about the missing flag.
+
+#### Streaming + ROI
+
+| Method | Path                          | Description |
+|--------|-------------------------------|-------------|
+| `GET`  | `/holo/<name>`                | Progressive reveal: layer-by-layer page that streams a new image for every DWT layer L0 → L_max |
+| `GET`  | `/preview/stream/<name>`      | `multipart/x-mixed-replace` body; each part is the same object decoded one extra layer deep |
+| `GET`  | `/api/spotlight.png?a=…&x=…&y=…&w=…&h=…` | Holographic spotlight: sharp inside the ROI, smooth outside. Both pixel coords (`x_px`/`y_px`/…) and normalised (`x`/`y`/…) accepted |
+| `GET`  | `/spotlight?a=…`              | SSR page with ROI picker |
+
+### Garbage collection + uploads
+
+| Method | Path                          | Description |
+|--------|-------------------------------|-------------|
+| `POST` | `/api/gc`                     | Orphan-shard collector. Walks catalog + version archives, lists every node's hashes, asks each to `PurgeByHash` the residue |
+| `POST` | `/api/upload` (multipart)     | Form-friendly upload. Fields: `parent` (string, may be empty), `file` (binary), optional `name` rename, `return_to` |
+| `POST` | `/api/mv`                     | Rename / move. Form fields `from=…&to=…`. 4xx on clobber attempts. |
+
+`/api/gc` returns:
+
+```json
+{
+  "live_hashes": 5326,
+  "manifests_scanned": 14,
+  "held_total": 5326,
+  "purged_total": 0,
+  "embeddings_kept": 11,
+  "embeddings_dropped": 0,
+  "duration_ms": 47,
+  "nodes": [
+    {"idx": 0, "addr": "127.0.0.1:9100", "held": 134, "orphaned": 0, "ok": true},
+    {"idx": 1, "addr": "127.0.0.1:9101", "held": 132, "orphaned": 0, "ok": true},
+    ...
+  ]
+}
+```
+
+Idempotent — running twice on a healthy cluster reports zero on the
+second pass. `embeddings_kept` / `embeddings_dropped` are `null`
+when `--enable-embed` is off.
+
+### Reliability env knobs (Stage 15.x)
+
+| Variable                       | Default | Effect                                                  |
+|--------------------------------|---------|---------------------------------------------------------|
+| `HOLOFS_RPC_TIMEOUT_MS`        | `8000`  | Per-RPC timeout (`tokio::time::timeout` wrapper). `0` disables. |
+| `HOLOFS_SCRUB_INTERVAL`        | `600`   | Background scrub interval in seconds. `0` disables.    |
+| `HOLOFS_VERSIONS_KEEP_LAST`    | `0`     | Per-name history cap. Drops oldest on each PUT. `0` = unbounded. |
+| `HOLOFS_NO_SEED`               | `false` | Skip the embedded-mode demo PNG seed on an empty catalog. |
+| `HOLOFS_POOL_PER_NODE`         | `8`     | Max idle pooled connections per node addr.             |
+| `HOLOFS_POOL_IDLE_SECS`        | `60`    | Drop pooled entries idle longer than this on `acquire`. |
+| `HOLOFS_POOL_DISABLE`          | `false` | Bypass the keepalive pool — every RPC dials fresh.     |
+
+#### Cluster-degraded errors
+
+When every node is admin-killed or unreachable, the typed
+`NoLiveNodes` error bubbles up:
+
+- PUT against a fully-down cluster → `503 Service Unavailable`
+  with body text mentioning the cluster.
+- GET on the decode path → `503` from
+  `decode_with_autorepair`'s second-attempt failure.
+- Auditor / monitor tick → silent no-op (the `live` set is empty
+  by definition, so no per-object scan fires).
+
+`/admin/node?i=N` (form POST) toggles node `N` between
+admin-disabled and admin-restored. `nodes_live` in `/api/stats`
+reflects the effective set immediately.
 
 ---
 
