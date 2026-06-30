@@ -1467,7 +1467,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                             <button type="submit" class="link-btn">"+ " {t!("folder.kind_label")}</button>
                         </form>
                         <span class="tree-sep">"·"</span>
-                        <a href={format!("/?p={enc_path}")}>{t!("folder.open")} " →"</a>
+                        <a href={format!("/?p={enc_path}")} rel="external">{t!("folder.open")} " →"</a>
                         <span class="tree-sep">"·"</span>
                         <form
                             method="POST"
@@ -1899,7 +1899,7 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                                 <button type="submit" class="link-btn">"+ " {t!("folder.kind_label")}</button>
                             </form>
                             <span class="tree-sep">"·"</span>
-                            <a href={format!("/?p={enc_path}")}>{t!("folder.open")} " →"</a>
+                            <a href={format!("/?p={enc_path}")} rel="external">{t!("folder.open")} " →"</a>
                             <span class="tree-sep">"·"</span>
                             <form
                                 method="POST"
@@ -1959,7 +1959,7 @@ fn Breadcrumb(prefix: String) -> impl IntoView {
                     let enc = url_encode(&full);
                     view! {
                         <span>" / "</span>
-                        <a href={format!("/?p={enc}")}>{seg}</a>
+                        <a href={format!("/?p={enc}")} rel="external">{seg}</a>
                     }.into_any()
                 }
             }).collect_view()}
@@ -2060,17 +2060,17 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
         );
         return view! {
             <article class="card kind-directory">
-                <a class="thumb dir-thumb" href={format!("/?p={enc_full}")}>
+                <a class="thumb dir-thumb" href={format!("/?p={enc_full}")} rel="external">
                     <span class="icon">"📁"</span>
                 </a>
                 <div class="meta">
                     <div class="name">
-                        <a href={format!("/?p={enc_full}")}>{basename.clone()}</a>
+                        <a href={format!("/?p={enc_full}")} rel="external">{basename.clone()}</a>
                     </div>
                     <div class="row mut">{t!("folder.kind_label")}</div>
                 </div>
                 <div class="actions">
-                    <a href={format!("/?p={}", enc_full.clone())}>{t!("folder.open")}</a>
+                    <a href={format!("/?p={}", enc_full.clone())} rel="external">{t!("folder.open")}</a>
                     " · "
                     <form
                         method="POST"
