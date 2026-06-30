@@ -8,7 +8,7 @@ sufficient handful of shards reconstructs the data exactly; an insufficient
 handful still yields the same data, just at a lower resolution. Like a piece
 of a hologram: cut it in half and the picture remains whole, just blurrier.
 
-> Status: working prototype, **v0.4.0**, **426 tests** green (320
+> Status: working prototype, **v0.5.0**, **426 tests** green (320
 > workspace + 106 e2e; **91% line coverage** on measurable code). Not
 > for production. Fifteen implementation stages closed: axum + Leptos
 > SSR web UI, persistent multi-process cluster with Ed25519 identity,

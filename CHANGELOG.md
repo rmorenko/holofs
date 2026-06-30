@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet; the slate is clean after the 0.5.0 cut._
+
+## [0.5.0] - 2026-06-30
+
 ### Added — Stage 15.x: reliability + e2e coverage
 
 - **Typed wire layer.** `holofs-client::rpc` runs every RPC inside

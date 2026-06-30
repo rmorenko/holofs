@@ -24,7 +24,12 @@ members = [
 # unmaintained-dep advisories.
 # 0.3.0 → 0.4.0 — Stage 10 in-app help viewer, UI i18n (5 locales) and
 # fully translated documentation set under docs/{ru,de,fr,es}/.
-version = "0.4.0"
+# 0.4.0 → 0.5.0 — Stage 11.4-15.x fan-out: per-folder upload + cd-into-
+# folder catalog, /versions history with delete + retention, HNSW
+# semantic search, /spotlight ROI, streaming /holo, /diff, /similar,
+# auto-repair-on-read, background scrub, typed RPC layer (timeouts +
+# NoLiveNodes), MCP server, 426-test coverage (320 workspace + 106 e2e).
+version = "0.5.0"
 edition = "2021"
 # Leptos 0.7 itself only needs Rust 1.76, but several transitive deps
 # (tokio 1.41+, tracing-subscriber 0.3.19+, hyper 1.5+) have moved to
@@ -97,17 +102,17 @@ web-sys = "0.3"
 js-sys = "0.3"
 
 # Internal crates (path-deps)
-holofs-core      = { path = "crates/holofs-core",      version = "0.4.0" }
-holofs-model     = { path = "crates/holofs-model",     version = "0.4.0" }
-holofs-wire      = { path = "crates/holofs-wire",      version = "0.4.0" }
-holofs-codec     = { path = "crates/holofs-codec",     version = "0.4.0" }
-holofs-storage   = { path = "crates/holofs-storage",   version = "0.4.0" }
-holofs-client    = { path = "crates/holofs-client",    version = "0.4.0" }
-holofs-cluster   = { path = "crates/holofs-cluster",   version = "0.4.0" }
-holofs-analytics = { path = "crates/holofs-analytics", version = "0.4.0" }
-holofs-gateway   = { path = "crates/holofs-gateway",   version = "0.4.0" }
-holofs-mcp       = { path = "crates/holofs-mcp",       version = "0.4.0" }
-holofs-embed     = { path = "crates/holofs-embed",     version = "0.4.0" }
+holofs-core      = { path = "crates/holofs-core",      version = "0.5.0" }
+holofs-model     = { path = "crates/holofs-model",     version = "0.5.0" }
+holofs-wire      = { path = "crates/holofs-wire",      version = "0.5.0" }
+holofs-codec     = { path = "crates/holofs-codec",     version = "0.5.0" }
+holofs-storage   = { path = "crates/holofs-storage",   version = "0.5.0" }
+holofs-client    = { path = "crates/holofs-client",    version = "0.5.0" }
+holofs-cluster   = { path = "crates/holofs-cluster",   version = "0.5.0" }
+holofs-analytics = { path = "crates/holofs-analytics", version = "0.5.0" }
+holofs-gateway   = { path = "crates/holofs-gateway",   version = "0.5.0" }
+holofs-mcp       = { path = "crates/holofs-mcp",       version = "0.5.0" }
+holofs-embed     = { path = "crates/holofs-embed",     version = "0.5.0" }
 
 [profile.release]
 opt-level = 3
