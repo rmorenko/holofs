@@ -24,15 +24,18 @@ Strict topological order — never let arrows point upward.
 graph BT
     core["holofs-core<br/>GF, DWT, RLNC, SHA-256, Merkle"]
     wire["holofs-wire<br/>tokio framing + Request/Response"]
-    model["holofs-model<br/>Manifest, Directory, Placement"]
-    codec["holofs-codec<br/>image/audio/text"]
-    storage["holofs-storage<br/>Store, Identity, Whitelist"]
-    client["holofs-client<br/>PUT/GET/REPAIR/AUDIT"]
-    cluster["holofs-cluster<br/>health, monitor, audit, repair"]
+    model["holofs-model<br/>Manifest, Directory, Placement, NoLiveNodes"]
+    codec["holofs-codec<br/>image/audio/text/opaque"]
+    storage["holofs-storage<br/>Store, Identity, Whitelist, TLS"]
+    client["holofs-client<br/>PUT/GET/REPAIR/AUDIT + pool + timeouts"]
+    cluster["holofs-cluster<br/>health, monitor, audit, repair, reputation"]
+    embed["holofs-embed<br/>CLIP-multilingual + HNSW ANN"]
     analytics["holofs-analytics<br/>fingerprint, MinHash, escrow"]
-    gateway["holofs-gateway<br/>HTTP/1.1 server + admin UI"]
-    cli["holofs-cli<br/>holofs-node, -http, -admin, ..."]
-    web["holofs-web<br/>Leptos SSR + hydration (WIP)"]
+    gateway["holofs-gateway<br/>catalog, decode, auto-repair, scrub"]
+    mcp["holofs-mcp<br/>Streamable-HTTP MCP server"]
+    web["holofs-web<br/>axum + Leptos 0.7 SSR + WASM hydrate"]
+    cli["holofs-cli<br/>holofs-admin, -bench, -inspect, ..."]
+    e2e["holofs-e2e<br/>thirtyfour + chromedriver test harness"]
 
     core --> wire
     core --> model
@@ -49,6 +52,8 @@ graph BT
     wire --> cluster
     storage --> cluster
     client --> cluster
+    core --> embed
+    model --> embed
     core --> analytics
     model --> analytics
     core --> gateway
@@ -58,9 +63,13 @@ graph BT
     storage --> gateway
     client --> gateway
     cluster --> gateway
+    embed --> gateway
     analytics --> gateway
-    gateway --> cli
+    gateway --> mcp
     gateway --> web
+    web --> mcp
+    gateway --> cli
+    web --> e2e
 ```
 
 **Rule of thumb.** A pull request that adds an upward edge in this graph
@@ -292,9 +301,52 @@ trust class as Backblaze B2 or AWS S3, not Filecoin or Storj. See
 |--------------------|---------|------------------|
 | Health monitor     | `HOLOFS_MONITOR_INTERVAL` (15 s default) | holofs-cluster |
 | PoR auditor        | `HOLOFS_AUDIT_INTERVAL` (30 s default)   | holofs-cluster |
+| **Shard scrub**    | `HOLOFS_SCRUB_INTERVAL` (600 s default)  | holofs-gateway |
 | Catalog autosave   | on every catalog mutation (inline)       | holofs-gateway |
 
-Both background tasks are aborted on SIGINT via `tokio::select!`.
+All three background loops are aborted on SIGINT via `tokio::select!`.
+
+### Auto-repair-on-read + scrub (Stage 14.3 + 15.x)
+
+The GET path is wrapped in `decode_with_autorepair`: on
+`ClientError::LayerLost` it bumps `auto_repairs_total`, runs
+`repair_object_inplace` (per-node surgical repair via
+`list_node_hashes` + `repair_node`), persists the mutated manifest,
+and retries the decode once. A second failure bumps
+`auto_repair_failures_total` and surfaces the original error.
+
+The scrub does the same work *proactively*: walks the catalog
+between user requests, diffs `list_node_hashes` against
+`place_shard` per object, and surgically repairs the mismatches
+before any reader hits a `LayerLost`. Tracked via
+`scrub_runs_total` + `scrub_repairs_total` counters.
+
+### `gc_barrier` writer/scrub rendezvous
+
+Three operations can mutate shard state: `ingest_bytes` (PUT),
+`gc_orphaned_shards` (manual GC), and the background scrub. They
+coordinate through a single `tokio::sync::RwLock<()>`:
+
+- PUT / restore_version / scrub take **read** guards — they don't
+  conflict with each other, but they block GC.
+- GC takes a **write** guard — exclusive, blocks every concurrent
+  shard write until it finishes.
+
+Without this, the GC pass could enumerate hashes, decide a shard is
+orphaned, and PurgeByHash it *just* as a fresh PUT was about to
+land a manifest pointing at that hash — observed as silent shard
+loss on the §25 concurrency scenario.
+
+### RPC timeouts + retries (Stage 15.x)
+
+Every wire op (`rpc_attempt`) runs inside `tokio::time::timeout`
+with `HOLOFS_RPC_TIMEOUT_MS` as the budget (default 8 s). On
+expiry the pooled stream is poisoned and the error surfaces as
+`io::ErrorKind::TimedOut`; `is_likely_transient` keys on the kind
+to drive a single automatic retry against a freshly-dialled
+connection. Combined with the per-addr keepalive pool, a flapping
+node now caps user-visible latency at 8 s + one retry instead of
+the OS-level 60-75 s TCP timeout.
 
 ---
 
@@ -308,9 +360,10 @@ Both background tasks are aborted on SIGINT via `tokio::select!`.
 | Node lies "I have it" without storing       | PoR audit (`MissingShard`)   | reputation drops |
 | Whole rack / zone goes dark                 | health monitor + zone-aware  | object stays decodable up to L_{n-1}/L_{n-2} |
 | Gateway crashes mid-PUT                     | client retry                  | shards already on nodes are dedup'd by hash on retry |
-| Gateway crashes mid-DELETE                  | inconsistent: some nodes purged, some not | next health pass detects orphan shards (TODO: gc) |
-| Disk corruption on one shard file           | hash verify on read           | shard discarded → margin drops → repair |
-| Network partition between gateway and node  | RPC timeout                   | health monitor → exclude → repair if margin drops |
+| Gateway crashes mid-DELETE                  | inconsistent: some nodes purged, some not | `POST /api/gc` (Stage 14.0) scoops up orphan shards on demand; the background scrub catches them between runs |
+| Disk corruption on one shard file           | hash verify on read           | shard discarded → margin drops → auto-repair-on-read (Stage 14.3) re-encodes from donors |
+| Network partition between gateway and node  | `HOLOFS_RPC_TIMEOUT_MS` budget (Stage 15.x) | timed-out RPC retries once on a fresh socket; health monitor → exclude → repair if margin drops |
+| All nodes simultaneously dark               | `place_shard` returns `NoLiveNodes` (Stage 15.x) | gateway 503s with `ClusterDegraded` instead of asserting; client retries when nodes return |
 | Whitelist signature invalid                 | gateway startup check        | refuses to start (fail-fast) |
 
 ### What we don't protect against
