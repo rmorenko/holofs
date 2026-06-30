@@ -53,14 +53,36 @@ from pathlib import Path
 def write_png(path: Path, pixels: list[list[tuple[int, int, int]]]) -> None:
     h = len(pixels)
     w = len(pixels[0])
+    # Inject per-image deterministic LSB jitter. Without this,
+    # smooth synthetic generators (mandala / gradient / coloured
+    # shapes) leave the gateway's high-frequency DWT layer with
+    # all-zero coefficients — those shards sha256 to the same
+    # canonical hashes across different images, the cluster dedups
+    # them into one physical copy, and every image but the first
+    # ends up with `place_shard` pointing at a node where the
+    # bytes don't exist. Margin drops below K, every GET 503s.
+    #
+    # Seed the jitter from a hash of the file path so re-running
+    # the generator produces byte-identical output; each pixel
+    # gets a ±1 wobble on every channel, which is enough to make
+    # the high-frequency shards unique without changing how the
+    # image looks (LSB noise is below display perception).
+    state = zlib.crc32(str(path).encode()) | 1
+    def jitter() -> int:
+        nonlocal state
+        state = (1103515245 * state + 12345) & 0xFFFFFFFF
+        return ((state >> 16) & 0x3) - 1
     hdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
     raw = bytearray()
     for row in pixels:
         raw.append(0)  # filter byte
         for r, g, b in row:
-            raw.append(r & 0xFF)
-            raw.append(g & 0xFF)
-            raw.append(b & 0xFF)
+            r = max(0, min(255, r + jitter()))
+            g = max(0, min(255, g + jitter()))
+            b = max(0, min(255, b + jitter()))
+            raw.append(r)
+            raw.append(g)
+            raw.append(b)
     idat = zlib.compress(bytes(raw), 9)
 
     def chunk(tag: bytes, data: bytes) -> bytes:
