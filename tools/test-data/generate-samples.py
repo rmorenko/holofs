@@ -685,12 +685,30 @@ def main() -> int:
     )
     args = ap.parse_args()
     out_root = Path(args.out).resolve()
+    # Wipe the previous run so we never serve stale bytes — but
+    # preserve `photos/landscapes-xl/` if it already exists, because
+    # the picsum.photos fetch script writes there and is independent
+    # of this generator. Without this carve-out, running fetch first
+    # then generate would silently delete the real JPEGs that the
+    # /search and /similar demos depend on.
     if out_root.exists():
-        # Wipe the previous run so we never serve stale bytes.
         import shutil
 
-        shutil.rmtree(out_root)
-    out_root.mkdir(parents=True)
+        preserve = out_root / "photos" / "landscapes-xl"
+        if preserve.exists():
+            backup = out_root.parent / ".landscapes-xl-backup"
+            if backup.exists():
+                shutil.rmtree(backup)
+            shutil.move(str(preserve), str(backup))
+            shutil.rmtree(out_root)
+            out_root.mkdir(parents=True)
+            (out_root / "photos").mkdir(parents=True, exist_ok=True)
+            shutil.move(str(backup), str(preserve))
+        else:
+            shutil.rmtree(out_root)
+            out_root.mkdir(parents=True)
+    else:
+        out_root.mkdir(parents=True)
     samples = collect_samples(out_root)
     # Manifest for the upload script — relative path + size.
     manifest_path = out_root / "MANIFEST.txt"
