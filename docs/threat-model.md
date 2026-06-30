@@ -151,11 +151,12 @@ mitigations in this document target it.
 | # | Threat                                              | Mitigation |
 |---|-----------------------------------------------------|------------|
 | D1 | Flood gateway with uploads                         | Gateway must run behind a rate-limiting reverse proxy. Wire-frame size is capped at `MAX_FRAME = 64 MiB` on every node. |
-| D2 | Single node refuses requests                       | RLNC has ≥ K-of-N redundancy per layer. Repair task detects and resurrects shards onto live nodes. |
+| D2 | Single node refuses requests                       | RLNC has ≥ K-of-N redundancy per layer. Auto-repair-on-read (Stage 14.3) + background scrub (Stage 15.x) detect and resurrect shards onto live nodes. |
 | D3 | Coordinated half-cluster outage                    | Margin is sized for **any one zone + scattered single failures** (see [theory.md §3](./theory.md#3-priority-layers)). Larger outages degrade gracefully: L3 (cosmetic detail) lost first, then L2, L1. |
-| D4 | "Sleeper" node accepts puts but never returns gets | Audit task issues random `Audit(shard_hash)` probes — a non-responsive or wrong-answering node drops reputation and stops being chosen for placement. |
-| D5 | Slow-loris on TCP                                  | Tokio I/O timeouts on every frame read; configurable via `HOLOFS_WIRE_TIMEOUT`. |
+| D4 | "Sleeper" node accepts puts but never returns gets | Audit task issues random `Audit(shard_hash)` probes — a non-responsive or wrong-answering node drops reputation and stops being chosen for placement. Stage 14.x change: `MissingShard` is treated as neutral (no reputation hit), to avoid a dedup-collision feedback loop that previously kicked healthy nodes out of the live set. |
+| D5 | Slow-loris on TCP                                  | Per-RPC `tokio::time::timeout` budget (`HOLOFS_RPC_TIMEOUT_MS`, default 8 s, `0` disables). A timed-out RPC poisons the pooled stream and retries once on a fresh socket via `is_likely_transient`. Caps user-visible latency at 8 s + one retry instead of the OS-level 60-75 s TCP timeout. |
 | D6 | Memory exhaustion via huge frame                   | Frames > `MAX_FRAME` are rejected before allocation. |
+| D7 | All nodes simultaneously dark (e.g. boot race, fleet-wide deploy) | Stage 15.x: `placement::place` returns `Result<_, NoLiveNodes>` instead of asserting; gateway surfaces a clean `503 ServiceUnavailable` (`GatewayError::ClusterDegraded`) instead of panicking. Previously a single un-typed `assert!` in `place_shard` could crash the gateway process via a single PUT during a fleet outage. |
 
 ### 4.6. Elevation of privilege
 
