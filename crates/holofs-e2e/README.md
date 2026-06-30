@@ -12,6 +12,15 @@ form-driven flows.
 * **Serial.** Tests run with `--test-threads=1`. Chromedriver is a
   single-session-per-driver bottleneck and per-test cluster reboots
   serialise the suite anyway.
+* **Graceful shutdown.** `TestHarness::Drop` (and `close().await`)
+  send SIGTERM and poll up to 500 ms before SIGKILL, so the
+  gateway has a chance to flush the catalog (and would dump
+  `.profraw` files if the binary were ever rebuilt with coverage
+  instrumentation).
+* **`HarnessConfig::extra_env`.** A `Vec<(String, String)>` of env
+  vars threaded into the spawned gateway. Used by tests that need
+  to flip env-knob features (`HOLOFS_NO_SEED`, `HOLOFS_VERSIONS_KEEP_LAST`)
+  without leaking those settings into the test runner's process env.
 * **Hybrid asserts.** DOM `find(By::Css(...))` / `.text()` for the
   bulk of checks; screenshot-to-screenshot comparison for the few
   scenarios where visual progression is the test (streaming
@@ -94,14 +103,40 @@ crates/holofs-e2e/
 │   ├── run-tests.sh                 ← bash runner (mac / linux)
 │   └── run-tests.ps1                ← PowerShell runner (windows)
 ├── src/
-│   ├── lib.rs                       ← TestHarness, gateway lifecycle, WebDriver session
-│   └── fixtures.rs                  ← deterministic tiny PNGs / corpora
-└── tests/
-    ├── ui_catalog.rs                ← homepage, tree view, breadcrumb, lazy folder expand
-    ├── ui_about.rs                  ← /about marketing
-    ├── ui_search.rs                 ← /search query + band filter
-    ├── ui_holo.rs                   ← /holo streaming PNG progression (hybrid screenshot)
-    └── … (more in Phase 2)
+│   ├── lib.rs                       ← TestHarness, gateway lifecycle, WebDriver session, restart()
+│   └── fixtures.rs                  ← deterministic tiny PNG / WAV / opaque blobs
+└── tests/                            ← 32 files, 106 tests + 10 #[ignore]'d
+    ├── ui_catalog.rs                 ← tree view, breadcrumb, lazy folder expand
+    ├── ui_about.rs                   ← /about marketing
+    ├── ui_actions.rs                 ← per-card action links
+    ├── ui_catalog.rs                 ← root catalog flow
+    ├── ui_diff.rs                    ← /diff per-chunk PSNR
+    ├── ui_escrow.rs                  ← /escrow split + recover
+    ├── ui_health.rs                  ← cluster health dashboard
+    ├── ui_help.rs                    ← /help docs viewer (Mermaid + KaTeX)
+    ├── ui_holo.rs                    ← /holo streaming PNG progression
+    ├── ui_i18n.rs                    ← locale switcher round-trip
+    ├── ui_inspect.rs                 ← shard inspector grid
+    ├── ui_mix.rs                     ← /mix wavelet split
+    ├── ui_search.rs                  ← /search query + band filter [4 #[ignore]'d]
+    ├── ui_similar.rs                 ← /similar top-K
+    ├── ui_spotlight.rs               ← /spotlight ROI
+    ├── ui_versions.rs                ← /versions timeline + restore
+    ├── reliability_audit.rs          ← long-running audit reputation [1 #[ignore]'d]
+    ├── reliability_catalog.rs        ← catalog tree race regressions
+    ├── reliability_dedup.rs          ← DELETE-of-dedup-sibling safety
+    ├── reliability_multilingual.rs   ← Russian query against English corpus [2 #[ignore]'d]
+    ├── reliability_repair.rs         ← auto-repair counter shape
+    ├── concurrency_writers.rs        ← parallel PUT / GET / GC races
+    ├── api_negative.rs               ← 4xx error mapping across PUT/GET/DELETE/mkdir/rmdir
+    ├── api_semantics.rs              ← /api/stats invariants, /api/gc idempotence, /metrics shape, /api/mv
+    ├── api_surface.rs                ← /escrow round-trip, /api/shard, /preview/stream, /api/fingerprint, /api/upload
+    ├── cluster_degraded.rs           ← /admin/node toggle → 503 / recovery
+    ├── content_roundtrip.rs          ← text UTF-8 / audio WAV / opaque byte-exact
+    ├── auto_repair_e2e.rs            ← counter movement under controlled node loss
+    ├── search_semantics.rs           ← /api/search 400/503 + ranking [2 #[ignore]'d]
+    ├── versions_lifecycle.rs         ← delete_version + retention cap
+    └── persistence.rs                ← restart() preserves catalog / stats / versions
 ```
 
 ## Cross-platform notes
