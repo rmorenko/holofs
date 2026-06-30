@@ -1488,6 +1488,72 @@ body.catalog-page .tree-scroll {
   text-decoration: none;
 }
 
+/* Stage 15.x: inline upload form per folder. Same shape as
+   .tree-inline-mkdir but the text input is swapped for a styled
+   `<input type="file">`. We don't hide the file input — letting it
+   show the chosen filename is actually useful here — but we
+   restyle the embedded "Choose file" button via the
+   `::file-selector-button` pseudo so it stops looking like a 1995
+   OS widget bolted onto our pill UI. */
+.tree-inline-upload {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tree-inline-upload input[type="file"] {
+  /* Trim the verbose text that the native widget tacks on
+     ("No file chosen" / a 250 px filename hint) so the form
+     doesn't blow the row width up — `max-width` clips, and the
+     custom button below gives us a real call-to-action label. */
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: calc(12px * var(--tree-scale, 1));
+  color: var(--mut);
+  max-width: calc(180px * var(--tree-scale, 1));
+}
+.tree-inline-upload input[type="file"]::file-selector-button,
+.tree-root-upload  input[type="file"]::file-selector-button {
+  font: inherit;
+  font-size: calc(12px * var(--tree-scale, 1));
+  margin-right: 6px;
+  padding: calc(3px * var(--tree-scale, 1)) calc(10px * var(--tree-scale, 1));
+  border: 1px solid var(--bord);
+  border-radius: 999px;
+  background: var(--surf2);
+  color: var(--mut);
+  cursor: pointer;
+  transition: border-color .12s ease, color .12s ease, background .12s ease;
+}
+.tree-inline-upload input[type="file"]::file-selector-button:hover,
+.tree-root-upload  input[type="file"]::file-selector-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surf1);
+}
+.tree-inline-upload .link-btn {
+  font-size: calc(13px * var(--tree-scale, 1));
+  padding: calc(4px * var(--tree-scale, 1)) calc(10px * var(--tree-scale, 1));
+  border: 1px solid var(--bord);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--mut);
+  transition: border-color .12s ease, color .12s ease;
+}
+.tree-inline-upload .link-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+/* Root upload form sits in the toolbar alongside `.tree-mkdir`; it
+   shares the same vertical metrics so the toolbar row stays clean.
+   The file input itself stays unscaled (toolbar is fixed-size, not
+   tree-scaled) — only the pill button gets the pseudo-treatment. */
+.tree-root-upload input[type="file"] {
+  font: 12px inherit;
+  color: var(--mut);
+  max-width: 220px;
+}
+
 /* Stage 11.13: per-row meta column — shard count + creation date.
  * Sits between the name and the actions; gets pushed to the right edge
  * by the actions' `margin-left: auto` since the meta has no auto margin
