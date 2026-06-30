@@ -8,13 +8,20 @@ sufficient handful of shards reconstructs the data exactly; an insufficient
 handful still yields the same data, just at a lower resolution. Like a piece
 of a hologram: cut it in half and the picture remains whole, just blurrier.
 
-> Status: working prototype, **v0.4.0**, **210 tests** green. Not for
-> production. Ten implementation stages closed: axum + Leptos SSR web UI,
-> persistent multi-process cluster with Ed25519 identity, signed
-> admin-whitelist, opt-in rustls + mTLS on the wire, hierarchical catalog
-> with directory objects, perceptual search, Shamir-style key escrow,
-> in-app docs viewer with Mermaid + KaTeX, and UI in five languages
-> (English, Russian, German, French, Spanish).
+> Status: working prototype, **v0.4.0**, **426 tests** green (320
+> workspace + 106 e2e; **91% line coverage** on measurable code). Not
+> for production. Fifteen implementation stages closed: axum + Leptos
+> SSR web UI, persistent multi-process cluster with Ed25519 identity,
+> signed admin-whitelist, opt-in rustls + mTLS on the wire, hierarchical
+> catalog with directory objects, per-object version history with
+> deletion + retention cap, perceptual search via HNSW-backed CLIP
+> embeddings, holographic spotlight (sharp inside an ROI, smooth
+> outside), streaming progressive `/holo`, per-file health + diff
+> + similar pages, auto-repair-on-read with surgical per-node fixes,
+> background shard scrub, typed RPC layer (timeouts + retries +
+> `NoLiveNodes`), Shamir-style key escrow, in-app docs viewer with
+> Mermaid + KaTeX, and UI in five languages (English, Russian, German,
+> French, Spanish).
 
 ---
 
@@ -197,7 +204,7 @@ shows the full PKI flow.
 
 ## Repository layout
 
-The workspace is split into 11 crates under `crates/`. A full crate map
+The workspace is split into 14 crates under `crates/`. A full crate map
 with each crate's responsibility lives in
 [`docs/architecture.md`](./docs/architecture.md#1-crate-dependency-graph);
 the short version:
@@ -209,12 +216,15 @@ the short version:
 | `holofs-wire` | binary frame protocol (tokio TCP, `[u32 len BE][payload]`) |
 | `holofs-codec` | image/audio/text/opaque encoders & decoders |
 | `holofs-storage` | per-node on-disk shard store, identity, whitelist, TLS scaffold |
-| `holofs-client` | PUT/GET/REPAIR/AUDIT client, TLS transport, live-node discovery |
-| `holofs-cluster` | health monitor, auditor, rebalancer, zone-aware placement |
+| `holofs-client` | PUT/GET/REPAIR/AUDIT client + RPC timeouts + per-addr keepalive pool, TLS transport, live-node discovery |
+| `holofs-cluster` | health monitor, PoR auditor, rebalancer, zone-aware placement, reputation |
+| `holofs-embed` | CLIP-multilingual text/image embeddings + HNSW ANN index for `/search` |
 | `holofs-analytics` | perceptual fingerprint, MinHash, escrow, chunk diff |
-| `holofs-gateway` | catalog, decode pipeline, public Gateway API surface |
+| `holofs-gateway` | catalog, decode pipeline, auto-repair-on-read, background scrub, public Gateway API |
+| `holofs-mcp` | Model Context Protocol server (Streamable HTTP), read-only by default |
 | `holofs-web` | axum + Leptos 0.7 SSR web UI, server functions, HTTP handlers |
-| `holofs-cli` | `holofs-admin` (keys, whitelist), `holofs-bench`, `holofs-inspect` |
+| `holofs-cli` | `holofs-admin` (keys, whitelist), `holofs-bench`, `holofs-inspect`, `holofs-cluster`, `holofs-fs`, `holofs-node`, `holofs` |
+| `holofs-e2e` | browser-driven (thirtyfour + chromedriver) end-to-end test harness |
 
 Top-level: `Cargo.toml` (workspace), `Cargo.lock`, `Dockerfile`,
 `deny.toml`, `.github/workflows/`, `assets/sample.png`,
@@ -225,9 +235,27 @@ Top-level: `Cargo.toml` (workspace), `Cargo.lock`, `Dockerfile`,
 ## Tests
 
 ```sh
-cargo test --workspace        # 210 tests
-cargo deny check              # advisories + licenses + bans + sources
-cargo clippy --workspace      # workspace lints (pedantic-leaning)
+cargo test --workspace --exclude holofs-e2e  # 320 workspace tests
+cargo test -p holofs-e2e -- --test-threads=1 # 106 e2e tests (needs chromedriver)
+cargo deny check                              # advisories + licenses + bans + sources
+cargo clippy --workspace                      # workspace lints (pedantic-leaning)
+```
+
+The e2e suite spawns a fresh `holofs-web` gateway against a `TempDir`
+storage for every scenario; running them serial (`--test-threads=1`)
+keeps embedded node ports collision-free. Ten tests are
+`#[ignore]`'d behind `--include-ignored` because they download the
+~155 MiB DistilBERT-multilingual CLIP weights on first run.
+
+Line-coverage on measurable code (excluding HTTP-handler / leptos
+SSR code that only runs inside the spawned gateway):
+
+```sh
+cargo install cargo-llvm-cov
+cargo llvm-cov --workspace --exclude holofs-e2e --summary-only \
+  --ignore-filename-regex \
+  'tests/|holofs-e2e/|holofs-web/|holofs-cli/src/bin/|holofs-gateway/src/http_gateway\.rs|holofs-mcp/src/lib\.rs|holofs-embed/src/(model|text)\.rs|holofs-codec/src/image_io\.rs'
+# TOTAL ≈ 91% line coverage across the measurable surface.
 ```
 
 The CI matrix runs the same set on stable + beta on Linux / macOS /
