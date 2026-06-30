@@ -2075,7 +2075,7 @@ fn Breadcrumb(prefix: String) -> impl IntoView {
     let last_idx = trail.len() - 1;
     view! {
         <nav class="breadcrumb">
-            <a href="/">{t!("breadcrumb.home")}</a>
+            <a href="/" rel="external">{t!("breadcrumb.home")}</a>
             {trail.into_iter().enumerate().map(|(i, (seg, full))| {
                 if i == last_idx {
                     view! {
