@@ -7,7 +7,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Added — Stage 15.x: reliability + e2e coverage
+
+- **Typed wire layer.** `holofs-client::rpc` runs every RPC inside
+  `tokio::time::timeout` with an 8 s default cap (`HOLOFS_RPC_TIMEOUT_MS`
+  env knob, `0` disables). On expiry the pooled stream is poisoned —
+  the in-flight write/read got cancelled mid-frame so the byte
+  boundary is undefined — and the timeout surfaces to the caller.
+  `is_likely_stale_connection` was renamed `is_likely_transient` and
+  grew a `TimedOut` arm, so the existing single-retry path also
+  covers slow peers.
+- **Typed `ClientError`.** `Protocol(String)` split into
+  `RemoteError(String)` (remote acknowledged + reported failure) and
+  `UnexpectedResponse { expected: &'static str, got: String }` (wire
+  protocol mismatch). New `ClientError::is_timeout()` classifies the
+  Phase-4 path without re-parsing strings.
+- **`NoLiveNodes` panic fix.** `placement::place` /
+  `place_layer_zone_aware` / `Manifest::place_shard` now return
+  `Result<_, NoLiveNodes>` instead of `assert!`ing on an empty live
+  slice. PUT against a fully-down cluster used to crash the gateway;
+  it now surfaces as `GatewayError::ClusterDegraded` → HTTP 503.
+- **Auto-repair-on-read.** GET path is wrapped in
+  `decode_with_autorepair`: on `ClientError::LayerLost` it kicks
+  `repair_object_inplace` (per-node surgical repair via
+  `list_node_hashes` + `repair_node`), persists the mutated manifest,
+  and retries the decode once. Counters in `/api/stats`:
+  `auto_repairs_total`, `auto_repair_failures_total`.
+- **Background shard scrub.** Tokio task ticks every
+  `HOLOFS_SCRUB_INTERVAL` (default 600 s, `0` disables). Walks the
+  catalog, diffs `list_node_hashes` vs `place_shard`, surgically
+  repairs the mismatches before users hit them. Counters:
+  `scrub_runs_total`, `scrub_repairs_total`. Coordinated with PUT /
+  GC via a shared `gc_barrier` RwLock.
+- **Per-object version deletion + retention.**
+  `Gateway::delete_version(name, id)` drops a `.bin` archive and
+  GC's its uniquely-held shards via `purge_orphans_of`. Form-friendly
+  handler at `POST /api/versions/delete`. New env knob
+  `HOLOFS_VERSIONS_KEEP_LAST=N` prunes the oldest archives on every
+  PUT so each name's history stays bounded. UI: per-row "delete"
+  button next to "restore" on `/versions/<name>`.
+- **/api/upload integrated into the catalog tree.** Multipart upload
+  form sits next to the per-folder mkdir form on every `<details>`
+  row, and the root toolbar gained a matching upload form (parent="").
+  No more detour through a separate Upload page; `return_to=/?p=...`
+  brings the user back to the same folder.
+- **"Open" cds into the folder.** Catalog tree now renders rooted at
+  the chosen folder when the URL carries `?p=<path>`. Top-level
+  entries are the folder's children, breadcrumb at the top, mkdir +
+  upload scoped to the current root. The earlier focus-view page
+  (`CatalogFocusView`) is no longer dispatched; old `?p=` bookmarks
+  still work as the new root selector.
+- **Stage 14.0 — orphan-shard garbage collector.** `POST /api/gc`
+  walks the catalog + version archives, lists every node's held
+  hashes, computes the diff, and asks each node to `PurgeByHash` the
+  orphans. Per-node breakdown in the response; held / orphaned / ok /
+  error per addr. Idempotent — running twice on a clean cluster
+  reports zero on the second pass.
+- **Stage 14.2 — HNSW-backed semantic search.** Previously
+  brute-force scan of `embeddings.bin` per query; now lazily builds
+  an `instant_distance::HnswMap` per band, cached across queries
+  until the next PUT bumps `ann_generation`. Threshold 200 vectors —
+  smaller bands still brute-force inside the index for sub-ms
+  latency. Build cost on M-series Macs: ~80 ms for 1k vectors,
+  ~1.4 s for 50k. Public contract unchanged.
+- **CLIP-multilingual embeddings.** Swapped `clip-ViT-B-32` for
+  `sentence-transformers/clip-ViT-B-32-multilingual-v1`
+  (DistilBERT + 768→512 projection). `/search?q=ocean` and
+  `/search?q=океан` now hit the same images.
+- **Stage 13.4 — per-object version history.** `--enable-versions`
+  archives every PUT-replaced manifest as a side file under
+  `<storage>/versions/<sanitized_name>/v<ts>_<cid>.bin`.
+  `GET /versions/<name>` renders the timeline; `POST /api/restore`
+  swaps the catalog entry without touching shards.
+- **Stage 13.5 — `/help` Mermaid + KaTeX assets via local proxy.**
+  jsDelivr fetch only on `/help` routes; everywhere else the page
+  doesn't pay the bundle weight.
+- **Stage 13.2 — `/spotlight` ROI.** Sharp inside an axis-aligned
+  box, smooth outside (only L0 coefficients fetched outside the ROI).
+  Both pixel-space (`x_px`/`y_px`/`w_px`/`h_px`) and normalised
+  (`x`/`y`/`w`/`h`) coordinates accepted.
+- **Stage 13.1 — streaming `/holo`.** `multipart/x-mixed-replace`
+  body re-rendered for every layer L0 → L_max so the browser shows
+  the progressive reveal.
+- **Stage 13.0 — `/diff`, `/similar` and per-image health.** Three
+  SSR pages on top of MinHash / perceptual-fingerprint /
+  `object_health` server functions. Diff produces a per-chunk
+  PSNR/MSE map; similar ranks the top-K by Hamming distance over
+  the 45-bit dHash; health emits the per-(channel, layer) margin
+  table.
+- **Stage 12.8 — `/search` page.** Natural-language query against
+  CLIP embeddings; per-result cards with score + band + thumbnail.
+  Disabled when the gateway boots without `--enable-embed`
+  (returns 503 with a hint).
+- **Stage 12.7 — per-file metrics.** `/api/file_metrics/<name>` and
+  the `/health/<name>` page; per-channel-per-layer alive / margin /
+  detail-score block.
+- **Stage 12.0–12.1 — MCP server.** Streamable-HTTP Model Context
+  Protocol endpoint at `/mcp`, read-only by default; setting
+  `HOLOFS_MCP_TOKEN` flips on write tools behind bearer auth.
+- **End-to-end test suite — 106 tests across 32 files.** Browser
+  harness (thirtyfour + chromedriver) plus HTTP-only suites:
+  - UI flows: catalog, about, actions, diff, escrow, health, help,
+    holo, i18n, inspect, mix, search, similar, spotlight, versions.
+  - Reliability regressions: dedup safety, audit reputation,
+    catalog tree, auto-repair, multilingual search.
+  - Concurrency: parallel PUTs, PUT-vs-GET, PUT-vs-GC.
+  - API negative paths: 4xx error mapping across PUT/GET/DELETE/
+    mkdir/rmdir.
+  - API semantics: /api/stats invariants, /api/gc idempotence,
+    /metrics Prometheus shape, /api/mv rename.
+  - Cluster-degraded paths: kill-all → 503, partial loss survives,
+    recovery via /admin/node toggle.
+  - Content roundtrip per kind: UTF-8 text, audio WAV, opaque
+    blobs, preview semantics.
+  - Auto-repair end-to-end: counter movement under controlled
+    node loss.
+  - Persistence across `TestHarness::restart()`: bytes, stats,
+    nested directory tree, versions history.
+- **`HarnessConfig::extra_env`.** Lets a single e2e test set env
+  knobs on the spawned gateway (used for `HOLOFS_NO_SEED`,
+  `HOLOFS_VERSIONS_KEEP_LAST`, etc.) without touching the test
+  runner's process env.
+- **Workspace test coverage refresh.** Unit tests across
+  `holofs-wire`, `holofs-embed/index.rs`, `holofs-cluster/audit`
+  + `monitor`, `holofs-client/client` + `pool` + `transport`,
+  `holofs-storage/tls`, `holofs-codec/audio_codec`. Total
+  workspace + e2e: 426 green.
 - **Stage 11.5 — upload form polish.** Styled drop-zone (dashed border,
   hover/drag highlight), label-as-button replacing the native unstyled
   `<input type=file>`, monospace filename preview with size hint,
@@ -31,7 +156,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `/similar/<name>` view existed since Stage 4 but had no entry
   point from the grid.
 
-### Fixed
+### Fixed — Stage 15.x
+
+- **DELETE on dedup'd siblings no longer kills the survivor.** The old
+  `purge_object` issued `Request::Purge { object_id }` which wipes the
+  entire `(object_id, channel, layer)` bucket on each node — when two
+  catalog entries shared a `data_cid` (and therefore `object_id`),
+  deleting one yanked shards out from under the other. The new
+  `purge_orphans_of` walks the rest of the catalog plus the on-disk
+  version archives, builds the set of hashes still referenced after
+  the target manifest is conceptually removed, subtracts from
+  `manifest.shard_hashes`, and `PurgeByHash`'s only the residue.
+- **Audit reputation no longer cascades.** `AuditOutcome::MissingShard`
+  used to count as a failure observation; on synthetic 256×256 PNGs
+  upscaled to 512×512 by the gateway, layer-3 all-zero systematic
+  shards hash-collide across unrelated images and `place_shard`
+  keeps pointing at the *canonical* node while the bytes live on a
+  *dedup* node. The cascade dropped every node's reputation below
+  threshold; decode 503s spread across the catalog overnight.
+  MissingShard is now neutral; HashMismatch is the only failure
+  signal the auditor produces, with the monitor's per-layer margin
+  as the corroborating telemetry.
+- **Synthetic PNG dedup collisions.** `tools/test-data/generate-samples.py`'s
+  `write_png` now injects per-image deterministic ±1 LSB jitter
+  (seed = CRC32 of file path) so high-frequency DWT shards are
+  unique. Without the jitter the smooth synthetic generators
+  (mandala / gradient / coloured-shapes / brand-pairs) produced
+  all-zero layer-3 coefficients across 22 of 29 PNGs, hash-collided
+  into a single canonical shard per (channel, layer), and only the
+  *first* image to be PUT could ever decode.
+- **Lazy catalog tree no longer hangs on first paint.** Replaced the
+  `Effect::new(...) + spawn_local` lazy loader with a keyed `Resource`;
+  the previous pattern didn't run its initial pass under streaming
+  hydrate, so depth-0 folders with `initial_open=true` sat under a
+  permanent "loading catalog…" placeholder.
+- **Catalog tree expand/collapse race.** `holofsExpandAll` /
+  `holofsCollapseAll` got an epoch guard so a click that landed mid
+  re-render of a lazy `<details>` doesn't get reverted by the
+  next refresh.
+- **Folder "open" link.** Six anchors in the catalog tree pointed at
+  `/?p=` without `rel="external"`; leptos' SPA router intercepted
+  them and the page never reloaded. Added `rel="external"` to every
+  catalog-side anchor that crosses the focus / tree boundary,
+  including the breadcrumb Home link.
+- **Breadcrumb Home was a no-op.** Same rel-external story as above,
+  but specifically on the Home anchor inside `Breadcrumb` so
+  clicking "Home" from `/?p=audio` actually goes back to `/`.
+- **E2E harness sends SIGTERM, not SIGKILL.** `kill_and_wait` now
+  shells out to `/bin/kill -TERM <pid>` first and polls 500 ms
+  before falling back to the existing SIGKILL. Graceful shutdown
+  lets the gateway flush the catalog (and anything else atexit-y);
+  the original motivation was capturing `.profraw` from coverage-
+  instrumented runs, which still doesn't work end-to-end because
+  the gateway has no SIGTERM handler — but the cleaner shutdown
+  stands on its own merit.
+- **`generate-samples.py` no longer wipes `landscapes-xl/`.** The
+  picsum.photos fetch script is independent and writes there; the
+  generator now backs up and restores that folder around its
+  `shutil.rmtree(out_root)` instead of blowing it away.
+- **`/api/search` reads `?q=` correctly.** Empty / whitespace-only
+  queries reject with 400 before paying the CLIP-encode cost;
+  missing `q=` is a 400 instead of a confusing CLIP-init error.
+
+### Fixed — earlier
 - **Stage 11.2 — `/inspect/<name>` no longer drops random shard thumbnails
   under concurrent render.** `Gateway::shard_payload` used to call
   `gather_layer` (a full cluster-wide collect) for every cell rendered
