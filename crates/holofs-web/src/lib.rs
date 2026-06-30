@@ -604,9 +604,12 @@ fn RoutedApp() -> impl IntoView {
 ///   and deletes happen.
 #[component]
 fn CatalogPage() -> impl IntoView {
-    let query = use_query_map();
-    let prefix_signal = move || query.with(|q| q.get("p").unwrap_or_default());
-
+    // The catalog is now a single tree view. The legacy
+    // single-directory focus page (`/?p=<path>`) is gone — clicking
+    // "open" on a folder now expands the branch inline via
+    // `?open=<path>`, no separate page. Old `?p=` bookmarks still
+    // work: TreeBranch falls back to `?p=` when `?open=` is unset,
+    // so the right folder still auto-expands and scrolls into view.
     view! {
         // Stage 11.28: tag `<body>` so the catalog page can opt into
         // `body { overflow: hidden; height: 100vh }` — kills the
@@ -616,14 +619,7 @@ fn CatalogPage() -> impl IntoView {
         <ui::Topbar active="catalog"/>
 
         <main class="container">
-            {move || {
-                let prefix = prefix_signal();
-                if prefix.is_empty() {
-                    view! { <CatalogTreeView/> }.into_any()
-                } else {
-                    view! { <CatalogFocusView prefix=prefix/> }.into_any()
-                }
-            }}
+            <CatalogTreeView/>
         </main>
     }
 }
@@ -1026,6 +1022,24 @@ fn CatalogTreeLazyShell(initial: ListDirPage, sort: TreeSort) -> impl IntoView {
                     <span class="tree-control-label">{t!("mkdir.submit")}</span>
                 </button>
             </form>
+            // Root upload form: drop a file at the catalog root with
+            // no folder prefix. Mirrors the per-folder inline upload
+            // a level down; the empty `parent` value is what
+            // `handlers::upload_form` expects for a top-level PUT.
+            <form
+                class="tree-mkdir tree-root-upload"
+                method="POST"
+                action="/api/upload"
+                enctype="multipart/form-data"
+            >
+                <input type="hidden" name="parent" value=""/>
+                <input type="hidden" name="return_to" value="/"/>
+                <input type="file" name="file" required=true/>
+                <button type="submit" class="tree-control-btn">
+                    <span class="tree-control-icon">"↑"</span>
+                    <span class="tree-control-label">{t!("upload.submit")}</span>
+                </button>
+            </form>
             <div class="tree-sort">
                 <span class="tree-sort-label">{t!("tree.sort_by")} ":"</span>
                 <a class=s_name href="/?sort=name">{t!("tree.sort.name")}</a>
@@ -1295,8 +1309,15 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
     // is how the mkdir form returns the user to the tree with the
     // freshly-created folder visible — return_to=`/?open=<parent>`
     // unrolls the chain of `<details>` down to that point.
-    let open_target = use_query_map()
-        .with_untracked(|q| q.get("open").unwrap_or_default());
+    let open_target = use_query_map().with_untracked(|q| {
+        // Read `?open=<path>` first (the modern auto-expand
+        // mechanism). Fall back to the legacy `?p=<path>` query
+        // param so bookmarks from the deleted focus-view page still
+        // expand the right folder.
+        q.get("open")
+            .or_else(|| q.get("p"))
+            .unwrap_or_default()
+    });
     let auto_open = !open_target.is_empty()
         && (open_target == path || open_target.starts_with(&format!("{path}/")));
     let initial_open = depth == 0 || auto_open;
@@ -1395,6 +1416,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
 
     let path_for_form = path.clone();
     let path_for_rmdir = path.clone();
+    let path_for_upload = path.clone();
     let inner_path = path.clone();
     view! {
         <li class="tree-branch">
@@ -1467,7 +1489,29 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                             <button type="submit" class="link-btn">"+ " {t!("folder.kind_label")}</button>
                         </form>
                         <span class="tree-sep">"·"</span>
-                        <a href={format!("/?p={enc_path}")} rel="external">{t!("folder.open")} " →"</a>
+                        // Inline upload: drop a file straight into this
+                        // folder, no detour through the topbar Upload
+                        // page. Mirrors the per-folder mkdir form; same
+                        // ?open=<path> return so the tree re-opens at
+                        // exactly this branch after the multipart POST.
+                        <form
+                            method="POST"
+                            action="/api/upload"
+                            enctype="multipart/form-data"
+                            class="inline-form tree-inline-upload"
+                            onclick="event.stopPropagation()"
+                        >
+                            <input type="hidden" name="parent" value=path_for_upload/>
+                            <input
+                                type="hidden"
+                                name="return_to"
+                                value={format!("/?open={enc_path}")}
+                            />
+                            <input type="file" name="file" required=true/>
+                            <button type="submit" class="link-btn">"↑ " {t!("upload.submit")}</button>
+                        </form>
+                        <span class="tree-sep">"·"</span>
+                        <a href={format!("/?open={enc_path}")} rel="external">{t!("folder.open")} " →"</a>
                         <span class="tree-sep">"·"</span>
                         <form
                             method="POST"
@@ -1578,6 +1622,24 @@ fn CatalogTreeBody(entries: Vec<CatalogEntry>, sort: TreeSort) -> impl IntoView 
                 <button type="submit" class="tree-control-btn">
                     <span class="tree-control-icon">"📁"</span>
                     <span class="tree-control-label">{t!("mkdir.submit")}</span>
+                </button>
+            </form>
+            // Root upload form: drop a file at the catalog root with
+            // no folder prefix. Mirrors the per-folder inline upload
+            // a level down; the empty `parent` value is what
+            // `handlers::upload_form` expects for a top-level PUT.
+            <form
+                class="tree-mkdir tree-root-upload"
+                method="POST"
+                action="/api/upload"
+                enctype="multipart/form-data"
+            >
+                <input type="hidden" name="parent" value=""/>
+                <input type="hidden" name="return_to" value="/"/>
+                <input type="file" name="file" required=true/>
+                <button type="submit" class="tree-control-btn">
+                    <span class="tree-control-icon">"↑"</span>
+                    <span class="tree-control-label">{t!("upload.submit")}</span>
                 </button>
             </form>
             <div class="tree-sort">
@@ -1899,7 +1961,24 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                                 <button type="submit" class="link-btn">"+ " {t!("folder.kind_label")}</button>
                             </form>
                             <span class="tree-sep">"·"</span>
-                            <a href={format!("/?p={enc_path}")} rel="external">{t!("folder.open")} " →"</a>
+                            <form
+                                method="POST"
+                                action="/api/upload"
+                                enctype="multipart/form-data"
+                                class="inline-form tree-inline-upload"
+                                onclick="event.stopPropagation()"
+                            >
+                                <input type="hidden" name="parent" value=path.clone()/>
+                                <input
+                                    type="hidden"
+                                    name="return_to"
+                                    value={format!("/?open={enc_path}")}
+                                />
+                                <input type="file" name="file" required=true/>
+                                <button type="submit" class="link-btn">"↑ " {t!("upload.submit")}</button>
+                            </form>
+                            <span class="tree-sep">"·"</span>
+                            <a href={format!("/?open={enc_path}")} rel="external">{t!("folder.open")} " →"</a>
                             <span class="tree-sep">"·"</span>
                             <form
                                 method="POST"
@@ -1959,7 +2038,7 @@ fn Breadcrumb(prefix: String) -> impl IntoView {
                     let enc = url_encode(&full);
                     view! {
                         <span>" / "</span>
-                        <a href={format!("/?p={enc}")} rel="external">{seg}</a>
+                        <a href={format!("/?open={enc}")} rel="external">{seg}</a>
                     }.into_any()
                 }
             }).collect_view()}
@@ -2060,17 +2139,17 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
         );
         return view! {
             <article class="card kind-directory">
-                <a class="thumb dir-thumb" href={format!("/?p={enc_full}")} rel="external">
+                <a class="thumb dir-thumb" href={format!("/?open={enc_full}")} rel="external">
                     <span class="icon">"📁"</span>
                 </a>
                 <div class="meta">
                     <div class="name">
-                        <a href={format!("/?p={enc_full}")} rel="external">{basename.clone()}</a>
+                        <a href={format!("/?open={enc_full}")} rel="external">{basename.clone()}</a>
                     </div>
                     <div class="row mut">{t!("folder.kind_label")}</div>
                 </div>
                 <div class="actions">
-                    <a href={format!("/?p={}", enc_full.clone())} rel="external">{t!("folder.open")}</a>
+                    <a href={format!("/?open={}", enc_full.clone())} rel="external">{t!("folder.open")}</a>
                     " · "
                     <form
                         method="POST"
