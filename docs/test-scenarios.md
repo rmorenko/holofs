@@ -1232,6 +1232,147 @@ wait
 
 ---
 
+## 26. Stage 15.x reliability scenarios
+
+### 26.1 Auto-repair-on-read counters
+
+Goal: verify `decode_with_autorepair`'s retry arm moves the
+counters in `/api/stats` only when there's something to repair.
+
+```sh
+# Baseline — fresh cluster, healthy.
+curl -s http://127.0.0.1:8787/api/stats | jq '.auto_repairs_total, .auto_repair_failures_total'
+# 0
+# 0
+
+# Light degradation — kill 3 of 40 nodes (well under layer-3 redundancy).
+for i in 0 1 2; do curl -X POST -d "i=$i" http://127.0.0.1:8787/admin/node; done
+curl -s http://127.0.0.1:8787/photo.png -o /dev/null
+curl -s http://127.0.0.1:8787/api/stats | jq '.auto_repairs_total'
+# Still 0 — auto-repair should NOT fire under light loss.
+
+# Heavy degradation — kill 60 % of the cluster.
+for i in $(seq 3 24); do curl -X POST -d "i=$i" http://127.0.0.1:8787/admin/node; done
+curl -s http://127.0.0.1:8787/photo.png -o /dev/null
+curl -s http://127.0.0.1:8787/api/stats | jq '.auto_repairs_total, .auto_repair_failures_total'
+# At least one counter MUST be ≥ 1.
+```
+
+Covered automatically by `crates/holofs-e2e/tests/auto_repair_e2e.rs`.
+
+### 26.2 Background scrub proactively repairs
+
+Goal: prove the scrub catches placement drift before users do.
+
+```sh
+# Set scrub to 15 s for the demo (default is 600 s).
+HOLOFS_SCRUB_INTERVAL=15 \
+  cargo run --release --bin holofs-web
+# wait for the first tick:
+sleep 20
+curl -s http://127.0.0.1:8787/api/stats | jq '.scrub_runs_total'
+# 1+ — scrub_repairs_total stays 0 on a healthy cluster.
+```
+
+A noisier demo is in
+`crates/holofs-e2e/tests/reliability_repair.rs::prometheus_metrics_expose_auto_repair_gauges`.
+
+### 26.3 Cluster-degraded → 503, not panic
+
+Goal: `place_shard` used to assert on an empty live set, crashing
+the gateway. Now PUT against a fully-down cluster returns a clean
+503.
+
+```sh
+# Kill every node.
+for i in $(seq 0 39); do curl -X POST -d "i=$i" http://127.0.0.1:8787/admin/node; done
+curl -i -X PUT --data-binary @some.png http://127.0.0.1:8787/test.png
+# HTTP/1.1 503 Service Unavailable
+# content-type: text/plain
+# cluster has no live nodes
+```
+
+After un-killing the nodes (`POST /admin/node` toggles), the same
+PUT succeeds with 2xx.
+
+Covered by `crates/holofs-e2e/tests/cluster_degraded.rs`.
+
+### 26.4 Version deletion + retention cap
+
+Goal: per-name history doesn't grow unbounded.
+
+```sh
+HOLOFS_VERSIONS_KEEP_LAST=2 \
+  cargo run --release --bin holofs-web -- --enable-versions
+
+# PUT four different images under the same name.
+for body in a.png b.png c.png d.png; do
+  curl -X PUT --data-binary @$body http://127.0.0.1:8787/test.png
+done
+
+# /api/versions_list — at most 2 archives, no matter how many PUTs landed.
+curl -s -X POST -d "name=test.png" http://127.0.0.1:8787/api/versions_list | jq '.versions | length'
+# 2
+
+# Manual delete of one archive — counter drops to 1.
+ID=$(curl -s -X POST -d "name=test.png" http://127.0.0.1:8787/api/versions_list | jq -r '.versions[0].id')
+curl -X POST -d "name=test.png&id=$ID&return_to=/" http://127.0.0.1:8787/api/versions/delete
+```
+
+Covered by `crates/holofs-e2e/tests/versions_lifecycle.rs`.
+
+### 26.5 cd-into-folder in the catalog tree
+
+Goal: clicking "open →" on a folder shows ONLY that folder's
+contents at the top level, with a breadcrumb to navigate back up.
+
+```sh
+# Seed a nested tree (the standard sample upload script):
+tools/test-data/upload-samples.sh
+
+# Visit the catalog at /. Expand `photos/`, then click "open →" on
+# `landscapes-xl`. The URL becomes `/?p=photos/landscapes-xl` and the
+# tree now shows the six picsum JPEGs as top-level entries — no
+# sibling folders.
+xdg-open http://127.0.0.1:8787/?p=photos/landscapes-xl  # linux
+open http://127.0.0.1:8787/?p=photos/landscapes-xl      # macos
+```
+
+Inline upload + mkdir forms on every `<details>` row land files into
+the folder you were looking at; the root toolbar's upload form
+scopes itself to the current `?p=<path>` prefix.
+
+Covered by the manual smoke in §18 plus the catalog rendering tests
+under `crates/holofs-e2e/tests/ui_catalog.rs`.
+
+### 26.6 Synthetic PNG samples decode cleanly
+
+Goal: the 22-of-29-broken bug is gone.
+
+```sh
+tools/test-data/clean-cluster.sh           # fresh storage
+HOLOFS_NO_SEED=true \
+  cargo run --release --bin holofs-web &
+sleep 4
+python3 tools/test-data/generate-samples.py
+tools/test-data/upload-samples.sh
+
+# Walk every PNG / JPG under samples/ and GET it.
+broken=0
+for f in $(find samples -type f \( -name '*.png' -o -name '*.jpg' \)); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8787/${f#samples/}")
+  [ "$code" != "200" ] && broken=$((broken+1))
+done
+echo "broken=$broken"
+# broken=0
+```
+
+The deterministic LSB jitter injected by `write_png` (Stage 15.x)
+ensures high-frequency DWT shards are unique per file even on the
+smoothest synthetic generators.
+
+---
+
 ## Wrap-up
 
 Clean stop:
