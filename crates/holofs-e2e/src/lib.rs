@@ -538,6 +538,12 @@ fn spawn_gateway(
         cmd.env("HOLOFS_MONITOR_INTERVAL", "3600");
         cmd.env("HOLOFS_AUDIT_INTERVAL", "3600");
     }
+    // N6: e2e harness opts in to the dev override so the pre-N6
+    // /admin/node and /api/gc tests keep passing without having to
+    // thread bearer tokens through every test helper. Individual
+    // scenarios that specifically want to exercise the auth path
+    // can add HOLOFS_ADMIN_TOKEN to `extra_env` and override.
+    cmd.env("HOLOFS_ADMIN_UNAUTHENTICATED", "1");
     for (k, v) in &config.extra_env {
         cmd.env(k, v);
     }

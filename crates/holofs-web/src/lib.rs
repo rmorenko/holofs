@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 
 pub mod about;
 #[cfg(feature = "ssr")]
+pub mod admin_auth;
+#[cfg(feature = "ssr")]
 pub mod backpressure;
 pub mod bootstrap;
 #[cfg(feature = "ssr")]

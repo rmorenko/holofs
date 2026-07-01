@@ -39,6 +39,9 @@ pub struct ObservabilityCounters<'gw> {
     pub task_restarts_auditor: &'gw Arc<std::sync::atomic::AtomicU64>,
     pub task_restarts_scrub: &'gw Arc<std::sync::atomic::AtomicU64>,
     pub catalog_persist_failures_total: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub admin_auth_missing_total: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub admin_auth_bad_total: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub admin_auth_disabled_total: &'gw Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// N3: default MEDIUM-bucket concurrency (decodes, PUT, dir ops).
@@ -185,6 +188,14 @@ pub struct Gateway {
     pub(crate) task_restarts_monitor: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) task_restarts_auditor: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) task_restarts_scrub: Arc<std::sync::atomic::AtomicU64>,
+    /// N6: admin bearer-token auth failures. Bumped by the
+    /// `require_admin_token` middleware on 401 (bad or missing
+    /// token) and 403 (admin surface disabled entirely). Emitted
+    /// in `/metrics` as `holofs_admin_auth_failures_total{outcome=…}`
+    /// split by rejection reason.
+    pub(crate) admin_auth_missing_total: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) admin_auth_bad_total: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) admin_auth_disabled_total: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// PNG cache entry: fully-encoded body + the layer it was decoded at
@@ -235,6 +246,9 @@ impl Gateway {
             task_restarts_monitor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             task_restarts_auditor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             task_restarts_scrub: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            admin_auth_missing_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            admin_auth_bad_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            admin_auth_disabled_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -276,6 +290,9 @@ impl Gateway {
             task_restarts_monitor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             task_restarts_auditor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             task_restarts_scrub: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            admin_auth_missing_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            admin_auth_bad_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            admin_auth_disabled_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -307,7 +324,27 @@ impl Gateway {
             task_restarts_auditor: &self.task_restarts_auditor,
             task_restarts_scrub: &self.task_restarts_scrub,
             catalog_persist_failures_total: &self.catalog_persist_failures_total,
+            admin_auth_missing_total: &self.admin_auth_missing_total,
+            admin_auth_bad_total: &self.admin_auth_bad_total,
+            admin_auth_disabled_total: &self.admin_auth_disabled_total,
         }
+    }
+
+    /// Owned handles to the three admin-auth failure counters, in
+    /// `(missing, bad, disabled)` order. Middleware in `holofs-web`
+    /// captures these into its `from_fn` closure.
+    pub fn admin_auth_counters(
+        &self,
+    ) -> (
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        (
+            Arc::clone(&self.admin_auth_missing_total),
+            Arc::clone(&self.admin_auth_bad_total),
+            Arc::clone(&self.admin_auth_disabled_total),
+        )
     }
 
     /// Owned handles for a specific bucket's permit + rejection

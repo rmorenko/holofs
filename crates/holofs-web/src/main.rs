@@ -36,6 +36,7 @@ use holofs_web::handlers;
 use holofs_web::health::{GetHealthIndex, GetObjectHealth};
 use holofs_web::inspect::{GetInspect, GetInspectZoom};
 use holofs_web::help::{GetDoc, ListDocs};
+use holofs_web::admin_auth::{require_admin_token, AdminAuth};
 use holofs_web::backpressure::with_permit;
 use holofs_web::similar::GetSimilar;
 use holofs_web::timeout::{run_with_deadline, LONG, MEDIUM, SHORT};
@@ -114,16 +115,45 @@ async fn main() {
     // buckets so a slow / hung cluster can't chain-stall the whole
     // gateway. `timeout::run_with_deadline` returns 504 on elapsed.
     //
-    // SHORT (10 s) — read-only introspection: catalog / metrics /
-    // admin. A slow response here signals real degradation (locks,
-    // cluster stalls).
+    // SHORT (10 s) — read-only introspection: catalog / metrics.
+    // A slow response here signals real degradation (locks, cluster
+    // stalls). /admin/node moves into its own bucket below (N6).
     let (to_short, to_medium, to_long) = gateway.timeout_counters();
+    let to_short_public = to_short.clone();
     let short_routes: Router<LeptosOptions> = Router::new()
         .route("/api/stats", get(handlers::api_stats))
         .route("/metrics", get(handlers::metrics))
+        .route_layer(from_fn(move |req, next| {
+            run_with_deadline(SHORT, to_short_public.clone(), req, next)
+        }));
+
+    // N6: admin surface — auth-gated. Both /admin/node and /api/gc
+    // are potentially destructive and pre-N6 were open to anyone
+    // who could reach the gateway. `AdminAuth::from_env` reads
+    // HOLOFS_ADMIN_TOKEN once at startup and logs the outcome.
+    // /admin/node keeps its SHORT (10s) deadline; /api/gc keeps
+    // the LONG (5 min) deadline. Neither wears the LONG semaphore
+    // — admin calls should just run when the operator asks.
+    let (admin_missing, admin_bad, admin_disabled) = gateway.admin_auth_counters();
+    let admin_cfg = AdminAuth::from_env(admin_missing, admin_bad, admin_disabled);
+    let admin_cfg_short = admin_cfg.clone();
+    let admin_short_routes: Router<LeptosOptions> = Router::new()
         .route("/admin/node", post(handlers::toggle_node))
         .route_layer(from_fn(move |req, next| {
             run_with_deadline(SHORT, to_short.clone(), req, next)
+        }))
+        .route_layer(from_fn(move |req, next| {
+            require_admin_token(admin_cfg_short.clone(), req, next)
+        }));
+    let admin_cfg_long = admin_cfg;
+    let to_long_admin = to_long.clone();
+    let admin_long_routes: Router<LeptosOptions> = Router::new()
+        .route("/api/gc", post(handlers::gc_orphans))
+        .route_layer(from_fn(move |req, next| {
+            run_with_deadline(LONG, to_long_admin.clone(), req, next)
+        }))
+        .route_layer(from_fn(move |req, next| {
+            require_admin_token(admin_cfg_long.clone(), req, next)
         }));
 
     // LONG (5 min, LONG-bucket backpressure) — catalog-wide scans
@@ -135,7 +165,6 @@ async fn main() {
     let long_routes: Router<LeptosOptions> = Router::new()
         .route("/api/search", get(handlers::semantic_search))
         .route("/api/spotlight.png", get(handlers::spotlight_png))
-        .route("/api/gc", post(handlers::gc_orphans))
         .route("/api/embed_all", post(handlers::embed_all))
         .route("/api/fingerprint/*path", get(handlers::api_fingerprint))
         .route_layer(from_fn(move |req, next| {
@@ -238,6 +267,8 @@ async fn main() {
 
     let app = Router::new()
         .merge(short_routes)
+        .merge(admin_short_routes)
+        .merge(admin_long_routes)
         .merge(long_routes)
         .merge(streaming_routes)
         .merge(medium_routes)

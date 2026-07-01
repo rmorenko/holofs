@@ -356,6 +356,21 @@ pub async fn metrics(Extension(gw): Extension<Arc<Gateway>>) -> Response {
         obs.task_restarts_scrub.load(Ordering::Relaxed)
     ));
 
+    body.push_str("# HELP holofs_admin_auth_failures_total N6 admin bearer-token rejections, split by reason.\n");
+    body.push_str("# TYPE holofs_admin_auth_failures_total counter\n");
+    body.push_str(&format!(
+        "holofs_admin_auth_failures_total{{outcome=\"missing\"}} {}\n",
+        obs.admin_auth_missing_total.load(Ordering::Relaxed)
+    ));
+    body.push_str(&format!(
+        "holofs_admin_auth_failures_total{{outcome=\"bad\"}} {}\n",
+        obs.admin_auth_bad_total.load(Ordering::Relaxed)
+    ));
+    body.push_str(&format!(
+        "holofs_admin_auth_failures_total{{outcome=\"disabled\"}} {}\n",
+        obs.admin_auth_disabled_total.load(Ordering::Relaxed)
+    ));
+
     body.push_str("# HELP holofs_node_admin_killed Per-node admin-kill flag (1 = disabled).\n");
     body.push_str("# TYPE holofs_node_admin_killed gauge\n");
     for (idx, killed) in kills.iter().enumerate() {
