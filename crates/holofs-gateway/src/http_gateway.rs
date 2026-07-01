@@ -17,9 +17,9 @@ use holofs_client::{
     get_audio_filtered, get_object_up_to_layer, get_object_with_coeff_mask, layer_energies,
     mix_images_at_split, put_object, repair_node, ClientError, LiveNodes,
 };
-use holofs_codec::image_io::{load_photo_from_bytes, to_rgb};
+use holofs_codec::image_io::load_photo_from_bytes;
 use holofs_core::gf::Gf;
-use holofs_core::hash::{hex, sha256};
+use holofs_core::hash::hex;
 use holofs_core::transform::coeff_layer;
 use holofs_core::{K, LEVELS, NLAYERS, RED};
 use holofs_model::fs::Directory;
@@ -1076,78 +1076,14 @@ pub struct RenameResult {
 /// by creation time later. Falls back to `0` if the clock is somehow
 /// behind the epoch (we don't want to panic the whole ingest path on
 /// what should be impossible).
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// Stable, path-derived id for directory markers. We hash with a separate
-/// domain tag so a collision with a data object id is impossible.
-fn directory_object_id(path: &str) -> u64 {
-    let mut buf = Vec::with_capacity(path.len() + 16);
-    buf.extend_from_slice(b"holofs-dir-v1\0");
-    buf.extend_from_slice(path.as_bytes());
-    let h = sha256(&buf);
-    let mut id = [0u8; 8];
-    id.copy_from_slice(&h[..8]);
-    u64::from_be_bytes(id)
-}
-
-/// Errors the public Gateway API can return. Frontends map them to HTTP
-/// status codes (404, 400, 503, etc.).
-#[derive(Debug, Clone)]
-pub enum GatewayError {
-    /// Object not in catalog.
-    NotFound,
-    /// Client-side error (empty body, bad name, unsupported kind).
-    BadRequest(String),
-    /// Decode failed at the cluster level (not enough shards, network).
-    Decode(String),
-    /// Preview was requested for text/opaque — no graceful projection exists.
-    PreviewUnsupported,
-    /// Caller asked for the bytes of a `Directory` entry. Directories have
-    /// no payload; the HTTP layer surfaces this as `409 Conflict`.
-    IsDirectory,
-    /// An entry already exists at the target path. `mkdir` returns this for
-    /// any non-directory entry; PUT returns it for directory entries.
-    AlreadyExists,
-    /// `rmdir`/`list_dir` invoked on a path that exists but is not a
-    /// `Directory` entry.
-    NotADirectory,
-    /// `rmdir` invoked on a directory that still has children. The frontend
-    /// surfaces this as `409 Conflict`.
-    DirectoryNotEmpty,
-    /// Placement asked for a node from an empty live set — the cluster
-    /// is fully down or hasn't been discovered yet. Frontends surface
-    /// this as `503 Service Unavailable` so clients know to retry.
-    ClusterDegraded,
-}
-
-impl From<holofs_model::placement::NoLiveNodes> for GatewayError {
-    fn from(_: holofs_model::placement::NoLiveNodes) -> Self {
-        GatewayError::ClusterDegraded
-    }
-}
-
-impl std::fmt::Display for GatewayError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GatewayError::NotFound => write!(f, "not found"),
-            GatewayError::BadRequest(s) => write!(f, "bad request: {s}"),
-            GatewayError::Decode(s) => write!(f, "decode: {s}"),
-            GatewayError::PreviewUnsupported => write!(f, "preview not supported for this kind"),
-            GatewayError::IsDirectory => write!(f, "is a directory"),
-            GatewayError::AlreadyExists => write!(f, "already exists"),
-            GatewayError::NotADirectory => write!(f, "not a directory"),
-            GatewayError::DirectoryNotEmpty => write!(f, "directory not empty"),
-            GatewayError::ClusterDegraded => write!(f, "cluster has no live nodes"),
-        }
-    }
-}
-
-impl std::error::Error for GatewayError {}
+// GatewayError, helpers — extracted to sibling modules
+// (`error.rs`, `util.rs`) in Phase R1b.1. The re-exports on lib.rs
+// preserve the public path.
+use crate::error::GatewayError;
+use crate::util::{
+    directory_object_id, encode_png, guess_opaque_content_type,
+    guess_text_content_type, now_unix,
+};
 
 impl Gateway {
     /// Decode an object for HTTP transport. Returns body bytes plus the
@@ -4335,73 +4271,9 @@ impl Gateway {
 
 /// Guess the content-type of an arbitrary binary by extension. If unknown,
 /// fall back to `application/octet-stream` (universal "untyped binary").
-fn guess_opaque_content_type(name: &str) -> String {
-    let lower = name.to_ascii_lowercase();
-    let ext = lower.rsplit('.').next().unwrap_or("");
-    match ext {
-        "pdf" => "application/pdf",
-        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "doc" => "application/msword",
-        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "xls" => "application/vnd.ms-excel",
-        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "ppt" => "application/vnd.ms-powerpoint",
-        "odt" => "application/vnd.oasis.opendocument.text",
-        "ods" => "application/vnd.oasis.opendocument.spreadsheet",
-        "zip" => "application/zip",
-        "tar" => "application/x-tar",
-        "gz" | "gzip" => "application/gzip",
-        "bz2" => "application/x-bzip2",
-        "xz" => "application/x-xz",
-        "7z" => "application/x-7z-compressed",
-        "rar" => "application/vnd.rar",
-        "epub" => "application/epub+zip",
-        "mobi" => "application/x-mobipocket-ebook",
-        "rtf" => "application/rtf",
-        "sqlite" | "db" => "application/vnd.sqlite3",
-        "exe" | "dll" => "application/vnd.microsoft.portable-executable",
-        "dmg" => "application/x-apple-diskimage",
-        "iso" => "application/x-iso9660-image",
-        _ => "application/octet-stream",
-    }
-    .to_string()
-}
-
-/// Guess the content-type of a text file by name (for use on GET).
-fn guess_text_content_type(name: &str) -> String {
-    let lower = name.to_ascii_lowercase();
-    if lower.ends_with(".md") || lower.ends_with(".markdown") {
-        "text/markdown; charset=utf-8".into()
-    } else if lower.ends_with(".html") || lower.ends_with(".htm") {
-        "text/html; charset=utf-8".into()
-    } else if lower.ends_with(".json") {
-        "application/json; charset=utf-8".into()
-    } else if lower.ends_with(".css") {
-        "text/css; charset=utf-8".into()
-    } else if lower.ends_with(".csv") {
-        "text/csv; charset=utf-8".into()
-    } else {
-        "text/plain; charset=utf-8".into()
-    }
-}
-
-fn encode_png(channels: &[Vec<f32>], w: u32, h: u32) -> Vec<u8> {
-    let arr: [Vec<f32>; 3] = [
-        channels[0].clone(),
-        channels[1].clone(),
-        channels[2].clone(),
-    ];
-    let rgb = to_rgb(&arr, w as usize, h as usize);
-    let mut buf = Vec::new();
-    {
-        let mut enc = png::Encoder::new(&mut buf, w, h);
-        enc.set_color(png::ColorType::Rgb);
-        enc.set_depth(png::BitDepth::Eight);
-        let mut writer = enc.write_header().unwrap();
-        writer.write_image_data(&rgb).unwrap();
-    }
-    buf
-}
+// guess_opaque_content_type, guess_text_content_type, encode_png —
+// moved to `util.rs` in Phase R1b.1. The `use` at the top of this
+// file brings them back into scope with the same names.
 
 #[cfg(test)]
 mod tests {
