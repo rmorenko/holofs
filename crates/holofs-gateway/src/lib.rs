@@ -16,6 +16,7 @@
 //! module path.
 
 mod diff;
+mod dirops;
 mod error;
 mod escrow;
 mod gc;
@@ -29,6 +30,7 @@ mod util;
 mod versions;
 
 pub use diff::{DiffCell, DiffLayer, DiffReport};
+pub use dirops::{MkdirResult, RemoveResult, RenameResult, RmdirResult};
 pub use error::GatewayError;
 pub use escrow::{
     EscrowRecoverResult, EscrowShareBytes, EscrowShareInfo, EscrowSplitResult,
