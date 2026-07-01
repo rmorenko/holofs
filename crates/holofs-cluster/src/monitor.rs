@@ -367,76 +367,9 @@ mod tests {
 
     use holofs_model::manifest::{Manifest, ObjectEncoding, ObjectKind};
     use holofs_model::placement::Placement;
+    use holofs_testutils::{spawn_mock_node as spawn_responder, DisablePool};
     use holofs_wire::Response;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-
-    /// RAII guard: hold a local mutex while `HOLOFS_POOL_DISABLE=1`,
-    /// restore on drop. Same shape as the audit-test guard. Required
-    /// because `discover_live` goes through the pool — without
-    /// disabling we'd reuse closed listener streams across tests.
-    struct DisablePool {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        old: Option<String>,
-    }
-    impl DisablePool {
-        fn new() -> Self {
-            use std::sync::{Mutex, OnceLock};
-            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-            let lock = LOCK
-                .get_or_init(|| Mutex::new(()))
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            let old = std::env::var("HOLOFS_POOL_DISABLE").ok();
-            std::env::set_var("HOLOFS_POOL_DISABLE", "1");
-            Self { _lock: lock, old }
-        }
-    }
-    impl Drop for DisablePool {
-        fn drop(&mut self) {
-            match &self.old {
-                Some(v) => std::env::set_var("HOLOFS_POOL_DISABLE", v),
-                None => std::env::remove_var("HOLOFS_POOL_DISABLE"),
-            }
-        }
-    }
-
-    /// Spawn a multi-shot listener that always responds with the
-    /// given Response, however many frames the client sends.
-    async fn spawn_responder(response: Response) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-        let handle = tokio::spawn(async move {
-            loop {
-                let (mut sock, _) = match listener.accept().await {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
-                let resp_bytes = response.encode();
-                tokio::spawn(async move {
-                    loop {
-                        let mut len_buf = [0u8; 4];
-                        if sock.read_exact(&mut len_buf).await.is_err() {
-                            return;
-                        }
-                        let len = u32::from_be_bytes(len_buf) as usize;
-                        let mut req = vec![0u8; len];
-                        if sock.read_exact(&mut req).await.is_err() {
-                            return;
-                        }
-                        let reply_len = (resp_bytes.len() as u32).to_be_bytes();
-                        if sock.write_all(&reply_len).await.is_err() {
-                            return;
-                        }
-                        if sock.write_all(&resp_bytes).await.is_err() {
-                            return;
-                        }
-                    }
-                });
-            }
-        });
-        (addr, handle)
-    }
 
     /// Build a minimal "alive" manifest with the given node list.
     /// Image kind so monitor doesn't skip it as Directory; one

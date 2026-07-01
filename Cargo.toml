@@ -15,6 +15,7 @@ members = [
     "crates/holofs-mcp",
     "crates/holofs-embed",
     "crates/holofs-e2e",
+    "crates/holofs-testutils",
 ]
 
 [workspace.package]
@@ -113,6 +114,7 @@ holofs-analytics = { path = "crates/holofs-analytics", version = "0.5.0" }
 holofs-gateway   = { path = "crates/holofs-gateway",   version = "0.5.0" }
 holofs-mcp       = { path = "crates/holofs-mcp",       version = "0.5.0" }
 holofs-embed     = { path = "crates/holofs-embed",     version = "0.5.0" }
+holofs-testutils = { path = "crates/holofs-testutils", version = "0.5.0" }
 
 [profile.release]
 opt-level = 3

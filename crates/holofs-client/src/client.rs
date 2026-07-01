@@ -1256,49 +1256,8 @@ mod rpc_tests {
     //! tests in holofs-cluster.
 
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use holofs_testutils::spawn_mock_node;
     use tokio::net::TcpListener;
-
-    /// Spin up an ephemeral TCP listener that replies to every
-    /// accepted connection with the same `response`, until the
-    /// returned handle is dropped (which closes the listener).
-    async fn spawn_multi_shot_node(response: Response) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-        let handle = tokio::spawn(async move {
-            loop {
-                let (mut sock, _) = match listener.accept().await {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
-                let resp_bytes = response.encode();
-                tokio::spawn(async move {
-                    // Loop on the same socket — the pool may keep it
-                    // alive across calls.
-                    loop {
-                        let mut len_buf = [0u8; 4];
-                        if sock.read_exact(&mut len_buf).await.is_err() {
-                            return;
-                        }
-                        let len = u32::from_be_bytes(len_buf) as usize;
-                        let mut req = vec![0u8; len];
-                        if sock.read_exact(&mut req).await.is_err() {
-                            return;
-                        }
-                        let reply_len = (resp_bytes.len() as u32).to_be_bytes();
-                        if sock.write_all(&reply_len).await.is_err() {
-                            return;
-                        }
-                        if sock.write_all(&resp_bytes).await.is_err() {
-                            return;
-                        }
-                        let _ = sock.flush().await;
-                    }
-                });
-            }
-        });
-        (addr, handle)
-    }
 
     /// RAII guard combining (a) the crate-wide pool test mutex
     /// (serialises with `pool::tests`) and (b) `HOLOFS_POOL_DISABLE=1`
@@ -1329,7 +1288,7 @@ mod rpc_tests {
     async fn list_node_hashes_decodes_response() {
         let _g = DisablePool::new();
         let payload = vec![[0x11u8; 32], [0x22u8; 32]];
-        let (addr, _h) = spawn_multi_shot_node(Response::Hashes(payload.clone())).await;
+        let (addr, _h) = spawn_mock_node(Response::Hashes(payload.clone())).await;
         let got = list_node_hashes(&addr).await.unwrap();
         assert_eq!(got, payload);
     }
@@ -1337,7 +1296,7 @@ mod rpc_tests {
     #[tokio::test]
     async fn list_node_hashes_surfaces_remote_error() {
         let _g = DisablePool::new();
-        let (addr, _h) = spawn_multi_shot_node(Response::Error("disk full".into())).await;
+        let (addr, _h) = spawn_mock_node(Response::Error("disk full".into())).await;
         let err = list_node_hashes(&addr).await.unwrap_err();
         assert!(matches!(err, ClientError::RemoteError(s) if s == "disk full"));
     }
@@ -1345,7 +1304,7 @@ mod rpc_tests {
     #[tokio::test]
     async fn list_node_hashes_unexpected_response_surfaces_typed_error() {
         let _g = DisablePool::new();
-        let (addr, _h) = spawn_multi_shot_node(Response::Pong).await;
+        let (addr, _h) = spawn_mock_node(Response::Pong).await;
         let err = list_node_hashes(&addr).await.unwrap_err();
         assert!(matches!(err, ClientError::UnexpectedResponse { .. }));
     }
@@ -1353,7 +1312,7 @@ mod rpc_tests {
     #[tokio::test]
     async fn purge_node_by_hash_acks_successfully() {
         let _g = DisablePool::new();
-        let (addr, _h) = spawn_multi_shot_node(Response::Ack).await;
+        let (addr, _h) = spawn_mock_node(Response::Ack).await;
         purge_node_by_hash(&addr, vec![[0xAB; 32]]).await.unwrap();
     }
 
@@ -1362,8 +1321,8 @@ mod rpc_tests {
         let _g = DisablePool::new();
         // One node responds with Pong, one with Error. Only the first
         // should land in the live set.
-        let (good_addr, _g) = spawn_multi_shot_node(Response::Pong).await;
-        let (bad_addr, _b) = spawn_multi_shot_node(Response::Error("oh no".into())).await;
+        let (good_addr, _g) = spawn_mock_node(Response::Pong).await;
+        let (bad_addr, _b) = spawn_mock_node(Response::Error("oh no".into())).await;
         // Spoof a manifest with just these two nodes.
         let mut m = Manifest {
             object_id: 0,

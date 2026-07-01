@@ -19,5 +19,8 @@ holofs-analytics.workspace = true
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 
+[dev-dependencies]
+holofs-testutils.workspace = true
+
 [lints]
 workspace = true
