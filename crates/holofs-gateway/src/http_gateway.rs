@@ -37,22 +37,27 @@ pub struct ClusterInfo {
 }
 
 pub struct Gateway {
-    catalog: Arc<Mutex<Directory>>,
+    // Every field is `pub(crate)` because Phase R1b is splitting
+    // the impl Gateway blocks across sibling modules
+    // (search.rs, versions.rs, gc.rs, ...) — each of which reaches
+    // into shared state.  The Gateway type itself stays `pub`; the
+    // fields don't leak outside the crate boundary.
+    pub(crate) catalog: Arc<Mutex<Directory>>,
     /// Optional path to the catalog file. If set, the catalog is saved
     /// atomically on each change (PUT/DELETE).
-    catalog_path: Option<std::path::PathBuf>,
+    pub(crate) catalog_path: Option<std::path::PathBuf>,
     /// Stage 12.8: optional semantic-search embeddings index. `None`
     /// when the server was started without `--enable-embed`. When set,
     /// every PUT fires a fire-and-forget background task that embeds
     /// the new object via CLIP and appends to the on-disk index.
-    embed: Arc<Mutex<EmbedState>>,
+    pub(crate) embed: Arc<Mutex<EmbedState>>,
     /// Stage 13.4: optional per-object version history. When enabled
     /// every PUT that *replaces* an existing object writes the prior
     /// manifest as a side file under `versions_dir/<sanitized>/v…bin`
     /// and skips the usual shard purge so the historical version
     /// remains decodeable. Trade-off: cluster storage monotonically
     /// grows while the feature is on (no GC yet).
-    versions: Arc<Mutex<VersionsState>>,
+    pub(crate) versions: Arc<Mutex<VersionsState>>,
     /// Stage 14.4: serialisation barrier between catalog-mutating
     /// writers and the orphan-shard GC pass.
     ///
@@ -70,19 +75,19 @@ pub struct Gateway {
     /// `PurgeByHash(node N+1)` would silently delete the new shard.
     /// The barrier turns that race into "PUTs queue behind GC" which
     /// is fine for the manually-triggered `/api/gc`.
-    gc_barrier: Arc<RwLock<()>>,
-    gf: Arc<Gf>,
+    pub(crate) gc_barrier: Arc<RwLock<()>>,
+    pub(crate) gf: Arc<Gf>,
     /// Baseline list of "actually live" cluster nodes. `admin_kills` flags
     /// (set via the UI) are layered on top of it.
-    live: Arc<LiveNodes>,
+    pub(crate) live: Arc<LiveNodes>,
     /// "Node disabled by admin" flags indexed by `cluster.node_addrs`.
     /// The node keeps responding physically, but the gateway treats it as dead:
     /// PUT/GET bypass it, the health-monitor sees the margin drop, the auditor
     /// does not query it.
-    admin_kills: Arc<Mutex<Vec<bool>>>,
-    cluster: Arc<ClusterInfo>,
+    pub(crate) admin_kills: Arc<Mutex<Vec<bool>>>,
+    pub(crate) cluster: Arc<ClusterInfo>,
     /// Cache keyed by (name, max_decoded_layer) → ready PNG + metrics.
-    cache: Mutex<HashMap<(String, u8), Arc<CachedFile>>>,
+    pub(crate) cache: Mutex<HashMap<(String, u8), Arc<CachedFile>>>,
     /// Stage 11.2: per-`(name, channel, layer)` shard cache. `shard_payload`
     /// previously called `gather_layer` for every cell on `/inspect/<name>`
     /// — under the inspect grid's ~444 concurrent renders that saturated
@@ -90,24 +95,24 @@ pub struct Gateway {
     /// raced. The `OnceCell` deduplicates concurrent gathers: the first
     /// caller does the work, every other caller awaits the same future.
     /// Invalidated together with [`Self::cache`] on every PUT / DELETE.
-    shard_cache: Mutex<
+    pub(crate) shard_cache: Mutex<
         HashMap<(String, u8, u8), Arc<tokio::sync::OnceCell<Arc<Vec<holofs_core::rlnc::Shard>>>>>,
     >,
     /// Temporary cache of generated escrow shares: escrow_id_hex → Vec<ShareFile>.
     /// Kept only until the gateway restarts (shares are not part of the cluster).
-    escrow_cache: Mutex<HashMap<String, Vec<holofs_analytics::escrow::ShareFile>>>,
+    pub(crate) escrow_cache: Mutex<HashMap<String, Vec<holofs_analytics::escrow::ShareFile>>>,
     /// Auto-repair-on-read counters. Bumped from
     /// [`Self::decode_with_autorepair`] when the first decode attempt
     /// hits [`ClientError::LayerLost`] and the retry path kicks in.
     /// Surfaced via [`ApiStats`].
-    auto_repairs_total: Arc<std::sync::atomic::AtomicU64>,
-    auto_repair_failures_total: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) auto_repairs_total: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) auto_repair_failures_total: Arc<std::sync::atomic::AtomicU64>,
     /// Background-scrub counters: how many objects this gateway has
     /// proactively repaired before any user GET tripped a 503.
     /// Bumped from the scrub task spawned at bootstrap (see
     /// [`Self::scrub_tick`]).
-    scrub_repairs_total: Arc<std::sync::atomic::AtomicU64>,
-    scrub_runs_total: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) scrub_repairs_total: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) scrub_runs_total: Arc<std::sync::atomic::AtomicU64>,
 }
 
 struct CachedFile {
@@ -1080,6 +1085,7 @@ pub struct RenameResult {
 // (`error.rs`, `util.rs`) in Phase R1b.1. The re-exports on lib.rs
 // preserve the public path.
 use crate::error::GatewayError;
+use crate::search::EmbedState;
 use crate::util::{
     directory_object_id, encode_png, guess_opaque_content_type,
     guess_text_content_type, now_unix,
@@ -2421,365 +2427,14 @@ impl Gateway {
     }
 }
 
-// === Stage 12.8: CLIP-based semantic search =================================
-
-/// Lazy embedder state shared across the gateway. `enabled` is set via
-/// [`Gateway::enable_embed`]; the [`Embedder`](holofs_embed::Embedder)
-/// itself is constructed on the first PUT or query after that, so a
-/// server that never gets asked to embed pays nothing.
-#[derive(Default)]
-struct EmbedState {
-    enabled: bool,
-    index_path: Option<std::path::PathBuf>,
-    embedder: Option<Arc<holofs_embed::Embedder>>,
-    /// Stage 14.2: in-memory ANN index. `None` until the first
-    /// `semantic_search` after a PUT (or after a startup) — then
-    /// built from the entire `embeddings.bin`. Bumped to `None` by
-    /// `ann_generation` mismatches so the next query rebuilds.
-    ann: Option<Arc<holofs_embed::HnswIndex>>,
-    /// Increments every time a new embedding is appended. Compared
-    /// against the generation the cached `ann` was built at — when
-    /// they diverge we drop the cache and rebuild.
-    ann_generation: u64,
-    /// Generation `ann` was built at. `None` until first build.
-    ann_built_at: Option<u64>,
-}
-
-/// Layer-band selector for [`Gateway::semantic_search`]. `Any` (the
-/// default) takes the best score across all bands per file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchBand {
-    /// L0 reconstruction — silhouette / colour blob.
-    Coarse,
-    /// L0-L2 reconstruction — silhouette + low-freq detail.
-    Mid,
-    /// All layers — texture / fine detail.
-    Full,
-    /// Search all three bands and keep the best score per file.
-    Any,
-}
-
-impl SearchBand {
-    /// Parse from URL string (`coarse` / `mid` / `full` / `any`).
-    /// Unknown / empty values map to `Any`.
-    #[must_use]
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "coarse" | "structure" => Self::Coarse,
-            "mid" => Self::Mid,
-            "full" | "texture" | "detail" => Self::Full,
-            _ => Self::Any,
-        }
-    }
-}
-
-/// One row of [`Gateway::semantic_search`] output. The gateway returns
-/// catalog names + scores; the frontend renders them as a card grid.
-#[derive(Debug, Clone)]
-pub struct SemanticHit {
-    /// Catalog name of the matching object.
-    pub name: String,
-    /// Cosine similarity to the query in `[-1.0, 1.0]`. CLIP-base
-    /// scores cluster narrowly around 0.2-0.35 even for strong matches,
-    /// so the UI usually shows them as 0..100 percentiles instead of
-    /// raw values.
-    pub score: f32,
-    /// Stage 13.3: which layer band produced the winning score. For
-    /// queries filtered to one band this is always that band; for
-    /// `SearchBand::Any` it's whichever of the three scored best.
-    pub band: SearchBand,
-}
+// === Stage 12.8 CLIP-based semantic search ==================================
+//
+// SearchBand / SemanticHit / EmbedState / semantic_search /
+// embed_object / embed_object_in_background moved to `search.rs`
+// in Phase R1b.2. The public path stays: SearchBand + SemanticHit
+// are re-exported at the crate root via `lib.rs`.
 
 impl Gateway {
-    /// Lazily build the [`Embedder`](holofs_embed::Embedder) handle.
-    /// The first call downloads ~155 MiB of CLIP weights from
-    /// HuggingFace into `~/.cache/huggingface/hub`; the next process
-    /// boot reads from the cache in milliseconds. Returns `None` when
-    /// the embed feature is disabled.
-    async fn ensure_embedder(
-        &self,
-    ) -> Result<Option<Arc<holofs_embed::Embedder>>, GatewayError> {
-        // Fast path — already initialised.
-        {
-            let s = self.embed.lock().await;
-            if !s.enabled {
-                return Ok(None);
-            }
-            if let Some(e) = &s.embedder {
-                return Ok(Some(Arc::clone(e)));
-            }
-        }
-        // Slow path: spawn_blocking around the candle init.
-        let built = tokio::task::spawn_blocking(holofs_embed::Embedder::new)
-            .await
-            .map_err(|e| GatewayError::BadRequest(format!("embed init join: {e}")))?
-            .map_err(|e| GatewayError::BadRequest(format!("embed init: {e}")))?;
-        let arc = Arc::new(built);
-        let mut s = self.embed.lock().await;
-        // Another task may have raced us.
-        if let Some(e) = &s.embedder {
-            return Ok(Some(Arc::clone(e)));
-        }
-        s.embedder = Some(Arc::clone(&arc));
-        Ok(Some(arc))
-    }
-
-    /// Decode the coarse layers of an image-kind object, run CLIP, and
-    /// append the embedding to the on-disk index. Idempotent —
-    /// `data_cid` re-uploads / duplicates are skipped via
-    /// `Index::has`. Returns:
-    ///   * `Ok(true)` — newly embedded,
-    ///   * `Ok(false)` — already in the index (or embed disabled, or
-    ///     wrong kind),
-    ///   * `Err(...)` — decode / inference failure.
-    pub async fn embed_object(&self, name: &str) -> Result<bool, GatewayError> {
-        // Stage 14.4: hold the GC barrier so the embeddings.bin
-        // rewrite (also a writer) doesn't race our append. The
-        // guard outlives the whole decode + CLIP + index.append.
-        let _gc_guard = self.gc_barrier.read().await;
-        let Some(embedder) = self.ensure_embedder().await? else {
-            return Ok(false);
-        };
-        let index_path = match self.embed.lock().await.index_path.clone() {
-            Some(p) => p,
-            None => return Ok(false),
-        };
-
-        let manifest = self
-            .catalog
-            .lock()
-            .await
-            .get(name)
-            .cloned()
-            .ok_or(GatewayError::NotFound)?;
-        // Stage 12.8 only embeds images. Audio / text get their own
-        // embedding pipeline in a future stage.
-        if manifest.kind != ObjectKind::Image {
-            return Ok(false);
-        }
-
-        // Stage 13.3: embed three layer bands per image so the
-        // /search page can route queries by abstraction level.
-        // Coarse = L0 (silhouette / colour blob), Mid = L0-L2
-        // (silhouette + low-freq detail), Full = all layers
-        // (full-resolution texture). Each band lives as a distinct
-        // record in `embeddings.bin` keyed by (data_cid, band) and is
-        // independently dedup-able — re-running embed_object on an
-        // already-indexed file is cheap because every band short-
-        // circuits at the `Index::has` check.
-        let data_cid = manifest.data_cid;
-        let last_layer = manifest.nlayers.saturating_sub(1);
-        let bands: &[(holofs_embed::LayerBand, u8)] = &[
-            (holofs_embed::LayerBand::Coarse, 0),
-            (holofs_embed::LayerBand::Mid, 2u8.min(last_layer)),
-            (holofs_embed::LayerBand::Full, last_layer),
-        ];
-
-        let mut any_new = false;
-        let live = self.effective_live().await;
-        let width = manifest.width;
-        let height = manifest.height;
-        let n = (width as usize) * (height as usize);
-
-        for &(band, max_layer) in bands {
-            // Per-band dedup check first to skip the decode pass.
-            let already = {
-                let idx_path = index_path.clone();
-                tokio::task::spawn_blocking(move || -> Result<bool, GatewayError> {
-                    let idx = holofs_embed::Index::open(&idx_path)
-                        .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
-                    idx.has(&data_cid, band)
-                        .map_err(|e| GatewayError::BadRequest(format!("embed has: {e}")))
-                })
-                .await
-                .map_err(|e| GatewayError::BadRequest(format!("embed has join: {e}")))??
-            };
-            if already {
-                continue;
-            }
-
-            let (channels, _bytes_dl) = self
-                .decode_with_autorepair(name, max_layer)
-                .await
-                .map_err(|e| GatewayError::Decode(format!("embed decode: {e}")))?;
-            if channels.len() < 3 || channels.iter().any(|c| c.len() != n) {
-                return Err(GatewayError::Decode(
-                    "embed decode: unexpected channel shape".into(),
-                ));
-            }
-            let mut rgb = vec![0u8; 3 * n];
-            for i in 0..n {
-                rgb[3 * i] = channels[0][i].clamp(0.0, 255.0).round() as u8;
-                rgb[3 * i + 1] = channels[1][i].clamp(0.0, 255.0).round() as u8;
-                rgb[3 * i + 2] = channels[2][i].clamp(0.0, 255.0).round() as u8;
-            }
-            let name_owned = name.to_string();
-            let embedder_h = Arc::clone(&embedder);
-            let idx_path = index_path.clone();
-            tokio::task::spawn_blocking(move || -> Result<(), GatewayError> {
-                let vec = embedder_h
-                    .embed_image(&rgb, width, height)
-                    .map_err(|e| GatewayError::Decode(format!("clip image: {e}")))?;
-                let idx = holofs_embed::Index::open(&idx_path)
-                    .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
-                let rec = holofs_embed::EmbedRecord {
-                    data_cid,
-                    band,
-                    name: name_owned,
-                    vec,
-                };
-                idx.append(&rec)
-                    .map_err(|e| GatewayError::BadRequest(format!("embed append: {e}")))?;
-                Ok(())
-            })
-            .await
-            .map_err(|e| GatewayError::BadRequest(format!("embed join: {e}")))??;
-            any_new = true;
-        }
-        if any_new {
-            // Stage 14.2: bump the ANN generation so the next
-            // semantic_search call rebuilds (or — for small bands —
-            // re-loads the in-memory record vec). The rebuild itself
-            // is lazy; we just signal staleness here.
-            self.embed.lock().await.ann_generation += 1;
-        }
-        Ok(any_new)
-    }
-
-    /// Semantic search backed by [`holofs_embed::HnswIndex`].
-    ///
-    /// Stage 14.2: previously a brute-force flat scan over
-    /// `embeddings.bin` on every query. Now lazily builds an
-    /// in-memory ANN index, cached across queries until the next
-    /// PUT bumps `ann_generation`. Small bands still fall back to
-    /// brute-force inside the index (cheap and lower-latency under
-    /// a few hundred vectors); larger bands graduate to HNSW. The
-    /// public contract is identical — same SemanticHit shape, same
-    /// "best-band-per-name when band == Any" semantics.
-    pub async fn semantic_search(
-        &self,
-        query: &str,
-        limit: usize,
-        band: SearchBand,
-    ) -> Result<Vec<SemanticHit>, GatewayError> {
-        let Some(embedder) = self.ensure_embedder().await? else {
-            return Ok(Vec::new());
-        };
-        let ann = match self.ensure_ann_index().await? {
-            Some(a) => a,
-            None => return Ok(Vec::new()),
-        };
-        let query = query.to_string();
-        let result = tokio::task::spawn_blocking(move || -> Result<Vec<SemanticHit>, GatewayError> {
-            let q = embedder
-                .embed_text(&query)
-                .map_err(|e| GatewayError::Decode(format!("clip text: {e}")))?;
-            let raw = match band {
-                SearchBand::Any => ann.search_any(&q, limit),
-                other => {
-                    let band_enum = match other {
-                        SearchBand::Coarse => holofs_embed::LayerBand::Coarse,
-                        SearchBand::Mid => holofs_embed::LayerBand::Mid,
-                        SearchBand::Full => holofs_embed::LayerBand::Full,
-                        SearchBand::Any => unreachable!(),
-                    };
-                    ann.search(band_enum, &q, limit)
-                }
-            };
-            let hits: Vec<SemanticHit> = raw
-                .into_iter()
-                .map(|h| SemanticHit {
-                    name: h.name,
-                    score: h.score,
-                    band: match h.band {
-                        holofs_embed::LayerBand::Coarse => SearchBand::Coarse,
-                        holofs_embed::LayerBand::Mid => SearchBand::Mid,
-                        holofs_embed::LayerBand::Full => SearchBand::Full,
-                    },
-                })
-                .collect();
-            Ok(hits)
-        })
-        .await
-        .map_err(|e| GatewayError::BadRequest(format!("search join: {e}")))?;
-        result
-    }
-
-    /// Lazily build (or reuse) the in-memory ANN index. Rebuilds the
-    /// whole index when the cached generation is stale relative to
-    /// `ann_generation`; otherwise returns the cached `Arc` directly.
-    /// Returns `Ok(None)` when the embed feature is disabled or the
-    /// `embeddings.bin` path is unset.
-    async fn ensure_ann_index(
-        &self,
-    ) -> Result<Option<Arc<holofs_embed::HnswIndex>>, GatewayError> {
-        // Fast path.
-        {
-            let s = self.embed.lock().await;
-            if !s.enabled {
-                return Ok(None);
-            }
-            if let (Some(ann), Some(built_at)) = (&s.ann, s.ann_built_at) {
-                if built_at == s.ann_generation {
-                    return Ok(Some(Arc::clone(ann)));
-                }
-            }
-        }
-        // Slow path — rebuild. Snapshot path + generation, drop the
-        // lock, read records, build HNSW off-thread, then store back.
-        let (index_path, generation) = {
-            let s = self.embed.lock().await;
-            let p = match &s.index_path {
-                Some(p) => p.clone(),
-                None => return Ok(None),
-            };
-            (p, s.ann_generation)
-        };
-        let built = tokio::task::spawn_blocking(move || -> Result<holofs_embed::HnswIndex, GatewayError> {
-            let idx = holofs_embed::Index::open(&index_path)
-                .map_err(|e| GatewayError::BadRequest(format!("embed index: {e}")))?;
-            let mut recs: Vec<holofs_embed::EmbedRecord> = Vec::new();
-            for r in idx
-                .iter()
-                .map_err(|e| GatewayError::BadRequest(format!("embed iter: {e}")))?
-            {
-                let r = r.map_err(|e| GatewayError::BadRequest(format!("embed rec: {e}")))?;
-                if !r.vec.is_empty() {
-                    recs.push(r);
-                }
-            }
-            Ok(holofs_embed::HnswIndex::build_from(recs))
-        })
-        .await
-        .map_err(|e| GatewayError::BadRequest(format!("ann build join: {e}")))??;
-        let arc = Arc::new(built);
-        let mut s = self.embed.lock().await;
-        // Another task may have raced us with a *newer* generation;
-        // if so we still write ours — the next query will rebuild
-        // again, which is fine. The point of the cache is amortising
-        // across many queries between writes, not strict freshness.
-        if s.ann_generation == generation {
-            s.ann = Some(Arc::clone(&arc));
-            s.ann_built_at = Some(generation);
-        }
-        Ok(Some(arc))
-    }
-
-    /// Fire-and-forget embedding for a freshly-PUT object. Called
-    /// from the web / MCP ingest handlers right after `ingest_bytes`
-    /// succeeds. Returns immediately; failures land in stderr. No-op
-    /// when the embed feature is disabled.
-    pub fn embed_object_in_background(self: &Arc<Self>, name: String) {
-        let gw = Arc::clone(self);
-        tokio::spawn(async move {
-            if !gw.embed_enabled().await {
-                return;
-            }
-            if let Err(e) = gw.embed_object(&name).await {
-                eprintln!("embed bg {name}: {e}");
-            }
-        });
-    }
 
     /// Stage 13.2: holographic spotlight — decode the image twice (L0
     /// only and full quality), then composite per-pixel so the rectangle

@@ -17,7 +17,9 @@
 
 mod error;
 mod http_gateway;
+mod search;
 mod util;
 
 pub use error::GatewayError;
 pub use http_gateway::*;
+pub use search::{SearchBand, SemanticHit};
