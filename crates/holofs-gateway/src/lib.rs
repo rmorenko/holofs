@@ -19,6 +19,7 @@ mod error;
 mod escrow;
 mod gc;
 mod http_gateway;
+mod inspect;
 mod search;
 mod similarity;
 mod spotlight;
@@ -31,6 +32,7 @@ pub use escrow::{
 };
 pub use gc::{GcNodeReport, GcReport};
 pub use http_gateway::*;
+pub use inspect::{InspectInfo, LayerLayout, ShardInfo, ShardPayload};
 pub use search::{SearchBand, SemanticHit};
 pub use similarity::{
     ShardOverlap, SimilarMatch, SimilarReport, SimilarScope, SimilarityMethod,
