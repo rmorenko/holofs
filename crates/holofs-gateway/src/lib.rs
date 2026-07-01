@@ -19,7 +19,9 @@ mod error;
 mod http_gateway;
 mod search;
 mod util;
+mod versions;
 
 pub use error::GatewayError;
 pub use http_gateway::*;
 pub use search::{SearchBand, SemanticHit};
+pub use versions::{DeleteVersionResult, RestoreResult, VersionEntry};
