@@ -37,6 +37,8 @@ pub mod similar;
 pub mod spotlight;
 #[cfg(feature = "ssr")]
 pub mod supervised;
+#[cfg(feature = "ssr")]
+pub mod timeout;
 pub mod ui;
 pub mod versions;
 

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{Request, Uri};
+use axum::middleware::from_fn;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Router};
@@ -36,6 +37,7 @@ use holofs_web::health::{GetHealthIndex, GetObjectHealth};
 use holofs_web::inspect::{GetInspect, GetInspectZoom};
 use holofs_web::help::{GetDoc, ListDocs};
 use holofs_web::similar::GetSimilar;
+use holofs_web::timeout::{run_with_deadline, LONG, MEDIUM, SHORT};
 use holofs_web::{App, GetCatalog, ListDir, ListDirPageFn, Shell};
 
 /// Per-request body cap for upload routes (PUT and the two `/escrow/*`
@@ -106,7 +108,44 @@ async fn main() {
     // exactly the symptom the lazy-tree refactor uncovered.
     let opts_for_routes = leptos_options.clone();
 
-    let app = Router::new()
+    // N7: HTTP handler timeouts. Routes are grouped into three
+    // buckets so a slow / hung cluster can't chain-stall the whole
+    // gateway. `timeout::run_with_deadline` returns 504 on elapsed.
+    //
+    // SHORT (10 s) — read-only introspection: catalog / metrics /
+    // admin. A slow response here signals real degradation (locks,
+    // cluster stalls).
+    let short_routes: Router<LeptosOptions> = Router::new()
+        .route("/api/stats", get(handlers::api_stats))
+        .route("/metrics", get(handlers::metrics))
+        .route("/admin/node", post(handlers::toggle_node))
+        .route_layer(from_fn(|req, next| run_with_deadline(SHORT, req, next)));
+
+    // LONG (5 min) — catalog-wide scans and Monte Carlo. These
+    // legitimately take minutes on large catalogs; a shorter budget
+    // would 504 healthy calls.
+    let long_routes: Router<LeptosOptions> = Router::new()
+        .route("/api/search", get(handlers::semantic_search))
+        .route("/api/spotlight.png", get(handlers::spotlight_png))
+        .route("/api/gc", post(handlers::gc_orphans))
+        .route("/api/embed_all", post(handlers::embed_all))
+        .route("/api/fingerprint/*path", get(handlers::api_fingerprint))
+        .route_layer(from_fn(|req, next| run_with_deadline(LONG, req, next)));
+
+    // STREAMING — SSE + multipart/x-mixed-replace. Intentionally
+    // unbudgeted: the timer would start on the first byte and kill
+    // the stream at the deadline.
+    let streaming_routes: Router<LeptosOptions> = Router::new()
+        .route("/api/health/events", get(handlers::health_events))
+        // Stage 13.1: streaming hologram — multipart/x-mixed-replace
+        // body re-rendered for every layer from L0 to full.
+        .route("/preview/stream/*name", get(handlers::preview_stream));
+
+    // MEDIUM (60 s) — everything else: server_fns, decode / PUT /
+    // DELETE, directory ops, mix, diff, inspect, escrow, static
+    // assets under /pkg + /assets. Generous ceiling so a healthy
+    // but under-load cluster doesn't 504 spuriously.
+    let medium_routes: Router<LeptosOptions> = Router::new()
         .route(
             "/api/*fn_name",
             post(move |req: Request<Body>| {
@@ -122,10 +161,6 @@ async fn main() {
                 }
             }),
         )
-        // JSON / SSE / admin / escrow routes (Phases 4b.3–4c).
-        .route("/api/stats", get(handlers::api_stats))
-        .route("/api/fingerprint/*path", get(handlers::api_fingerprint))
-        .route("/api/health/events", get(handlers::health_events))
         // Stage 9: directory operations. Two flavours per op — the
         // path-wildcard JSON variants for API/curl users, plus a
         // form-urlencoded POST that the catalog page's HTML forms can hit
@@ -140,33 +175,18 @@ async fn main() {
         // Stage 12.6: wavelet mix UI plumbing.
         .route("/api/mix.png", get(handlers::mix_preview))
         .route("/api/mix-save", post(handlers::mix_save))
-        // Stage 12.8: semantic-search bulk indexer + query endpoint.
-        .route("/api/embed_all", post(handlers::embed_all))
-        .route("/api/search", get(handlers::semantic_search))
-        // Stage 13.1: streaming hologram — multipart/x-mixed-replace
-        // body re-rendered for every layer from L0 to full.
-        .route("/preview/stream/*name", get(handlers::preview_stream))
-        // Stage 13.2: holographic spotlight — coarse outside, sharp
-        // inside the ROI. Both pixel space coords (`x_px`/`y_px`/…) and
-        // normalised coords (`x`/`y`/…) accepted via query.
-        .route("/api/spotlight.png", get(handlers::spotlight_png))
         // Stage 13.4: form-friendly version restore.
         .route("/api/restore", post(handlers::restore_version_form))
         // Stage 15.x: form-friendly version deletion (per-row "delete"
         // button on /versions/<name>). Removes the .bin archive and
         // GCs any shards it uniquely held.
         .route("/api/versions/delete", post(handlers::delete_version_form))
-        // Stage 14.0: orphan-shard garbage collector.
-        .route("/api/gc", post(handlers::gc_orphans))
         .route("/api/mv", post(handlers::mv))
         // Stage 11.4: form-friendly file upload from the catalog page.
         .route(
             "/api/upload",
             post(handlers::upload_form).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
         )
-        // Stage 5: Prometheus exposition endpoint.
-        .route("/metrics", get(handlers::metrics))
-        .route("/admin/node", post(handlers::toggle_node))
         // Stage 11.3: bypass axum's 2 MiB default body limit for routes
         // that accept media uploads. Realistic photos/audio land in the
         // 5–80 MB range; the default emitted a misleading "multipart
@@ -193,12 +213,20 @@ async fn main() {
             put(handlers::put_object).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
         )
         .route("/*path", delete(handlers::delete_object))
+        .route_layer(from_fn(|req, next| run_with_deadline(MEDIUM, req, next)));
+
+    let app = Router::new()
+        .merge(short_routes)
+        .merge(long_routes)
+        .merge(streaming_routes)
+        .merge(medium_routes)
         // Stage 12.0 + 12.1: MCP (Model Context Protocol) server over
         // Streamable HTTP. The tower service handles POST/GET/DELETE on
         // `/mcp` per the spec — wire it as `nest_service` so axum hands
         // the whole sub-path off to rmcp instead of routing per-method.
         // Tools share the cluster's live `Arc<Gateway>`, so MCP clients
-        // see the same catalog as the UI.
+        // see the same catalog as the UI. Intentionally UNBUDGETED
+        // (MCP Streamable HTTP holds the connection open).
         //
         // If `HOLOFS_MCP_TOKEN` is set, mount a bearer-auth middleware
         // in front and flip `writes_enabled=true`; without the env var
