@@ -20,6 +20,7 @@ mod dirops;
 mod error;
 mod escrow;
 mod gc;
+mod health;
 mod http_gateway;
 mod inspect;
 mod mix;
@@ -36,6 +37,9 @@ pub use escrow::{
     EscrowRecoverResult, EscrowShareBytes, EscrowShareInfo, EscrowSplitResult,
 };
 pub use gc::{GcNodeReport, GcReport};
+pub use health::{
+    AdminToggleResult, ApiStats, HealthIndexData, KindCounts, NodeStatus, ScrubReport,
+};
 pub use http_gateway::*;
 pub use inspect::{InspectInfo, LayerLayout, ShardInfo, ShardPayload};
 pub use mix::{FilteredAudio, MixedImage};
