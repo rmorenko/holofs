@@ -23,6 +23,7 @@ mod gc;
 mod health;
 mod http_gateway;
 mod inspect;
+mod metrics;
 mod mix;
 mod repair;
 mod search;
@@ -43,6 +44,7 @@ pub use health::{
 };
 pub use http_gateway::*;
 pub use inspect::{InspectInfo, LayerLayout, ShardInfo, ShardPayload};
+pub use metrics::{AudioBandEnergy, FileMetrics, NeighbourMetric};
 pub use mix::{FilteredAudio, MixedImage};
 pub use search::{SearchBand, SemanticHit};
 pub use similarity::{
