@@ -16,6 +16,7 @@
 //! module path.
 
 mod error;
+mod escrow;
 mod gc;
 mod http_gateway;
 mod search;
@@ -23,6 +24,9 @@ mod util;
 mod versions;
 
 pub use error::GatewayError;
+pub use escrow::{
+    EscrowRecoverResult, EscrowShareBytes, EscrowShareInfo, EscrowSplitResult,
+};
 pub use gc::{GcNodeReport, GcReport};
 pub use http_gateway::*;
 pub use search::{SearchBand, SemanticHit};
