@@ -381,4 +381,37 @@ impl Gateway {
             }
         });
     }
+
+    /// Walk the catalog and embed every image that isn't in the index
+    /// yet. Returns `(newly_embedded, skipped)`. Used by the
+    /// `holofs embed-all` CLI command.
+    pub async fn embed_all_pending(&self) -> Result<(usize, usize), GatewayError> {
+        let names: Vec<String> = {
+            let cat = self.catalog.lock().await;
+            cat.entries
+                .iter()
+                .filter_map(|(name, m)| {
+                    if m.kind == ObjectKind::Image {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let mut new_n = 0;
+        let mut skip_n = 0;
+        for name in names {
+            match self.embed_object(&name).await {
+                Ok(true) => new_n += 1,
+                Ok(false) => skip_n += 1,
+                Err(e) => {
+                    // Continue on per-file failure — one broken object
+                    // shouldn't stall the whole catalog index.
+                    eprintln!("embed {name}: {e}");
+                }
+            }
+        }
+        Ok((new_n, skip_n))
+    }
 }

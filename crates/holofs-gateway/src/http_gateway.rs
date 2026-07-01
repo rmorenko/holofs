@@ -1,11 +1,13 @@
-//! Holofs gateway: shared catalog + cluster state plus the data-plane methods
-//! the axum frontend in [`holofs-web`] dispatches against.
+//! Holofs gateway core: the shared [`Gateway`] type + [`ClusterInfo`]
+//! definition, its constructors and accessors, and the two catalog-
+//! persistence helpers (`persist_catalog`, `invalidate_cache`) that
+//! every writing path calls.
 //!
-//! The hand-rolled HTTP/1.1 server (Stage 1–10 of the prototype) lived here
-//! until Phase 4 of the migration. Everything HTTP-specific now lives in
-//! `holofs-web`; this crate provides the [`Gateway`] type, its constructors
-//! and accessors, and the `pub async fn` methods that take owned bytes /
-//! strings and return view-model structs the frontend can render.
+//! Every substantive data-plane method lives in a sibling module:
+//! `decode`, `ingest`, `dirops`, `search`, `versions`, `gc`, `escrow`,
+//! `similarity`, `fingerprint`, `mix`, `diff`, `metrics`, `spotlight`,
+//! `inspect`, `health`, `repair`. Each of those modules adds one
+//! `impl Gateway {}` block. This file just owns the state.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,8 +17,10 @@ use tokio::sync::{Mutex, RwLock};
 use holofs_client::LiveNodes;
 use holofs_core::gf::Gf;
 use holofs_model::fs::Directory;
-use holofs_model::manifest::ObjectKind;
 use holofs_model::placement::Placement;
+
+use crate::search::EmbedState;
+use crate::versions::VersionsState;
 
 /// Cluster metadata needed to PUT a new object.
 pub struct ClusterInfo {
@@ -27,12 +31,16 @@ pub struct ClusterInfo {
     pub height: usize,
 }
 
+/// Shared gateway state — catalog, cluster topology, caches, and
+/// self-heal counters. Constructed once at startup via [`Gateway::new`]
+/// or [`Gateway::new_persistent`]; every axum handler in `holofs-web`
+/// takes an `Arc<Gateway>` handle.
 pub struct Gateway {
-    // Every field is `pub(crate)` because Phase R1b is splitting
-    // the impl Gateway blocks across sibling modules
-    // (search.rs, versions.rs, gc.rs, ...) — each of which reaches
-    // into shared state.  The Gateway type itself stays `pub`; the
-    // fields don't leak outside the crate boundary.
+    // Every field is `pub(crate)` because the impl Gateway blocks are
+    // split across sibling modules (search.rs, versions.rs, gc.rs, ...)
+    // and each of those reaches into shared state. The Gateway type
+    // itself stays `pub`; the fields don't leak outside the crate
+    // boundary.
     pub(crate) catalog: Arc<Mutex<Directory>>,
     /// Optional path to the catalog file. If set, the catalog is saved
     /// atomically on each change (PUT/DELETE).
@@ -93,19 +101,23 @@ pub struct Gateway {
     /// Kept only until the gateway restarts (shares are not part of the cluster).
     pub(crate) escrow_cache: Mutex<HashMap<String, Vec<holofs_analytics::escrow::ShareFile>>>,
     /// Auto-repair-on-read counters. Bumped from
-    /// [`Self::decode_with_autorepair`] when the first decode attempt
-    /// hits [`ClientError::LayerLost`] and the retry path kicks in.
-    /// Surfaced via [`ApiStats`].
+    /// `decode_with_autorepair` when the first decode attempt
+    /// hits `ClientError::LayerLost` and the retry path kicks in.
+    /// Surfaced via `ApiStats`.
     pub(crate) auto_repairs_total: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) auto_repair_failures_total: Arc<std::sync::atomic::AtomicU64>,
     /// Background-scrub counters: how many objects this gateway has
     /// proactively repaired before any user GET tripped a 503.
     /// Bumped from the scrub task spawned at bootstrap (see
-    /// [`Self::scrub_tick`]).
+    /// `scrub_tick`).
     pub(crate) scrub_repairs_total: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) scrub_runs_total: Arc<std::sync::atomic::AtomicU64>,
 }
 
+/// PNG cache entry: fully-encoded body + the layer it was decoded at
+/// + the accounting metadata the response headers echo back. Lives
+/// under [`Gateway::cache`] keyed by `(name, max_layer)`; entries are
+/// dropped by [`Gateway::invalidate_cache`] on PUT / DELETE.
 pub(crate) struct CachedFile {
     pub(crate) bytes: Vec<u8>,
     pub(crate) max_layer: u8,
@@ -114,6 +126,7 @@ pub(crate) struct CachedFile {
 }
 
 impl Gateway {
+    /// Construct an in-memory Gateway (catalog not persisted to disk).
     pub fn new(
         gf: Arc<Gf>,
         catalog: Arc<Mutex<Directory>>,
@@ -141,7 +154,8 @@ impl Gateway {
         })
     }
 
-    /// Same as `new`, but with a catalog file path: every PUT/DELETE persists.
+    /// Same as [`Self::new`] but with a catalog file path: every PUT/DELETE
+    /// persists atomically via [`Self::persist_catalog`].
     pub fn new_persistent(
         gf: Arc<Gf>,
         catalog: Arc<Mutex<Directory>>,
@@ -247,11 +261,6 @@ impl Gateway {
             .collect()
     }
 
-    // `scrub_tick` moved to `health.rs` in Phase R1b.12.
-
-    // `decode_with_autorepair`, `repair_object_inplace`, `purge_orphans_of`
-    // moved to `repair.rs` in Phase R1b.13.
-
     /// Atomically persist the catalog to disk. No-op if Gateway was built
     /// without a catalog path (`new` instead of `new_persistent`).
     pub async fn persist_catalog(&self) {
@@ -276,151 +285,4 @@ impl Gateway {
         let mut sc = self.shard_cache.lock().await;
         sc.retain(|(n, _, _), _| n != name);
     }
-
-
-    // `compute_fingerprint` moved to `fingerprint.rs` in Phase R1b.15.
-
-    // put_any + blank_manifest / blank_audio_manifest / blank_text_manifest
-    // / blank_opaque_manifest + ingest_bytes + IngestResult moved to
-    // `ingest.rs` in Phase R1b.16.
-
-    // get_or_decode moved to `decode.rs` in Phase R1b.17.
 }
-
-// === Public API for external HTTP frontends (e.g. holofs-web axum handlers) ===
-
-// DecodedObject moved to `decode.rs` in Phase R1b.17.
-
-// IngestResult moved to `ingest.rs` in Phase R1b.16.
-
-// RemoveResult / MkdirResult / RmdirResult / RenameResult moved to
-// `dirops.rs` in Phase R1b.11.
-
-/// Current Unix epoch seconds. Stamped onto every PUT'd manifest and
-/// every newly created `Directory` marker so the catalog can be sorted
-/// by creation time later. Falls back to `0` if the clock is somehow
-/// behind the epoch (we don't want to panic the whole ingest path on
-/// what should be impossible).
-// GatewayError, helpers — extracted to sibling modules
-// (`error.rs`, `util.rs`) in Phase R1b.1. The re-exports on lib.rs
-// preserve the public path.
-use crate::error::GatewayError;
-use crate::search::EmbedState;
-use crate::versions::VersionsState;
-
-impl Gateway {
-    // decode_object moved to `decode.rs` in Phase R1b.17.
-    // ingest_bytes moved to `ingest.rs` in Phase R1b.16.
-
-    // remove_object / mkdir / rmdir / rename / list_dir moved to
-    // `dirops.rs` in Phase R1b.11.
-
-    // api_stats / health_index_data / object_health / toggle_admin_kill
-    // moved to `health.rs` in Phase R1b.12.
-
-    // `fingerprint_of`, `compute_fingerprint_for`, `similar_to`, and
-    // FingerprintInfo moved to `fingerprint.rs` in Phase R1b.15.
-
-    // inspect + shard_payload moved to `inspect.rs` in Phase R1b.8.
-    // `diff_chunks` + Diff{Cell,Layer,Report} moved to `diff.rs` in R1b.10.
-    // `mix_objects` + `filter_audio` moved to `mix.rs` in Phase R1b.9.
-    // `file_metrics` + FileMetrics / NeighbourMetric / AudioBandEnergy
-    // moved to `metrics.rs` in Phase R1b.14.
-}
-
-// === Stage 12.8 CLIP-based semantic search ==================================
-//
-// SearchBand / SemanticHit / EmbedState / semantic_search /
-// embed_object / embed_object_in_background moved to `search.rs`
-// in Phase R1b.2. The public path stays: SearchBand + SemanticHit
-// are re-exported at the crate root via `lib.rs`.
-
-impl Gateway {
-
-    // spotlight + spotlight_coeff moved to `spotlight.rs`
-    // in Phase R1b.7. Public types SpotlightRoi + SpotlightImage
-    // re-exported at the crate root.
-
-
-    /// Walk the catalog and embed every image that isn't in the index
-    /// yet. Returns `(newly_embedded, skipped)`. Used by the
-    /// `holofs embed-all` CLI command.
-    pub async fn embed_all_pending(&self) -> Result<(usize, usize), GatewayError> {
-        let names: Vec<String> = {
-            let cat = self.catalog.lock().await;
-            cat.entries
-                .iter()
-                .filter_map(|(name, m)| {
-                    if m.kind == ObjectKind::Image {
-                        Some(name.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-        let mut new_n = 0;
-        let mut skip_n = 0;
-        for name in names {
-            match self.embed_object(&name).await {
-                Ok(true) => new_n += 1,
-                Ok(false) => skip_n += 1,
-                Err(e) => {
-                    // Continue on per-file failure — one broken object
-                    // shouldn't stall the whole catalog index.
-                    eprintln!("embed {name}: {e}");
-                }
-            }
-        }
-        Ok((new_n, skip_n))
-    }
-}
-
-// === Stage 13.4 per-object version history =============================
-//
-// VersionsState + VersionEntry + RestoreResult + DeleteVersionResult
-// and every version-related impl Gateway method moved to `versions.rs`
-// in Phase R1b.3. Public types re-exported at the crate root via lib.rs.
-
-
-// === Stage 14.0 orphan-shard garbage collection ========================
-//
-// GcNodeReport + GcReport + gc_orphaned_shards moved to `gc.rs`
-// in Phase R1b.4. Public types re-exported at the crate root.
-
-
-// KindCounts / ApiStats / ScrubReport moved to `health.rs` in Phase R1b.12.
-
-// FingerprintInfo moved to `fingerprint.rs` in Phase R1b.15.
-
-// NodeStatus / HealthIndexData / AdminToggleResult moved to `health.rs`
-// in Phase R1b.12.
-
-
-// === Similarity types + scope helpers ==============================
-//
-// SimilarScope, SimilarityMethod, SimilarMatch, ShardOverlap,
-// SimilarReport, parent_dir, in_scope moved to `similarity.rs`
-// in Phase R1b.6. The `similar_to` method itself still lives
-// in this file (shares its impl block with chunk_diff).
-// Public types re-exported at the crate root.
-
-
-// Diff{Cell,Layer,Report} moved to `diff.rs` in Phase R1b.10.
-// `MixedImage` + `FilteredAudio` moved to `mix.rs` in Phase R1b.9.
-
-// NeighbourMetric / FileMetrics / AudioBandEnergy moved to `metrics.rs`
-// in Phase R1b.14.
-
-// === Stage 8 holographic key escrow ==================================
-//
-// EscrowShareInfo + EscrowSplitResult + EscrowShareBytes +
-// EscrowRecoverResult and the three escrow impl Gateway methods
-// moved to `escrow.rs` in Phase R1b.5.
-
-
-// guess_opaque_content_type, guess_text_content_type, encode_png —
-// moved to `util.rs` in Phase R1b.1.
-// directory_object_id test lives with the fn in util.rs.
-// parent_dir / in_scope / SimilarScope::parse tests moved to
-// `similarity.rs` alongside the code they exercise (Phase R1b.15).
