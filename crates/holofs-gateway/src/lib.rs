@@ -23,6 +23,7 @@ mod fingerprint;
 mod gc;
 mod health;
 mod http_gateway;
+mod ingest;
 mod inspect;
 mod metrics;
 mod mix;
@@ -45,6 +46,7 @@ pub use health::{
     AdminToggleResult, ApiStats, HealthIndexData, KindCounts, NodeStatus, ScrubReport,
 };
 pub use http_gateway::*;
+pub use ingest::IngestResult;
 pub use inspect::{InspectInfo, LayerLayout, ShardInfo, ShardPayload};
 pub use metrics::{AudioBandEnergy, FileMetrics, NeighbourMetric};
 pub use mix::{FilteredAudio, MixedImage};
