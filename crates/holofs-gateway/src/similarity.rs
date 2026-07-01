@@ -130,3 +130,65 @@ pub struct SimilarReport {
     pub overlaps: Vec<ShardOverlap>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parent_dir_strips_last_segment() {
+        assert_eq!(parent_dir("a/b/c.png"), "a/b");
+        assert_eq!(parent_dir("top.png"), "");
+        assert_eq!(parent_dir("only/one.png"), "only");
+    }
+
+    #[test]
+    fn scope_all_keeps_everything() {
+        assert!(in_scope("photos/2024", "anything/else.png", SimilarScope::All));
+        assert!(in_scope("", "top.png", SimilarScope::All));
+    }
+
+    #[test]
+    fn scope_folder_keeps_direct_siblings_only() {
+        let p = "photos/2024";
+        assert!(in_scope(p, "photos/2024/x.png", SimilarScope::Folder));
+        assert!(in_scope(p, "photos/2024/y.jpg", SimilarScope::Folder));
+        assert!(!in_scope(p, "photos/2024/sub/z.png", SimilarScope::Folder));
+        assert!(!in_scope(p, "photos/2023/x.png", SimilarScope::Folder));
+        assert!(!in_scope(p, "top.png", SimilarScope::Folder));
+    }
+
+    #[test]
+    fn scope_folder_at_root_keeps_only_root_level() {
+        assert!(in_scope("", "top.png", SimilarScope::Folder));
+        assert!(!in_scope("", "sub/x.png", SimilarScope::Folder));
+    }
+
+    #[test]
+    fn scope_tree_keeps_subtree() {
+        let p = "photos/2024";
+        assert!(in_scope(p, "photos/2024/x.png", SimilarScope::Tree));
+        assert!(in_scope(p, "photos/2024/sub/z.png", SimilarScope::Tree));
+        assert!(in_scope(p, "photos/2024/sub/deeper/w.png", SimilarScope::Tree));
+        // Sibling directory must NOT match — `photos/2024sub` could
+        // collide with a naive prefix check, so the helper uses the
+        // `parent/` form.
+        assert!(!in_scope(p, "photos/2024sub/x.png", SimilarScope::Tree));
+        assert!(!in_scope(p, "photos/2023/x.png", SimilarScope::Tree));
+        assert!(!in_scope(p, "top.png", SimilarScope::Tree));
+    }
+
+    #[test]
+    fn scope_tree_at_root_spans_everything() {
+        assert!(in_scope("", "top.png", SimilarScope::Tree));
+        assert!(in_scope("", "sub/deep/x.png", SimilarScope::Tree));
+    }
+
+    #[test]
+    fn scope_parse_unknown_falls_back_to_all() {
+        assert_eq!(SimilarScope::parse("folder"), SimilarScope::Folder);
+        assert_eq!(SimilarScope::parse("tree"), SimilarScope::Tree);
+        assert_eq!(SimilarScope::parse("all"), SimilarScope::All);
+        assert_eq!(SimilarScope::parse(""), SimilarScope::All);
+        assert_eq!(SimilarScope::parse("garbage"), SimilarScope::All);
+    }
+}

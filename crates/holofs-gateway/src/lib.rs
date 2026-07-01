@@ -19,6 +19,7 @@ mod diff;
 mod dirops;
 mod error;
 mod escrow;
+mod fingerprint;
 mod gc;
 mod health;
 mod http_gateway;
@@ -38,6 +39,7 @@ pub use error::GatewayError;
 pub use escrow::{
     EscrowRecoverResult, EscrowShareBytes, EscrowShareInfo, EscrowSplitResult,
 };
+pub use fingerprint::FingerprintInfo;
 pub use gc::{GcNodeReport, GcReport};
 pub use health::{
     AdminToggleResult, ApiStats, HealthIndexData, KindCounts, NodeStatus, ScrubReport,
