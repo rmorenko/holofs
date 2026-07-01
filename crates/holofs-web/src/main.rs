@@ -60,8 +60,11 @@ async fn main() {
 
     let Bootstrap {
         gateway,
-        monitor: _monitor,
-        auditor: _auditor,
+        monitor,
+        auditor,
+        scrub,
+        node_tasks,
+        shutdown,
     } = bootstrap_cluster(&cli.bootstrap_config())
         .await
         .expect("cluster bootstrap failed");
@@ -269,9 +272,90 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
-    axum::serve(listener, app.into_make_service())
-        .await
-        .expect("axum::serve");
+
+    // N1: cancel the shared shutdown token on SIGTERM / SIGINT so axum
+    // + every background loop start winding down together.
+    let signal_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        info!("shutdown signal received, draining");
+        signal_shutdown.cancel();
+    });
+
+    // `with_graceful_shutdown` stops accepting new connections when the
+    // token fires. axum then waits (until this future's cancellation
+    // future resolves; we hand it the same token) for in-flight
+    // requests to complete before returning from `.await`.
+    let axum_shutdown = shutdown.clone();
+    let serve = axum::serve(listener, app.into_make_service()).with_graceful_shutdown(async move {
+        axum_shutdown.cancelled().await;
+    });
+    if let Err(e) = serve.await {
+        tracing::error!(error = %e, "axum::serve returned error");
+    }
+    info!("axum serve loop drained; joining background tasks");
+
+    // N1: give background loops a chance to finish their current tick
+    // then abort node listeners so the ports free up promptly. In-
+    // flight per-connection tasks are independent of the parent
+    // listener and finish on their own.
+    let drain = std::time::Duration::from_secs(10);
+    let joined = tokio::time::timeout(drain, async {
+        let _ = monitor.await;
+        let _ = auditor.await;
+        if let Some(s) = scrub {
+            let _ = s.await;
+        }
+    })
+    .await;
+    if joined.is_err() {
+        tracing::warn!(
+            timeout_secs = drain.as_secs(),
+            "background tasks did not drain within timeout; forcing abort"
+        );
+    }
+    for t in node_tasks {
+        t.abort();
+    }
+    info!("holofs-web shutdown complete");
+}
+
+/// N1: block until the process receives SIGTERM or SIGINT.
+///
+/// On Unix we listen for both signals; on Windows we fall back to
+/// `ctrl_c` which is the only portable equivalent. Either arm resolves
+/// the whole future — we only need the first signal to fire.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "install SIGTERM handler failed");
+                return;
+            }
+        };
+        let mut sigint = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "install SIGINT handler failed");
+                return;
+            }
+        };
+        tokio::select! {
+            _ = sigterm.recv() => info!("SIGTERM"),
+            _ = sigint.recv() => info!("SIGINT"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %e, "ctrl_c handler failed");
+        } else {
+            info!("Ctrl-C");
+        }
+    }
 }
 
 /// Initialise the tracing subscriber based on `--log` and `--log-format`.

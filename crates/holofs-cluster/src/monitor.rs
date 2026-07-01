@@ -247,29 +247,42 @@ pub async fn tick_once(
 /// Long-running monitor loop: tick every `poll_interval`. Suppresses per-tick
 /// panics so it never bubbles out; events are forwarded to `on_event` (usually
 /// `eprintln!`).
+///
+/// N1: `shutdown` short-circuits both the tick body and the inter-tick sleep
+/// so a SIGTERM lands within one `poll_interval`-tick worst case instead of
+/// waiting for the next `sleep` to complete.
 pub async fn run_periodic(
     gf: Arc<Gf>,
     catalog: Arc<Mutex<Directory>>,
     config: MonitorConfig,
     reputation: Option<Arc<Mutex<Reputation>>>,
     on_event: impl Fn(&Event) + Send + Sync + 'static,
+    shutdown: tokio_util::sync::CancellationToken,
 ) {
     let mut state = MonitorState::default();
     let mut rng = Rng::new(0xC0FFEE);
     loop {
-        let events = tick_once(
-            &gf,
-            Arc::clone(&catalog),
-            &mut state,
-            &config,
-            &mut rng,
-            reputation.clone(),
-        )
-        .await;
+        if shutdown.is_cancelled() {
+            return;
+        }
+        let events = tokio::select! {
+            _ = shutdown.cancelled() => return,
+            evs = tick_once(
+                &gf,
+                Arc::clone(&catalog),
+                &mut state,
+                &config,
+                &mut rng,
+                reputation.clone(),
+            ) => evs,
+        };
         for e in &events {
             on_event(e);
         }
-        tokio::time::sleep(config.poll_interval).await;
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(config.poll_interval) => {}
+        }
     }
 }
 

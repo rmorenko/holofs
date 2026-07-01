@@ -31,6 +31,7 @@ use holofs_storage::identity::PUBKEY_LEN;
 use holofs_storage::node_service::spawn_node_persistent_with_tls;
 use holofs_storage::tls::TlsMaterial;
 use holofs_storage::whitelist::Whitelist;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 /// Bootstrap configuration. Defaults match `holofs-http` (CLI flags →
@@ -127,6 +128,21 @@ pub struct Bootstrap {
     pub monitor: tokio::task::JoinHandle<()>,
     /// Background PoR auditor task.
     pub auditor: tokio::task::JoinHandle<()>,
+    /// Background shard scrub task. `None` when the operator disabled it
+    /// via `HOLOFS_SCRUB_INTERVAL=0` — the auto-repair-on-read path
+    /// (inside `Gateway::decode_with_autorepair`) still runs.
+    pub scrub: Option<tokio::task::JoinHandle<()>>,
+    /// Embedded cluster node listener tasks. Empty when running in
+    /// distributed / whitelist mode — the operator manages those nodes
+    /// out-of-process. On shutdown these are `abort()`ed so the ports
+    /// free up promptly; TLS/TCP connections in flight complete
+    /// naturally on their own per-connection spawn.
+    pub node_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// N1: cancellation signal shared with every background task
+    /// spawned during bootstrap (monitor + auditor + scrub). Callers
+    /// trigger a coordinated shutdown by calling `shutdown.cancel()`
+    /// and then `await`ing the JoinHandles above.
+    pub shutdown: CancellationToken,
 }
 
 /// Run the same boot sequence as `holofs-http`:
@@ -148,6 +164,9 @@ pub async fn bootstrap_cluster(
     // root; distributed mode loads operator-supplied PEM files. The same
     // CA is later turned into a client config for the gateway's RPC path.
     let (node_server_cfg, gateway_client_cfg, mut node_signer) = build_tls(&config.tls)?;
+
+    let shutdown = CancellationToken::new();
+    let mut node_task_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     let (node_addrs, zones, n_nodes) = if let Some(wl_path) = &config.whitelist {
         let bytes = std::fs::read(wl_path)?;
@@ -183,7 +202,7 @@ pub async fn bootstrap_cluster(
         for i in 0..N_NODES {
             let dir = config.storage.join(format!("node_{i:02}"));
             let port = base_port + i as u16;
-            let (bound, _store, _handle) =
+            let (bound, _store, handle) =
                 spawn_node_persistent_with_tls(
                     (Ipv4Addr::LOCALHOST, port).into(),
                     &dir,
@@ -199,6 +218,7 @@ pub async fn bootstrap_cluster(
                         .into()
                     })?;
             addrs.push(bound.to_string());
+            node_task_handles.push(handle);
         }
         let n_zones: u8 = 4;
         let zone_size = N_NODES / n_zones as usize;
@@ -333,8 +353,17 @@ pub async fn bootstrap_cluster(
     let mon_catalog = Arc::clone(&catalog);
     let mon_gf = Arc::clone(&gf);
     let mon_rep = Arc::clone(&reputation);
+    let mon_shutdown = shutdown.clone();
     let monitor = tokio::spawn(async move {
-        run_periodic(mon_gf, mon_catalog, monitor_cfg, Some(mon_rep), log_event).await;
+        run_periodic(
+            mon_gf,
+            mon_catalog,
+            monitor_cfg,
+            Some(mon_rep),
+            log_event,
+            mon_shutdown,
+        )
+        .await;
     });
 
     let audit_interval: u64 = std::env::var("HOLOFS_AUDIT_INTERVAL")
@@ -353,8 +382,9 @@ pub async fn bootstrap_cluster(
     );
     let aud_catalog = Arc::clone(&catalog);
     let aud_rep = Arc::clone(&reputation);
+    let aud_shutdown = shutdown.clone();
     let auditor = tokio::spawn(async move {
-        audit::run_periodic(aud_catalog, aud_rep, audit_cfg, log_audit).await;
+        audit::run_periodic(aud_catalog, aud_rep, audit_cfg, log_audit, aud_shutdown).await;
     });
 
     // Background shard scrub. Walks the catalog every
@@ -368,20 +398,24 @@ pub async fn bootstrap_cluster(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(600);
-    if scrub_interval_secs > 0 {
+    let scrub = if scrub_interval_secs > 0 {
         let scrub_gw = Arc::clone(&gateway);
         let interval = std::time::Duration::from_secs(scrub_interval_secs);
+        let scrub_shutdown = shutdown.clone();
         info!(
             interval_secs = scrub_interval_secs,
             "background shard scrub configured"
         );
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             // First tick fires after the interval so we don't hammer
             // the cluster at boot before audit has even started.
             let mut ticker = tokio::time::interval(interval);
             ticker.tick().await; // immediate, but the next is interval-from-now
             loop {
-                ticker.tick().await;
+                tokio::select! {
+                    _ = scrub_shutdown.cancelled() => return,
+                    _ = ticker.tick() => {}
+                }
                 let report = scrub_gw.scrub_tick().await;
                 if report.objects_repaired > 0 || report.objects_repair_failed > 0 {
                     info!(
@@ -392,10 +426,11 @@ pub async fn bootstrap_cluster(
                     );
                 }
             }
-        });
+        }))
     } else {
         info!("background shard scrub disabled (HOLOFS_SCRUB_INTERVAL=0)");
-    }
+        None
+    };
 
     info!(width = w, height = h, k = K, layers = NLAYERS, "frame parameters");
 
@@ -413,6 +448,9 @@ pub async fn bootstrap_cluster(
         gateway,
         monitor,
         auditor,
+        scrub,
+        node_tasks: node_task_handles,
+        shutdown,
     })
 }
 

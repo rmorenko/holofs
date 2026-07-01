@@ -249,25 +249,37 @@ pub async fn tick_once(
 }
 
 /// Long-running auditor loop. Ticks every `interval`; events go to `on_event`.
+///
+/// N1: `shutdown` short-circuits both the tick body and the inter-tick sleep
+/// so a SIGTERM lands within one `interval`-tick worst case.
 pub async fn run_periodic(
     catalog: Arc<Mutex<Directory>>,
     reputation: Arc<Mutex<Reputation>>,
     config: AuditConfig,
     on_event: impl Fn(&AuditEvent) + Send + Sync + 'static,
+    shutdown: tokio_util::sync::CancellationToken,
 ) {
     let mut rng = Rng::new(0xA1D17u64);
     loop {
-        let events = tick_once(
-            Arc::clone(&catalog),
-            Arc::clone(&reputation),
-            &config,
-            &mut rng,
-        )
-        .await;
+        if shutdown.is_cancelled() {
+            return;
+        }
+        let events = tokio::select! {
+            _ = shutdown.cancelled() => return,
+            evs = tick_once(
+                Arc::clone(&catalog),
+                Arc::clone(&reputation),
+                &config,
+                &mut rng,
+            ) => evs,
+        };
         for e in &events {
             on_event(e);
         }
-        tokio::time::sleep(config.interval).await;
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(config.interval) => {}
+        }
     }
 }
 

@@ -18,6 +18,7 @@ ssr = [
     "dep:tower",
     "dep:tower-http",
     "dep:tokio",
+    "dep:tokio-util",
     "dep:http",
     "dep:mime_guess",
     "dep:leptos_axum",
@@ -74,6 +75,7 @@ axum = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 mime_guess = { workspace = true, optional = true }
 leptos_axum = { workspace = true, optional = true }
