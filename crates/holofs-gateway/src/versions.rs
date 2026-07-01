@@ -205,7 +205,7 @@ impl Gateway {
             .await
             .insert(name.to_string(), target);
         self.invalidate_cache(name).await;
-        self.persist_catalog().await;
+        self.persist_catalog().await?;
         Ok(RestoreResult {
             name: name.to_string(),
             restored_cid_hex: restored_cid,

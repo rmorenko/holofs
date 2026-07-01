@@ -75,7 +75,7 @@ impl Gateway {
         let manifest = cat.remove(name).ok_or(GatewayError::NotFound)?;
         drop(cat);
         self.invalidate_cache(name).await;
-        self.persist_catalog().await;
+        self.persist_catalog().await?;
         let live = self.effective_live().await;
         // Stage 15.2 fix: purge ONLY the shards unique to `manifest`.
         // The legacy `purge_object(&manifest, &live)` deleted the
@@ -119,7 +119,7 @@ impl Gateway {
         let object_id = manifest.object_id;
         cat.insert(path.to_string(), manifest);
         drop(cat);
-        self.persist_catalog().await;
+        self.persist_catalog().await?;
         Ok(MkdirResult {
             path: path.to_string(),
             object_id,
@@ -153,7 +153,7 @@ impl Gateway {
         }
         let removed = cat.remove(path).expect("checked above");
         drop(cat);
-        self.persist_catalog().await;
+        self.persist_catalog().await?;
         Ok(RmdirResult {
             path: path.to_string(),
             object_id: removed.object_id,
@@ -228,7 +228,7 @@ impl Gateway {
         }
         drop(cat);
         self.invalidate_cache(old).await;
-        self.persist_catalog().await;
+        self.persist_catalog().await?;
         Ok(RenameResult {
             old: old.to_string(),
             new: new.to_string(),

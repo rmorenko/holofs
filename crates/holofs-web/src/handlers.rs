@@ -1336,6 +1336,10 @@ fn error_to_response(e: GatewayError) -> Response {
             StatusCode::SERVICE_UNAVAILABLE,
             "cluster has no live nodes".to_string(),
         ),
+        GatewayError::Persist(s) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("catalog persist failed: {s}"),
+        ),
     };
     (status, [(header::CONTENT_TYPE, "text/plain")], msg).into_response()
 }

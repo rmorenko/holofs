@@ -16,6 +16,7 @@
 //! | `NotADirectory`      | 409         |
 //! | `DirectoryNotEmpty`  | 409         |
 //! | `ClusterDegraded`    | 503         |
+//! | `Persist`            | 500         |
 
 /// Errors the public Gateway API can return.
 #[derive(Debug, Clone)]
@@ -44,6 +45,13 @@ pub enum GatewayError {
     /// is fully down or hasn't been discovered yet. Frontends surface
     /// this as `503 Service Unavailable` so clients know to retry.
     ClusterDegraded,
+    /// N4: atomic catalog save-to-disk failed. Historically
+    /// `persist_catalog` swallowed IO errors with an `eprintln!` and
+    /// let the caller succeed, which hid disk-full / read-only
+    /// filesystem incidents until a restart discovered the truncated
+    /// catalog. Now writers refuse and surface a 500 so the operator
+    /// notices immediately.
+    Persist(String),
 }
 
 impl From<holofs_model::placement::NoLiveNodes> for GatewayError {
@@ -64,6 +72,7 @@ impl std::fmt::Display for GatewayError {
             GatewayError::NotADirectory => write!(f, "not a directory"),
             GatewayError::DirectoryNotEmpty => write!(f, "directory not empty"),
             GatewayError::ClusterDegraded => write!(f, "cluster has no live nodes"),
+            GatewayError::Persist(s) => write!(f, "catalog persist failed: {s}"),
         }
     }
 }

@@ -112,6 +112,13 @@ pub struct Gateway {
     /// `scrub_tick`).
     pub(crate) scrub_repairs_total: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) scrub_runs_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N4: how many times `persist_catalog` saw the on-disk write
+    /// return an IO error. Pre-N4 this was swallowed via `eprintln!`
+    /// and callers succeeded anyway; now they refuse with
+    /// `GatewayError::Persist` and increment this counter. A
+    /// non-zero value here means the catalog on disk is behind the
+    /// catalog in memory and the next restart will lose writes.
+    pub(crate) catalog_persist_failures_total: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// PNG cache entry: fully-encoded body + the layer it was decoded at
@@ -151,6 +158,7 @@ impl Gateway {
             auto_repair_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scrub_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scrub_runs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            catalog_persist_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -181,6 +189,7 @@ impl Gateway {
             auto_repair_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scrub_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scrub_runs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            catalog_persist_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -261,17 +270,35 @@ impl Gateway {
             .collect()
     }
 
-    /// Atomically persist the catalog to disk. No-op if Gateway was built
-    /// without a catalog path (`new` instead of `new_persistent`).
-    pub async fn persist_catalog(&self) {
+    /// Atomically persist the catalog to disk. `Ok(())` on success or
+    /// when Gateway was built without a catalog path (`new` instead of
+    /// `new_persistent`) — no-op is treated as success. On IO error
+    /// this now bumps `catalog_persist_failures_total` and surfaces
+    /// `GatewayError::Persist` to the caller (N4). Every writer path
+    /// (ingest / mkdir / rmdir / rename / remove / restore /
+    /// delete_version / repair_object_inplace) must propagate the
+    /// Err so operators get an immediate 500 rather than a silent
+    /// disk-full incident that a restart later exposes as lost data.
+    pub async fn persist_catalog(&self) -> Result<(), crate::error::GatewayError> {
         let Some(path) = &self.catalog_path else {
-            return;
+            return Ok(());
         };
         // Snapshot: avoid holding the Mutex across fsync.
         let snapshot = self.catalog.lock().await.clone();
         if let Err(e) = snapshot.save_atomic(path) {
-            eprintln!("failed to save catalog to {path:?}: {e}");
+            self.catalog_persist_failures_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::error!(
+                error = %e,
+                path = %path.display(),
+                "catalog persist failed"
+            );
+            return Err(crate::error::GatewayError::Persist(format!(
+                "save {}: {e}",
+                path.display()
+            )));
         }
+        Ok(())
     }
 
     /// Drop cached decoded objects for `name` (every layer variant). Called
@@ -284,5 +311,60 @@ impl Gateway {
         drop(cache);
         let mut sc = self.shard_cache.lock().await;
         sc.retain(|(n, _, _), _| n != name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use holofs_model::placement::Placement;
+    use std::sync::atomic::Ordering;
+
+    fn make_gw(catalog_path: Option<std::path::PathBuf>) -> Arc<Gateway> {
+        let gf = Arc::new(Gf::new());
+        let cat = Arc::new(Mutex::new(Directory::default()));
+        let cluster = Arc::new(ClusterInfo {
+            node_addrs: vec!["127.0.0.1:9999".into()],
+            zones: vec![0],
+            placement: Placement::Rendezvous,
+            width: 8,
+            height: 8,
+        });
+        let live: Vec<usize> = vec![0];
+        match catalog_path {
+            Some(p) => Gateway::new_persistent(gf, cat, Arc::new(live), cluster, p),
+            None => Gateway::new(gf, cat, Arc::new(live), cluster),
+        }
+    }
+
+    #[tokio::test]
+    async fn persist_catalog_no_path_is_ok() {
+        let gw = make_gw(None);
+        // No catalog_path → success, no counter bump.
+        assert!(gw.persist_catalog().await.is_ok());
+        assert_eq!(
+            gw.catalog_persist_failures_total.load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_catalog_reports_io_error() {
+        // Point at a path whose parent doesn't exist so save_atomic
+        // fails deterministically without needing a real disk-full.
+        let bad = std::path::PathBuf::from("/nonexistent/holofs-persist-test-XYZ/catalog.bin");
+        let gw = make_gw(Some(bad));
+        let err = gw.persist_catalog().await.unwrap_err();
+        match err {
+            crate::error::GatewayError::Persist(msg) => {
+                assert!(msg.contains("catalog.bin"), "msg was {msg:?}");
+            }
+            other => panic!("expected Persist, got {other:?}"),
+        }
+        assert_eq!(
+            gw.catalog_persist_failures_total.load(Ordering::Relaxed),
+            1,
+            "counter should have incremented once"
+        );
     }
 }

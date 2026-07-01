@@ -16,6 +16,7 @@ holofs-cluster.workspace = true
 holofs-analytics.workspace = true
 holofs-embed.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 png.workspace = true
 
 [lints]

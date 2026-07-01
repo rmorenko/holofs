@@ -1787,6 +1787,7 @@ dependencies = [
  "holofs-model",
  "png",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

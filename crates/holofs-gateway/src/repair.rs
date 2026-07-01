@@ -181,7 +181,17 @@ impl Gateway {
         let mut cat = self.catalog.lock().await;
         cat.insert(name.to_string(), manifest);
         drop(cat);
-        self.persist_catalog().await;
+        // N4: best-effort persist — the shard-side repair is complete
+        // and the in-memory manifest reflects it. If disk save fails
+        // (`catalog_persist_failures_total` + ERROR log fire inside
+        // `persist_catalog`) we still return Ok so the caller
+        // (scrub_tick or decode_with_autorepair retry path) reports
+        // success. The updated manifest is lost on the next restart,
+        // but the same repair will run again — the failure surfaces
+        // as a metric alert instead of a stuck GET path.
+        if let Err(e) = self.persist_catalog().await {
+            tracing::warn!(name = %name, error = %e, "repair persist failed (best-effort)");
+        }
         Ok(())
     }
 

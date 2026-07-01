@@ -363,7 +363,7 @@ impl Gateway {
             .await
             .insert(name.to_string(), manifest);
         self.invalidate_cache(name).await;
-        self.persist_catalog().await;
+        self.persist_catalog().await?;
         Ok(IngestResult {
             name: name.to_string(),
             object_id,
