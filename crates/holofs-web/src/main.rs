@@ -116,11 +116,14 @@ async fn main() {
     // SHORT (10 s) — read-only introspection: catalog / metrics /
     // admin. A slow response here signals real degradation (locks,
     // cluster stalls).
+    let (to_short, to_medium, to_long) = gateway.timeout_counters();
     let short_routes: Router<LeptosOptions> = Router::new()
         .route("/api/stats", get(handlers::api_stats))
         .route("/metrics", get(handlers::metrics))
         .route("/admin/node", post(handlers::toggle_node))
-        .route_layer(from_fn(|req, next| run_with_deadline(SHORT, req, next)));
+        .route_layer(from_fn(move |req, next| {
+            run_with_deadline(SHORT, to_short.clone(), req, next)
+        }));
 
     // LONG (5 min, LONG-bucket backpressure) — catalog-wide scans
     // and Monte Carlo. These legitimately take minutes on large
@@ -134,7 +137,9 @@ async fn main() {
         .route("/api/gc", post(handlers::gc_orphans))
         .route("/api/embed_all", post(handlers::embed_all))
         .route("/api/fingerprint/*path", get(handlers::api_fingerprint))
-        .route_layer(from_fn(|req, next| run_with_deadline(LONG, req, next)))
+        .route_layer(from_fn(move |req, next| {
+            run_with_deadline(LONG, to_long.clone(), req, next)
+        }))
         .route_layer(from_fn(move |req, next| {
             with_permit(long_sem.clone(), long_rej.clone(), req, next)
         }));
@@ -220,7 +225,9 @@ async fn main() {
             put(handlers::put_object).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
         )
         .route("/*path", delete(handlers::delete_object))
-        .route_layer(from_fn(|req, next| run_with_deadline(MEDIUM, req, next)));
+        .route_layer(from_fn(move |req, next| {
+            run_with_deadline(MEDIUM, to_medium.clone(), req, next)
+        }));
     // N3: MEDIUM-bucket backpressure. Cap default 64 concurrent
     // decodes / PUT / dir-ops so a burst can't DoS the process.
     let (medium_sem, medium_rej) = gateway.medium_bucket();

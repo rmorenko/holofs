@@ -370,20 +370,32 @@ pub async fn bootstrap_cluster(
         rep_threshold = monitor_cfg.reputation_threshold,
         "health monitor configured"
     );
+    // N8: task-restart counters exposed in /metrics. Destructure
+    // now so each supervised_spawn call gets its own Arc handle.
+    // `restarts_scrub` may go unused when the operator disabled the
+    // scrub loop via `HOLOFS_SCRUB_INTERVAL=0` — the `_` prefix
+    // suppresses the warning without hiding it from grep.
+    #[allow(unused_variables)]
+    let (restarts_monitor, restarts_auditor, restarts_scrub) = gateway.task_restart_counters();
     let mon_catalog = Arc::clone(&catalog);
     let mon_gf = Arc::clone(&gf);
     let mon_rep = Arc::clone(&reputation);
     let mon_shutdown = shutdown.clone();
-    let monitor = supervised_spawn("monitor", shutdown.clone(), move || {
-        let gf = Arc::clone(&mon_gf);
-        let cat = Arc::clone(&mon_catalog);
-        let rep = Arc::clone(&mon_rep);
-        let sd = mon_shutdown.clone();
-        let cfg = monitor_cfg.clone();
-        async move {
-            run_periodic(gf, cat, cfg, Some(rep), log_event, sd).await;
-        }
-    });
+    let monitor = supervised_spawn(
+        "monitor",
+        shutdown.clone(),
+        restarts_monitor,
+        move || {
+            let gf = Arc::clone(&mon_gf);
+            let cat = Arc::clone(&mon_catalog);
+            let rep = Arc::clone(&mon_rep);
+            let sd = mon_shutdown.clone();
+            let cfg = monitor_cfg.clone();
+            async move {
+                run_periodic(gf, cat, cfg, Some(rep), log_event, sd).await;
+            }
+        },
+    );
 
     let audit_interval: u64 = std::env::var("HOLOFS_AUDIT_INTERVAL")
         .ok()
@@ -402,15 +414,20 @@ pub async fn bootstrap_cluster(
     let aud_catalog = Arc::clone(&catalog);
     let aud_rep = Arc::clone(&reputation);
     let aud_shutdown = shutdown.clone();
-    let auditor = supervised_spawn("auditor", shutdown.clone(), move || {
-        let cat = Arc::clone(&aud_catalog);
-        let rep = Arc::clone(&aud_rep);
-        let sd = aud_shutdown.clone();
-        let cfg = audit_cfg.clone();
-        async move {
-            audit::run_periodic(cat, rep, cfg, log_audit, sd).await;
-        }
-    });
+    let auditor = supervised_spawn(
+        "auditor",
+        shutdown.clone(),
+        restarts_auditor,
+        move || {
+            let cat = Arc::clone(&aud_catalog);
+            let rep = Arc::clone(&aud_rep);
+            let sd = aud_shutdown.clone();
+            let cfg = audit_cfg.clone();
+            async move {
+                audit::run_periodic(cat, rep, cfg, log_audit, sd).await;
+            }
+        },
+    );
 
     // Background shard scrub. Walks the catalog every
     // HOLOFS_SCRUB_INTERVAL seconds (default 600 = 10 min) and
@@ -431,7 +448,7 @@ pub async fn bootstrap_cluster(
             interval_secs = scrub_interval_secs,
             "background shard scrub configured"
         );
-        Some(supervised_spawn("scrub", shutdown.clone(), move || {
+        Some(supervised_spawn("scrub", shutdown.clone(), restarts_scrub, move || {
             let gw = Arc::clone(&scrub_gw);
             let sd = scrub_shutdown.clone();
             async move {

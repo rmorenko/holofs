@@ -290,6 +290,72 @@ pub async fn metrics(Extension(gw): Extension<Arc<Gateway>>) -> Response {
         stats.scrub_repairs_total
     ));
 
+    // N8: reliability counters wired up by the middleware stack.
+    // Everything here is `Arc<AtomicU64>` on the Gateway; a single
+    // ObservabilityCounters borrow gives us Relaxed reads without
+    // holding any lock.
+    use std::sync::atomic::Ordering;
+    let obs = gw.observability_counters();
+
+    body.push_str("# HELP holofs_catalog_persist_failures_total Atomic catalog save-to-disk failures. Non-zero means the on-disk catalog is behind memory.\n");
+    body.push_str("# TYPE holofs_catalog_persist_failures_total counter\n");
+    body.push_str(&format!(
+        "holofs_catalog_persist_failures_total {}\n",
+        obs.catalog_persist_failures_total.load(Ordering::Relaxed)
+    ));
+
+    body.push_str("# HELP holofs_handler_timeouts_total 504 Gateway Timeout responses, split by deadline bucket.\n");
+    body.push_str("# TYPE holofs_handler_timeouts_total counter\n");
+    body.push_str(&format!(
+        "holofs_handler_timeouts_total{{bucket=\"short\"}} {}\n",
+        obs.timeout_short_total.load(Ordering::Relaxed)
+    ));
+    body.push_str(&format!(
+        "holofs_handler_timeouts_total{{bucket=\"medium\"}} {}\n",
+        obs.timeout_medium_total.load(Ordering::Relaxed)
+    ));
+    body.push_str(&format!(
+        "holofs_handler_timeouts_total{{bucket=\"long\"}} {}\n",
+        obs.timeout_long_total.load(Ordering::Relaxed)
+    ));
+
+    body.push_str("# HELP holofs_backpressure_rejected_total 503 responses caused by N3 backpressure (semaphore at capacity), split by bucket.\n");
+    body.push_str("# TYPE holofs_backpressure_rejected_total counter\n");
+    body.push_str(&format!(
+        "holofs_backpressure_rejected_total{{bucket=\"medium\"}} {}\n",
+        obs.medium_rejected_total.load(Ordering::Relaxed)
+    ));
+    body.push_str(&format!(
+        "holofs_backpressure_rejected_total{{bucket=\"long\"}} {}\n",
+        obs.long_rejected_total.load(Ordering::Relaxed)
+    ));
+
+    body.push_str("# HELP holofs_backpressure_permits_available Backpressure semaphore permits still free, by bucket.\n");
+    body.push_str("# TYPE holofs_backpressure_permits_available gauge\n");
+    body.push_str(&format!(
+        "holofs_backpressure_permits_available{{bucket=\"medium\"}} {}\n",
+        obs.medium_permits.available_permits()
+    ));
+    body.push_str(&format!(
+        "holofs_backpressure_permits_available{{bucket=\"long\"}} {}\n",
+        obs.long_permits.available_permits()
+    ));
+
+    body.push_str("# HELP holofs_supervised_task_restarts_total Supervised background task restarts (panic or unexpected exit). Non-zero flags a repeated crash under monitor/auditor/scrub.\n");
+    body.push_str("# TYPE holofs_supervised_task_restarts_total counter\n");
+    body.push_str(&format!(
+        "holofs_supervised_task_restarts_total{{task=\"monitor\"}} {}\n",
+        obs.task_restarts_monitor.load(Ordering::Relaxed)
+    ));
+    body.push_str(&format!(
+        "holofs_supervised_task_restarts_total{{task=\"auditor\"}} {}\n",
+        obs.task_restarts_auditor.load(Ordering::Relaxed)
+    ));
+    body.push_str(&format!(
+        "holofs_supervised_task_restarts_total{{task=\"scrub\"}} {}\n",
+        obs.task_restarts_scrub.load(Ordering::Relaxed)
+    ));
+
     body.push_str("# HELP holofs_node_admin_killed Per-node admin-kill flag (1 = disabled).\n");
     body.push_str("# TYPE holofs_node_admin_killed gauge\n");
     for (idx, killed) in kills.iter().enumerate() {

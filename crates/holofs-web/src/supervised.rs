@@ -22,6 +22,8 @@
 //! makes any such crash loud and self-healing.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -48,6 +50,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 pub fn supervised_spawn<F, Fut>(
     name: &'static str,
     shutdown: CancellationToken,
+    restarts_counter: Arc<AtomicU64>,
     make_fut: F,
 ) -> JoinHandle<()>
 where
@@ -88,8 +91,10 @@ where
                         info!(task = name, "supervised task exiting (shutdown)");
                         return;
                     }
+                    restarts_counter.fetch_add(1, Ordering::Relaxed);
                     warn!(
                         task = name,
+                        total_restarts = restarts_counter.load(Ordering::Relaxed),
                         "task returned without shutdown; restarting immediately"
                     );
                     backoff = INITIAL_BACKOFF;
@@ -100,9 +105,11 @@ where
                     // extract the message. The panic backtrace is
                     // already on stderr from the tokio runtime; we
                     // just record the fact + our decision.
+                    restarts_counter.fetch_add(1, Ordering::Relaxed);
                     error!(
                         task = name,
                         backoff_secs = backoff.as_secs(),
+                        total_restarts = restarts_counter.load(Ordering::Relaxed),
                         "supervised task panicked; restarting after backoff"
                     );
                     tokio::select! {
@@ -134,23 +141,30 @@ mod tests {
     #[tokio::test]
     async fn restarts_after_panic() {
         let attempts = Arc::new(AtomicUsize::new(0));
+        let restarts = Arc::new(AtomicU64::new(0));
         let shutdown = CancellationToken::new();
         let a = Arc::clone(&attempts);
         let sd = shutdown.clone();
 
-        let handle = supervised_spawn("test-panic", shutdown.clone(), move || {
-            let a = Arc::clone(&a);
-            let sd = sd.clone();
-            async move {
-                let n = a.fetch_add(1, Ordering::SeqCst);
-                if n < 2 {
-                    panic!("boom {n}");
+        let handle = supervised_spawn(
+            "test-panic",
+            shutdown.clone(),
+            Arc::clone(&restarts),
+            move || {
+                let a = Arc::clone(&a);
+                let sd = sd.clone();
+                async move {
+                    let n = a.fetch_add(1, Ordering::SeqCst);
+                    if n < 2 {
+                        panic!("boom {n}");
+                    }
+                    // 3rd attempt: settle, then wait for shutdown so
+                    // the supervisor doesn't spin restarting a healthy
+                    // task.
+                    sd.cancelled().await;
                 }
-                // 3rd attempt: settle, then wait for shutdown so the
-                // supervisor doesn't spin restarting a healthy task.
-                sd.cancelled().await;
-            }
-        });
+            },
+        );
 
         // Give a few backoff cycles a chance to run.
         tokio::time::sleep(Duration::from_millis(3200)).await;
@@ -162,22 +176,42 @@ mod tests {
             "expected at least 3 attempts (2 panics + healthy run), got {}",
             attempts.load(Ordering::SeqCst)
         );
+        // The two panics each bump the restart counter; the healthy
+        // 3rd attempt exits via the shutdown token and doesn't count
+        // as a restart because the supervisor sees shutdown-cancelled
+        // and exits before the "task returned normally" branch fires.
+        assert!(
+            restarts.load(Ordering::Relaxed) >= 2,
+            "expected >= 2 restarts recorded, got {}",
+            restarts.load(Ordering::Relaxed)
+        );
     }
 
     #[tokio::test]
     async fn shutdown_exits_promptly() {
+        let restarts = Arc::new(AtomicU64::new(0));
         let shutdown = CancellationToken::new();
         let sd = shutdown.clone();
-        let handle = supervised_spawn("test-shutdown", shutdown.clone(), move || {
-            let sd = sd.clone();
-            async move {
-                sd.cancelled().await;
-            }
-        });
+        let handle = supervised_spawn(
+            "test-shutdown",
+            shutdown.clone(),
+            Arc::clone(&restarts),
+            move || {
+                let sd = sd.clone();
+                async move {
+                    sd.cancelled().await;
+                }
+            },
+        );
         // Give it a beat to enter the child future.
         tokio::time::sleep(Duration::from_millis(50)).await;
         shutdown.cancel();
         let joined = tokio::time::timeout(Duration::from_secs(1), handle).await;
         assert!(joined.is_ok(), "supervisor did not exit within 1s of shutdown");
+        assert_eq!(
+            restarts.load(Ordering::Relaxed),
+            0,
+            "clean shutdown should not increment restarts counter"
+        );
     }
 }

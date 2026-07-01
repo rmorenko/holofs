@@ -34,6 +34,8 @@
 //! wrapped: the timer starts when the handler begins producing
 //! bytes and would kill an SSE stream at the deadline.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -63,15 +65,17 @@ pub const LONG: Duration = Duration::from_secs(300);
 /// ```
 pub async fn run_with_deadline(
     dur: Duration,
+    counter: Arc<AtomicU64>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
     match tokio::time::timeout(dur, next.run(req)).await {
         Ok(resp) => resp,
         Err(_) => {
+            counter.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 deadline_secs = dur.as_secs(),
-                path = %req_path_or_empty(),
+                total_timeouts = counter.load(Ordering::Relaxed),
                 "handler exceeded deadline, returning 504"
             );
             (
@@ -81,16 +85,6 @@ pub async fn run_with_deadline(
                 .into_response()
         }
     }
-}
-
-/// Placeholder — the request URI is already consumed by `next.run` by
-/// the time we log. Keep the field in the log record so operators
-/// can grep for `path=""` and correlate with the surrounding trace
-/// span (the TraceLayer above logs the URI on `on_response` for
-/// every request that returns).
-#[inline]
-fn req_path_or_empty() -> &'static str {
-    ""
 }
 
 #[cfg(test)]
@@ -112,7 +106,7 @@ mod tests {
     /// expose `Next::from_fn`, so we build the layer + a matched
     /// handler using the public middleware API and let the layer
     /// drive `run_with_deadline` for us.
-    async fn drive(dur: Duration, handler_delay: Duration) -> (StatusCode, String) {
+    async fn drive(dur: Duration, handler_delay: Duration) -> (StatusCode, String, u64) {
         // Emulate the "next" contract by wrapping a plain future
         // that sleeps for `handler_delay` then returns 200. We
         // don't need a Router — just call the pieces
@@ -120,12 +114,15 @@ mod tests {
         use axum::middleware::{from_fn, Next};
         use axum::routing::MethodRouter;
 
+        let counter = Arc::new(AtomicU64::new(0));
+        let counter_c = counter.clone();
         let app: MethodRouter = get(move || async move {
             tokio::time::sleep(handler_delay).await;
             "ok"
         })
         .layer(from_fn(move |req, next: Next| {
-            run_with_deadline(dur, req, next)
+            let counter = counter_c.clone();
+            run_with_deadline(dur, counter, req, next)
         }));
 
         // Call the MethodRouter directly by turning it into a
@@ -134,20 +131,26 @@ mod tests {
         let mut svc = app.with_state(());
         let req = Request::builder().uri("/").body(Body::empty()).unwrap();
         let resp = svc.call(req).await.expect("service call");
-        (resp.status(), body_str(resp).await)
+        let status = resp.status();
+        let body = body_str(resp).await;
+        (status, body, counter.load(Ordering::Relaxed))
     }
 
     #[tokio::test]
     async fn short_handler_passes_through() {
-        let (status, body) = drive(Duration::from_millis(500), Duration::from_millis(10)).await;
+        let (status, body, timeouts) =
+            drive(Duration::from_millis(500), Duration::from_millis(10)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "ok");
+        assert_eq!(timeouts, 0);
     }
 
     #[tokio::test]
     async fn slow_handler_yields_504() {
-        let (status, body) = drive(Duration::from_millis(80), Duration::from_secs(2)).await;
+        let (status, body, timeouts) =
+            drive(Duration::from_millis(80), Duration::from_secs(2)).await;
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
         assert!(body.contains("deadline"), "body was {body:?}");
+        assert_eq!(timeouts, 1, "counter should have incremented once");
     }
 }
