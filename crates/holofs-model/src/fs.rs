@@ -113,22 +113,54 @@ impl Directory {
         b
     }
 
-    /// Atomic write to a file: write `.tmp`, fsync, rename. A crash in the
-    /// middle leaves either the old valid catalog or the new valid one.
+    /// Atomic write to a file: write to a per-call `.tmp.<pid>.<counter>`
+    /// path, fsync, rename over the target. A crash in the middle
+    /// leaves either the old valid catalog or the new valid one.
+    ///
+    /// Pre-N4 the tmp path was a single `<name>.tmp` shared across
+    /// concurrent savers. Two racing calls would each write the same
+    /// tmp then race their `rename`s; whichever lost the race saw
+    /// `ENOENT` because the tmp had already moved. That was
+    /// swallowed as an `eprintln!` from `persist_catalog`. Post-N4
+    /// the same race would surface as a 500 on the losing PUT
+    /// (`parallel_puts_to_distinct_names_all_succeed` reliably hit
+    /// it in the e2e suite). Making each caller's tmp unique lets
+    /// both saves succeed atomically — last-writer-wins by rename
+    /// order, which is the same guarantee we advertised before.
     pub fn save_atomic(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)?;
             }
         }
-        let tmp = path.with_extension("tmp");
+        let pid = std::process::id();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = match path.file_name() {
+            Some(name) => {
+                let mut fname = name.to_os_string();
+                fname.push(format!(".tmp.{pid}.{n}"));
+                path.with_file_name(fname)
+            }
+            None => path.with_extension(format!("tmp.{pid}.{n}")),
+        };
         fs::write(&tmp, self.encode())?;
         if let Ok(f) = fs::File::open(&tmp) {
             let _ = f.sync_all();
         }
-        fs::rename(&tmp, path)?;
-        Ok(())
+        // rename should be atomic on the same filesystem. If it
+        // fails we still clean up our tmp so we don't leak files
+        // under concurrent-writer workloads.
+        match fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
     }
 
     /// Load a catalog from a file. Missing file → empty catalog.
@@ -254,6 +286,67 @@ mod tests {
         assert!(d.remove("a").is_some());
         assert_eq!(d.len(), 1);
         assert!(d.get("a").is_none());
+    }
+
+    /// N4 regression guard: 8 threads calling `save_atomic` against the
+    /// same path in parallel must all succeed. Pre-fix the shared
+    /// `<name>.tmp` path caused racing renames to hit `ENOENT`, which
+    /// pre-N4 was silently eaten and post-N4 surfaced as a 500 on the
+    /// losing PUT (`parallel_puts_to_distinct_names_all_succeed` in
+    /// the e2e suite).
+    #[test]
+    fn save_atomic_survives_concurrent_writers() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = std::env::temp_dir().join(format!(
+            "holofs-persist-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = Arc::new(dir.join("catalog.bin"));
+
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let p = Arc::clone(&path);
+            handles.push(thread::spawn(move || -> io::Result<()> {
+                let mut d = Directory::new();
+                d.insert(format!("obj-{i:02}.png"), fake_manifest(i));
+                // Hammer save_atomic a handful of times so the tmp
+                // filename races have plenty of chances to collide.
+                for _ in 0..5 {
+                    d.save_atomic(&*p)?;
+                }
+                Ok(())
+            }));
+        }
+        for h in handles {
+            let res = h.join().expect("thread panicked");
+            assert!(res.is_ok(), "save_atomic Err under concurrency: {res:?}");
+        }
+        // The final catalog is whichever thread renamed last; it just
+        // has to be *some* valid catalog.
+        let back = Directory::load_or_empty(&*path).unwrap();
+        assert!(!back.is_empty(), "final catalog was empty");
+        // No leftover tmp files in the directory.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains(".tmp.")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "concurrent save_atomic left tmp files behind: {leftovers:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
