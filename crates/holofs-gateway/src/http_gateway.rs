@@ -9,7 +9,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use tokio::sync::{Mutex, RwLock};
 
@@ -285,77 +284,12 @@ impl Gateway {
     // / blank_opaque_manifest + ingest_bytes + IngestResult moved to
     // `ingest.rs` in Phase R1b.16.
 
-    async fn get_or_decode(&self, name: &str, max_layer: u8) -> Option<Arc<CachedFile>> {
-        {
-            let cache = self.cache.lock().await;
-            if let Some(c) = cache.get(&(name.to_string(), max_layer)) {
-                return Some(Arc::clone(c));
-            }
-        }
-        // The catalog snapshot + live set are taken inside
-        // `decode_with_autorepair`; this branch only needs the
-        // post-decode width/height (which doesn't change across
-        // auto-repair since `repair_node` only rewrites
-        // `shard_hashes`, not dimensions).
-        let (width, height) = {
-            let cat = self.catalog.lock().await;
-            let m = cat.get(name)?;
-            (m.width, m.height)
-        };
-        let t0 = Instant::now();
-        let (channels, bytes) = self
-            .decode_with_autorepair(name, max_layer)
-            .await
-            .ok()?;
-        let decode_ms = t0.elapsed().as_millis();
-        let png = encode_png(&channels, width, height);
-        let entry = Arc::new(CachedFile {
-            bytes: png,
-            max_layer,
-            bytes_downloaded: bytes,
-            decode_ms,
-        });
-        self.cache
-            .lock()
-            .await
-            .insert((name.to_string(), max_layer), Arc::clone(&entry));
-        Some(entry)
-    }
+    // get_or_decode moved to `decode.rs` in Phase R1b.17.
 }
 
 // === Public API for external HTTP frontends (e.g. holofs-web axum handlers) ===
 
-/// Decoded object payload ready to be wrapped into an HTTP response.
-///
-/// `bytes` is the body the client receives; `content_type` is the MIME the
-/// frontend must echo. Everything else maps to `X-Holofs-*` headers or the
-/// audio/text-specific headers (`Sample-Rate`, `Channels`, `Chunks-Total`,
-/// `Chunks-Missing`).
-#[derive(Debug, Clone)]
-pub struct DecodedObject {
-    /// Final encoded body (PNG, WAV, UTF-8 text, or raw opaque bytes).
-    pub bytes: Vec<u8>,
-    /// `Content-Type` to put on the response.
-    pub content_type: String,
-    /// Object kind, useful for `X-Holofs-Kind`.
-    pub kind: holofs_model::manifest::ObjectKind,
-    /// Last layer that was decoded (image/audio only). `None` for text/opaque.
-    pub max_layer: Option<u8>,
-    /// Bytes pulled from cluster nodes during decode.
-    pub bytes_downloaded: u64,
-    /// Wall-clock decode time in milliseconds.
-    pub decode_ms: u128,
-    /// Audio: sample rate. `None` for non-audio.
-    pub sample_rate: Option<u32>,
-    /// Audio: channel count (1 or 2). `None` for non-audio.
-    pub channels: Option<u8>,
-    /// Text: total chunk count.
-    pub chunks_total: Option<usize>,
-    /// Text: number of chunks replaced by hole markers.
-    pub chunks_missing: Option<usize>,
-    /// Opaque: original filename for `Content-Disposition: attachment`.
-    pub filename_for_disposition: Option<String>,
-}
+// DecodedObject moved to `decode.rs` in Phase R1b.17.
 
 // IngestResult moved to `ingest.rs` in Phase R1b.16.
 
@@ -372,140 +306,10 @@ pub struct DecodedObject {
 // preserve the public path.
 use crate::error::GatewayError;
 use crate::search::EmbedState;
-use crate::util::{
-    directory_object_id, encode_png, guess_opaque_content_type,
-    guess_text_content_type, now_unix,
-};
 use crate::versions::VersionsState;
 
 impl Gateway {
-    /// Decode an object for HTTP transport. Returns body bytes plus the
-    /// metadata the frontend needs to populate response headers.
-    ///
-    /// `max_layer = None` → full quality (last layer of the manifest).
-    /// `max_layer = Some(0)` → preview (image LL band or audio bass).
-    /// Preview is rejected with [`GatewayError::PreviewUnsupported`] for
-    /// text and opaque objects.
-    pub async fn decode_object(
-        &self,
-        name: &str,
-        max_layer: Option<u8>,
-    ) -> Result<DecodedObject, GatewayError> {
-        use holofs_model::manifest::ObjectKind;
-
-        let manifest = self
-            .catalog
-            .lock()
-            .await
-            .get(name)
-            .cloned()
-            .ok_or(GatewayError::NotFound)?;
-        let kind = manifest.kind;
-
-        // Preview is only meaningful for image/audio.
-        if matches!(kind, ObjectKind::Text | ObjectKind::Opaque) && max_layer.is_some() {
-            return Err(GatewayError::PreviewUnsupported);
-        }
-
-        match kind {
-            // Directories carry no payload — never reach the decode pipeline.
-            ObjectKind::Directory => Err(GatewayError::IsDirectory),
-            ObjectKind::Image => {
-                let layer = max_layer.unwrap_or_else(|| manifest.nlayers.saturating_sub(1));
-                let entry = self
-                    .get_or_decode(name, layer)
-                    .await
-                    .ok_or_else(|| GatewayError::Decode(format!("image decode failed: {name}")))?;
-                Ok(DecodedObject {
-                    bytes: entry.bytes.clone(),
-                    content_type: "image/png".into(),
-                    kind,
-                    max_layer: Some(entry.max_layer),
-                    bytes_downloaded: entry.bytes_downloaded,
-                    decode_ms: entry.decode_ms,
-                    sample_rate: None,
-                    channels: None,
-                    chunks_total: None,
-                    chunks_missing: None,
-                    filename_for_disposition: None,
-                })
-            }
-            ObjectKind::Audio => {
-                let layer = max_layer.unwrap_or_else(|| manifest.nlayers.saturating_sub(1));
-                let live = self.effective_live().await;
-                let t0 = Instant::now();
-                let (channels, bytes_dl) = holofs_client::get_audio_object_up_to_layer(
-                    &self.gf, &manifest, &live, layer,
-                )
-                .await
-                .map_err(|e| GatewayError::Decode(format!("audio decode: {e}")))?;
-                let decode_ms = t0.elapsed().as_millis();
-                let wav = holofs_codec::audio_codec::encode_wav_16bit(
-                    &channels,
-                    manifest.audio_sample_rate,
-                );
-                Ok(DecodedObject {
-                    bytes: wav,
-                    content_type: "audio/wav".into(),
-                    kind,
-                    max_layer: Some(layer),
-                    bytes_downloaded: bytes_dl,
-                    decode_ms,
-                    sample_rate: Some(manifest.audio_sample_rate),
-                    channels: Some(manifest.channels),
-                    chunks_total: None,
-                    chunks_missing: None,
-                    filename_for_disposition: None,
-                })
-            }
-            ObjectKind::Text => {
-                let live = self.effective_live().await;
-                let t0 = Instant::now();
-                let (bytes, holes) =
-                    holofs_client::get_text_object_with_holes(&self.gf, &manifest, &live)
-                        .await
-                        .map_err(|e| GatewayError::Decode(format!("text decode: {e}")))?;
-                let decode_ms = t0.elapsed().as_millis();
-                Ok(DecodedObject {
-                    bytes,
-                    content_type: manifest.content_type.clone(),
-                    kind,
-                    max_layer: None,
-                    bytes_downloaded: 0,
-                    decode_ms,
-                    sample_rate: None,
-                    channels: None,
-                    chunks_total: Some(manifest.chunk_lens.len()),
-                    chunks_missing: Some(holes),
-                    filename_for_disposition: None,
-                })
-            }
-            ObjectKind::Opaque => {
-                let live = self.effective_live().await;
-                let t0 = Instant::now();
-                let bytes = holofs_client::get_opaque_object(&self.gf, &manifest, &live)
-                    .await
-                    .map_err(|e| {
-                        GatewayError::Decode(format!("opaque decode (need ≥K shards): {e}"))
-                    })?;
-                let decode_ms = t0.elapsed().as_millis();
-                Ok(DecodedObject {
-                    bytes,
-                    content_type: manifest.content_type.clone(),
-                    kind,
-                    max_layer: None,
-                    bytes_downloaded: 0,
-                    decode_ms,
-                    sample_rate: None,
-                    channels: None,
-                    chunks_total: None,
-                    chunks_missing: None,
-                    filename_for_disposition: Some(name.to_string()),
-                })
-            }
-        }
-    }
-
+    // decode_object moved to `decode.rs` in Phase R1b.17.
     // ingest_bytes moved to `ingest.rs` in Phase R1b.16.
 
     // remove_object / mkdir / rmdir / rename / list_dir moved to
@@ -615,26 +419,8 @@ impl Gateway {
 // moved to `escrow.rs` in Phase R1b.5.
 
 
-/// Guess the content-type of an arbitrary binary by extension. If unknown,
-/// fall back to `application/octet-stream` (universal "untyped binary").
 // guess_opaque_content_type, guess_text_content_type, encode_png —
-// moved to `util.rs` in Phase R1b.1. The `use` at the top of this
-// file brings them back into scope with the same names.
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn directory_object_id_is_deterministic_and_path_sensitive() {
-        let a1 = directory_object_id("photos");
-        let a2 = directory_object_id("photos");
-        let b = directory_object_id("photos/2026");
-        assert_eq!(a1, a2);
-        assert_ne!(a1, b);
-        assert_ne!(a1, 0);
-    }
-
-    // parent_dir / in_scope / SimilarScope::parse tests moved to
-    // `similarity.rs` alongside the code they exercise (Phase R1b.15).
-}
+// moved to `util.rs` in Phase R1b.1.
+// directory_object_id test lives with the fn in util.rs.
+// parent_dir / in_scope / SimilarScope::parse tests moved to
+// `similarity.rs` alongside the code they exercise (Phase R1b.15).

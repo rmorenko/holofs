@@ -15,6 +15,7 @@
 //! using `holofs_gateway::GatewayError` etc. without following the
 //! module path.
 
+mod decode;
 mod diff;
 mod dirops;
 mod error;
@@ -34,6 +35,7 @@ mod spotlight;
 mod util;
 mod versions;
 
+pub use decode::DecodedObject;
 pub use diff::{DiffCell, DiffLayer, DiffReport};
 pub use dirops::{MkdirResult, RemoveResult, RenameResult, RmdirResult};
 pub use error::GatewayError;
