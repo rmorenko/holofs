@@ -34,6 +34,8 @@ use holofs_storage::whitelist::Whitelist;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::supervised::supervised_spawn;
+
 /// Bootstrap configuration. Defaults match `holofs-http` (CLI flags →
 /// `BootstrapConfig` fields). Reading from env happens in [`Self::from_env`].
 #[derive(Debug, Clone)]
@@ -354,16 +356,15 @@ pub async fn bootstrap_cluster(
     let mon_gf = Arc::clone(&gf);
     let mon_rep = Arc::clone(&reputation);
     let mon_shutdown = shutdown.clone();
-    let monitor = tokio::spawn(async move {
-        run_periodic(
-            mon_gf,
-            mon_catalog,
-            monitor_cfg,
-            Some(mon_rep),
-            log_event,
-            mon_shutdown,
-        )
-        .await;
+    let monitor = supervised_spawn("monitor", shutdown.clone(), move || {
+        let gf = Arc::clone(&mon_gf);
+        let cat = Arc::clone(&mon_catalog);
+        let rep = Arc::clone(&mon_rep);
+        let sd = mon_shutdown.clone();
+        let cfg = monitor_cfg.clone();
+        async move {
+            run_periodic(gf, cat, cfg, Some(rep), log_event, sd).await;
+        }
     });
 
     let audit_interval: u64 = std::env::var("HOLOFS_AUDIT_INTERVAL")
@@ -383,8 +384,14 @@ pub async fn bootstrap_cluster(
     let aud_catalog = Arc::clone(&catalog);
     let aud_rep = Arc::clone(&reputation);
     let aud_shutdown = shutdown.clone();
-    let auditor = tokio::spawn(async move {
-        audit::run_periodic(aud_catalog, aud_rep, audit_cfg, log_audit, aud_shutdown).await;
+    let auditor = supervised_spawn("auditor", shutdown.clone(), move || {
+        let cat = Arc::clone(&aud_catalog);
+        let rep = Arc::clone(&aud_rep);
+        let sd = aud_shutdown.clone();
+        let cfg = audit_cfg.clone();
+        async move {
+            audit::run_periodic(cat, rep, cfg, log_audit, sd).await;
+        }
     });
 
     // Background shard scrub. Walks the catalog every
@@ -406,24 +413,28 @@ pub async fn bootstrap_cluster(
             interval_secs = scrub_interval_secs,
             "background shard scrub configured"
         );
-        Some(tokio::spawn(async move {
-            // First tick fires after the interval so we don't hammer
-            // the cluster at boot before audit has even started.
-            let mut ticker = tokio::time::interval(interval);
-            ticker.tick().await; // immediate, but the next is interval-from-now
-            loop {
-                tokio::select! {
-                    _ = scrub_shutdown.cancelled() => return,
-                    _ = ticker.tick() => {}
-                }
-                let report = scrub_gw.scrub_tick().await;
-                if report.objects_repaired > 0 || report.objects_repair_failed > 0 {
-                    info!(
-                        scanned = report.objects_scanned,
-                        repaired = report.objects_repaired,
-                        failed = report.objects_repair_failed,
-                        "scrub tick"
-                    );
+        Some(supervised_spawn("scrub", shutdown.clone(), move || {
+            let gw = Arc::clone(&scrub_gw);
+            let sd = scrub_shutdown.clone();
+            async move {
+                // First tick fires after the interval so we don't hammer
+                // the cluster at boot before audit has even started.
+                let mut ticker = tokio::time::interval(interval);
+                ticker.tick().await; // immediate, but the next is interval-from-now
+                loop {
+                    tokio::select! {
+                        _ = sd.cancelled() => return,
+                        _ = ticker.tick() => {}
+                    }
+                    let report = gw.scrub_tick().await;
+                    if report.objects_repaired > 0 || report.objects_repair_failed > 0 {
+                        info!(
+                            scanned = report.objects_scanned,
+                            repaired = report.objects_repaired,
+                            failed = report.objects_repair_failed,
+                            "scrub tick"
+                        );
+                    }
                 }
             }
         }))

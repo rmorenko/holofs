@@ -35,6 +35,8 @@ pub mod range;
 pub mod search;
 pub mod similar;
 pub mod spotlight;
+#[cfg(feature = "ssr")]
+pub mod supervised;
 pub mod ui;
 pub mod versions;
 
