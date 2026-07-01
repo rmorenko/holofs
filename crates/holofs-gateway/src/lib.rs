@@ -15,17 +15,20 @@
 //! using `holofs_gateway::GatewayError` etc. without following the
 //! module path.
 
+mod diff;
 mod error;
 mod escrow;
 mod gc;
 mod http_gateway;
 mod inspect;
+mod mix;
 mod search;
 mod similarity;
 mod spotlight;
 mod util;
 mod versions;
 
+pub use diff::{DiffCell, DiffLayer, DiffReport};
 pub use error::GatewayError;
 pub use escrow::{
     EscrowRecoverResult, EscrowShareBytes, EscrowShareInfo, EscrowSplitResult,
@@ -33,6 +36,7 @@ pub use escrow::{
 pub use gc::{GcNodeReport, GcReport};
 pub use http_gateway::*;
 pub use inspect::{InspectInfo, LayerLayout, ShardInfo, ShardPayload};
+pub use mix::{FilteredAudio, MixedImage};
 pub use search::{SearchBand, SemanticHit};
 pub use similarity::{
     ShardOverlap, SimilarMatch, SimilarReport, SimilarScope, SimilarityMethod,
