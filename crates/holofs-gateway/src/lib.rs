@@ -21,6 +21,7 @@ mod gc;
 mod http_gateway;
 mod search;
 mod similarity;
+mod spotlight;
 mod util;
 mod versions;
 
@@ -34,4 +35,5 @@ pub use search::{SearchBand, SemanticHit};
 pub use similarity::{
     ShardOverlap, SimilarMatch, SimilarReport, SimilarScope, SimilarityMethod,
 };
+pub use spotlight::{SpotlightImage, SpotlightRoi};
 pub use versions::{DeleteVersionResult, RestoreResult, VersionEntry};
