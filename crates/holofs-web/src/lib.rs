@@ -17,6 +17,8 @@ use leptos_router::path;
 use serde::{Deserialize, Serialize};
 
 pub mod about;
+#[cfg(feature = "ssr")]
+pub mod backpressure;
 pub mod bootstrap;
 #[cfg(feature = "ssr")]
 pub mod cli;

@@ -36,6 +36,7 @@ use holofs_web::handlers;
 use holofs_web::health::{GetHealthIndex, GetObjectHealth};
 use holofs_web::inspect::{GetInspect, GetInspectZoom};
 use holofs_web::help::{GetDoc, ListDocs};
+use holofs_web::backpressure::with_permit;
 use holofs_web::similar::GetSimilar;
 use holofs_web::timeout::{run_with_deadline, LONG, MEDIUM, SHORT};
 use holofs_web::{App, GetCatalog, ListDir, ListDirPageFn, Shell};
@@ -121,16 +122,22 @@ async fn main() {
         .route("/admin/node", post(handlers::toggle_node))
         .route_layer(from_fn(|req, next| run_with_deadline(SHORT, req, next)));
 
-    // LONG (5 min) — catalog-wide scans and Monte Carlo. These
-    // legitimately take minutes on large catalogs; a shorter budget
-    // would 504 healthy calls.
+    // LONG (5 min, LONG-bucket backpressure) — catalog-wide scans
+    // and Monte Carlo. These legitimately take minutes on large
+    // catalogs; a shorter budget would 504 healthy calls. Bucket
+    // permits (default 8) throttle concurrent expensive calls so a
+    // burst doesn't saturate the shard cache.
+    let (long_sem, long_rej) = gateway.long_bucket();
     let long_routes: Router<LeptosOptions> = Router::new()
         .route("/api/search", get(handlers::semantic_search))
         .route("/api/spotlight.png", get(handlers::spotlight_png))
         .route("/api/gc", post(handlers::gc_orphans))
         .route("/api/embed_all", post(handlers::embed_all))
         .route("/api/fingerprint/*path", get(handlers::api_fingerprint))
-        .route_layer(from_fn(|req, next| run_with_deadline(LONG, req, next)));
+        .route_layer(from_fn(|req, next| run_with_deadline(LONG, req, next)))
+        .route_layer(from_fn(move |req, next| {
+            with_permit(long_sem.clone(), long_rej.clone(), req, next)
+        }));
 
     // STREAMING — SSE + multipart/x-mixed-replace. Intentionally
     // unbudgeted: the timer would start on the first byte and kill
@@ -214,6 +221,12 @@ async fn main() {
         )
         .route("/*path", delete(handlers::delete_object))
         .route_layer(from_fn(|req, next| run_with_deadline(MEDIUM, req, next)));
+    // N3: MEDIUM-bucket backpressure. Cap default 64 concurrent
+    // decodes / PUT / dir-ops so a burst can't DoS the process.
+    let (medium_sem, medium_rej) = gateway.medium_bucket();
+    let medium_routes = medium_routes.route_layer(from_fn(move |req, next| {
+        with_permit(medium_sem.clone(), medium_rej.clone(), req, next)
+    }));
 
     let app = Router::new()
         .merge(short_routes)

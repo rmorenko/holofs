@@ -300,13 +300,31 @@ pub async fn bootstrap_cluster(
         width: w,
         height: h,
     });
-    let gateway = Gateway::new_persistent(
+    let mut gateway = Gateway::new_persistent(
         Arc::clone(&gf),
         Arc::clone(&catalog),
         Arc::new(live),
         cluster_info,
         catalog_path.clone(),
     );
+    // N3: apply env-configured backpressure caps before anything else
+    // gets an Arc handle. `Arc::get_mut` succeeds only while the
+    // refcount is 1 — right here, before any spawn or clone — so we
+    // don't need interior mutability on the semaphore fields.
+    let medium_cap: usize = std::env::var("HOLOFS_MEDIUM_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(holofs_gateway::DEFAULT_MEDIUM_CONCURRENCY);
+    let long_cap: usize = std::env::var("HOLOFS_LONG_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(holofs_gateway::DEFAULT_LONG_CONCURRENCY);
+    if let Some(gw_mut) = Arc::get_mut(&mut gateway) {
+        gw_mut.configure_limits(medium_cap, long_cap);
+    } else {
+        warn!("Arc<Gateway> refcount already > 1 after construction; backpressure caps stayed at defaults");
+    }
+    info!(medium_cap, long_cap, "N3 backpressure caps applied");
     // Stage 12.8: wire the CLIP semantic-search index when the operator
     // opted in. We don't pre-load the model here — that happens lazily
     // on first PUT / first search to keep boot cheap.

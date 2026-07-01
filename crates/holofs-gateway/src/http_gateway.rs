@@ -22,6 +22,41 @@ use holofs_model::placement::Placement;
 use crate::search::EmbedState;
 use crate::versions::VersionsState;
 
+/// Aggregate handle to every N-series counter for `/metrics`. Borrows
+/// from the Gateway so read paths can format them without cloning
+/// eleven Arcs. Consumers touch `.load(Ordering::Relaxed)` on each
+/// atomic and `available_permits() / initial capacity()` on the two
+/// semaphores.
+pub struct ObservabilityCounters<'gw> {
+    pub medium_permits: &'gw Arc<tokio::sync::Semaphore>,
+    pub long_permits: &'gw Arc<tokio::sync::Semaphore>,
+    pub medium_rejected_total: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub long_rejected_total: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub timeout_short_total: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub timeout_medium_total: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub timeout_long_total: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub task_restarts_monitor: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub task_restarts_auditor: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub task_restarts_scrub: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub catalog_persist_failures_total: &'gw Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// N3: default MEDIUM-bucket concurrency (decodes, PUT, dir ops).
+/// Chosen empirically — on the dev cluster (40 nodes × 444 shards)
+/// a burst of ~40 concurrent decodes saturates the cluster. 64
+/// gives headroom without letting a burst DoS the process. Callers
+/// override via [`Gateway::configure_limits`] (bootstrap reads
+/// `HOLOFS_MEDIUM_CONCURRENCY` and applies it).
+pub const DEFAULT_MEDIUM_CONCURRENCY: usize = 64;
+
+/// N3: default LONG-bucket concurrency. `semantic_search` +
+/// `similar_to` + `spotlight` each walk the catalog and dispatch
+/// N-shard fetches; running more than a handful in parallel just
+/// serialises them on the shared shard cache and dropbox. 8 is a
+/// reasonable ceiling for the dev cluster; production deployments
+/// tune it via `HOLOFS_LONG_CONCURRENCY`.
+pub const DEFAULT_LONG_CONCURRENCY: usize = 8;
+
 /// Cluster metadata needed to PUT a new object.
 pub struct ClusterInfo {
     pub node_addrs: Vec<String>,
@@ -119,6 +154,37 @@ pub struct Gateway {
     /// non-zero value here means the catalog on disk is behind the
     /// catalog in memory and the next restart will lose writes.
     pub(crate) catalog_persist_failures_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N3: backpressure permits + rejection counters for the two
+    /// non-cheap route buckets. `medium_permits` caps decode / PUT /
+    /// dir-op concurrency (default 64); `long_permits` caps semantic
+    /// search / spotlight / GC (default 8). Both configurable via
+    /// `HOLOFS_MEDIUM_CONCURRENCY` / `HOLOFS_LONG_CONCURRENCY`.
+    ///
+    /// The `holofs-web` middleware wraps every request in a
+    /// `try_acquire_owned` — on failure it bumps `*_rejected_total`
+    /// and returns 503 Service Unavailable so a bursting client
+    /// can back off instead of piling up axum tasks that all fight
+    /// for the same 40-node cluster.
+    pub(crate) medium_permits: Arc<tokio::sync::Semaphore>,
+    pub(crate) long_permits: Arc<tokio::sync::Semaphore>,
+    pub(crate) medium_rejected_total: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) long_rejected_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N7: 504 counter — bumped by the timeout middleware in
+    /// `holofs-web` each time a handler exceeds its bucket deadline.
+    /// Split by bucket via `holofs_handler_timeouts_total{bucket=…}`
+    /// in `/metrics`.
+    pub(crate) timeout_short_total: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) timeout_medium_total: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) timeout_long_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N2: supervised-task restart counters. Bumped every time
+    /// `supervised_spawn` decides to restart after a panic
+    /// (or an unexpected voluntary return). Emitted in `/metrics`
+    /// as `holofs_supervised_task_restarts_total{task=…}`. Only
+    /// the three long-lived tasks live here; ad-hoc supervised
+    /// spawns would need to grow this map.
+    pub(crate) task_restarts_monitor: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) task_restarts_auditor: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) task_restarts_scrub: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// PNG cache entry: fully-encoded body + the layer it was decoded at
@@ -159,6 +225,16 @@ impl Gateway {
             scrub_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scrub_runs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             catalog_persist_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            medium_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MEDIUM_CONCURRENCY)),
+            long_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_LONG_CONCURRENCY)),
+            medium_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            long_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            timeout_short_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            timeout_medium_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            timeout_long_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            task_restarts_monitor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            task_restarts_auditor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            task_restarts_scrub: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -190,7 +266,95 @@ impl Gateway {
             scrub_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scrub_runs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             catalog_persist_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            medium_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MEDIUM_CONCURRENCY)),
+            long_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_LONG_CONCURRENCY)),
+            medium_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            long_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            timeout_short_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            timeout_medium_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            timeout_long_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            task_restarts_monitor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            task_restarts_auditor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            task_restarts_scrub: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
+    }
+
+    /// N3: reset the backpressure permits to `medium` / `long`
+    /// capacity. Called once at bootstrap after reading env vars.
+    /// Uses `Semaphore::new(cap)` to make a fresh semaphore; the old
+    /// one is dropped. Safe to call before axum starts serving —
+    /// afterwards would race with in-flight `try_acquire_owned`
+    /// calls and lose their permits.
+    pub fn configure_limits(&mut self, medium: usize, long: usize) {
+        self.medium_permits = Arc::new(tokio::sync::Semaphore::new(medium));
+        self.long_permits = Arc::new(tokio::sync::Semaphore::new(long));
+    }
+
+    /// Handle for the /metrics endpoint (backpressure permits +
+    /// timeout + task-restart counters). Everything the middleware
+    /// stack in `holofs-web` mutates is reachable via the returned
+    /// bundle without leaking the private field names.
+    pub fn observability_counters(&self) -> ObservabilityCounters<'_> {
+        ObservabilityCounters {
+            medium_permits: &self.medium_permits,
+            long_permits: &self.long_permits,
+            medium_rejected_total: &self.medium_rejected_total,
+            long_rejected_total: &self.long_rejected_total,
+            timeout_short_total: &self.timeout_short_total,
+            timeout_medium_total: &self.timeout_medium_total,
+            timeout_long_total: &self.timeout_long_total,
+            task_restarts_monitor: &self.task_restarts_monitor,
+            task_restarts_auditor: &self.task_restarts_auditor,
+            task_restarts_scrub: &self.task_restarts_scrub,
+            catalog_persist_failures_total: &self.catalog_persist_failures_total,
+        }
+    }
+
+    /// Owned handles for a specific bucket's permit + rejection
+    /// counter. `holofs-web`'s middleware captures the returned
+    /// pair into a `from_fn` closure to enforce backpressure per
+    /// bucket.
+    pub fn medium_bucket(&self) -> (Arc<tokio::sync::Semaphore>, Arc<std::sync::atomic::AtomicU64>) {
+        (Arc::clone(&self.medium_permits), Arc::clone(&self.medium_rejected_total))
+    }
+
+    /// See [`Self::medium_bucket`].
+    pub fn long_bucket(&self) -> (Arc<tokio::sync::Semaphore>, Arc<std::sync::atomic::AtomicU64>) {
+        (Arc::clone(&self.long_permits), Arc::clone(&self.long_rejected_total))
+    }
+
+    /// Owned handles to the per-bucket timeout counters, in
+    /// `(short, medium, long)` order. Middleware picks whichever
+    /// matches its bucket.
+    pub fn timeout_counters(
+        &self,
+    ) -> (
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        (
+            Arc::clone(&self.timeout_short_total),
+            Arc::clone(&self.timeout_medium_total),
+            Arc::clone(&self.timeout_long_total),
+        )
+    }
+
+    /// Owned handles to the three supervised-task restart counters,
+    /// in `(monitor, auditor, scrub)` order. Bootstrap passes each
+    /// one into the matching `supervised_spawn` call.
+    pub fn task_restart_counters(
+        &self,
+    ) -> (
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        (
+            Arc::clone(&self.task_restarts_monitor),
+            Arc::clone(&self.task_restarts_auditor),
+            Arc::clone(&self.task_restarts_scrub),
+        )
     }
 
     /// Stage 12.8: turn on the CLIP-based semantic-search index. Pass
