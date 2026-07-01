@@ -24,6 +24,7 @@ mod health;
 mod http_gateway;
 mod inspect;
 mod mix;
+mod repair;
 mod search;
 mod similarity;
 mod spotlight;
