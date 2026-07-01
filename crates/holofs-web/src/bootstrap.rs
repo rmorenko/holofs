@@ -134,6 +134,11 @@ pub struct Bootstrap {
     /// via `HOLOFS_SCRUB_INTERVAL=0` — the auto-repair-on-read path
     /// (inside `Gateway::decode_with_autorepair`) still runs.
     pub scrub: Option<tokio::task::JoinHandle<()>>,
+    /// N5: throttled reputation-state persistence task. Snapshots the
+    /// shared `Arc<Mutex<Reputation>>` every
+    /// `HOLOFS_REPUTATION_PERSIST_INTERVAL` seconds (default 30) and
+    /// on shutdown so a restart resumes with the last-known scores.
+    pub reputation_persist: tokio::task::JoinHandle<()>,
     /// Embedded cluster node listener tasks. Empty when running in
     /// distributed / whitelist mode — the operator manages those nodes
     /// out-of-process. On shutdown these are `abort()`ed so the ports
@@ -292,7 +297,28 @@ pub async fn bootstrap_cluster(
     }
 
     let catalog = Arc::new(Mutex::new(directory));
-    let reputation = Arc::new(Mutex::new(Reputation::new(n_nodes, 1.0)));
+
+    // N5: reputation state persists across restarts. Path fixed at
+    // `<storage>/reputation.bin`. Any load failure (missing, corrupt,
+    // n_nodes mismatch) silently falls back to a fresh table so a
+    // rewired cluster boots successfully.
+    let reputation_path = config.storage.join("reputation.bin");
+    let (reputation_state, rep_loaded) =
+        Reputation::load_or_new(&reputation_path, n_nodes, 1.0);
+    if rep_loaded {
+        info!(
+            path = %reputation_path.display(),
+            n_nodes,
+            "reputation state loaded from disk"
+        );
+    } else {
+        info!(
+            path = %reputation_path.display(),
+            n_nodes,
+            "reputation state seeded fresh"
+        );
+    }
+    let reputation = Arc::new(Mutex::new(reputation_state));
     let cluster_info = Arc::new(ClusterInfo {
         node_addrs: node_addrs.clone(),
         zones: zones.clone(),
@@ -429,6 +455,68 @@ pub async fn bootstrap_cluster(
         },
     );
 
+    // N5: throttled reputation persistence. Snapshot every
+    // `HOLOFS_REPUTATION_PERSIST_INTERVAL` seconds (default 30s ==
+    // one auditor cycle by default) and atomic-rename over
+    // `<storage>/reputation.bin`. We also snapshot once at
+    // shutdown so the last observations don't get lost.
+    let reputation_persist_secs: u64 = std::env::var("HOLOFS_REPUTATION_PERSIST_INTERVAL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+    let rep_persist_path = reputation_path.clone();
+    let rep_persist_rep = Arc::clone(&reputation);
+    let rep_persist_shutdown = shutdown.clone();
+    // Reuse the auditor's restart counter for now — reputation
+    // persistence is close-kin to audit and we don't want to grow
+    // ObservabilityCounters for a task the operator can't do
+    // anything about individually.
+    let rep_persist_task = supervised_spawn(
+        "reputation-persist",
+        shutdown.clone(),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        move || {
+            let path = rep_persist_path.clone();
+            let rep = Arc::clone(&rep_persist_rep);
+            let sd = rep_persist_shutdown.clone();
+            let interval = std::time::Duration::from_secs(reputation_persist_secs);
+            async move {
+                let mut ticker = tokio::time::interval(interval);
+                // Skip the immediate first tick — we already know
+                // the state is fresh (or freshly-loaded) at boot.
+                ticker.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = sd.cancelled() => {
+                            // Final save on shutdown so the last
+                            // batch of audit observations survives.
+                            let snap = rep.lock().await.clone();
+                            if let Err(e) = snap.save_atomic(&path) {
+                                tracing::error!(
+                                    error = %e,
+                                    path = %path.display(),
+                                    "reputation final-save failed"
+                                );
+                            } else {
+                                tracing::info!("reputation final-save ok");
+                            }
+                            return;
+                        }
+                        _ = ticker.tick() => {}
+                    }
+                    let snap = rep.lock().await.clone();
+                    if let Err(e) = snap.save_atomic(&path) {
+                        tracing::error!(
+                            error = %e,
+                            path = %path.display(),
+                            "reputation persist failed"
+                        );
+                    }
+                }
+            }
+        },
+    );
+
     // Background shard scrub. Walks the catalog every
     // HOLOFS_SCRUB_INTERVAL seconds (default 600 = 10 min) and
     // proactively repairs any object whose `place_shard`-expected
@@ -495,6 +583,7 @@ pub async fn bootstrap_cluster(
         monitor,
         auditor,
         scrub,
+        reputation_persist: rep_persist_task,
         node_tasks: node_task_handles,
         shutdown,
     })

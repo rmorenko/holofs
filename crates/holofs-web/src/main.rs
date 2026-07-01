@@ -66,6 +66,7 @@ async fn main() {
         monitor,
         auditor,
         scrub,
+        reputation_persist,
         node_tasks,
         shutdown,
     } = bootstrap_cluster(&cli.bootstrap_config())
@@ -354,6 +355,10 @@ async fn main() {
         if let Some(s) = scrub {
             let _ = s.await;
         }
+        // N5: wait for the reputation-persist task to write its
+        // final snapshot before we abort node listeners. Otherwise
+        // the last batch of auditor observations gets lost.
+        let _ = reputation_persist.await;
     })
     .await;
     if joined.is_err() {
