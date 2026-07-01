@@ -20,6 +20,7 @@ mod escrow;
 mod gc;
 mod http_gateway;
 mod search;
+mod similarity;
 mod util;
 mod versions;
 
@@ -30,4 +31,7 @@ pub use escrow::{
 pub use gc::{GcNodeReport, GcReport};
 pub use http_gateway::*;
 pub use search::{SearchBand, SemanticHit};
+pub use similarity::{
+    ShardOverlap, SimilarMatch, SimilarReport, SimilarScope, SimilarityMethod,
+};
 pub use versions::{DeleteVersionResult, RestoreResult, VersionEntry};
