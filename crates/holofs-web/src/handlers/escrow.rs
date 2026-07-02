@@ -26,7 +26,7 @@ use holofs_gateway::{
     EscrowRecoverResult, EscrowShareBytes, EscrowSplitResult, Gateway, GatewayError,
 };
 
-use super::{bad_request, bad_request_owned, error_to_response};
+use super::util::{bad_request, bad_request_owned, error_to_response};
 
 /// `POST /escrow/split` — multipart `file` + `k` + `n` → in-memory shares.
 /// Renders an HTML result page listing each `.holoshare` download link.
