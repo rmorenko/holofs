@@ -32,9 +32,17 @@ pub struct LocaleSignal(pub Signal<String>);
 
 /// Read the active locale code (`"en"`, `"ru"`, …). Falls back to `"en"`
 /// when no [`LocaleSignal`] has been provided (e.g. unit tests).
+///
+/// **Non-reactive by design.** Uses `get_untracked()` so calling this
+/// (or `t!(…)`) from a non-reactive context — e.g. a plain function
+/// body during WASM hydration — doesn't spam the browser console with
+/// Leptos's "reactive value accessed outside a tracking context"
+/// warnings. Semantically safe because every locale switch is a full
+/// page reload (see the module doc); a live reactive value would
+/// never fire an update anyway.
 pub fn current_locale() -> String {
     use_context::<LocaleSignal>()
-        .map(|s| s.0.get())
+        .map(|s| s.0.get_untracked())
         .unwrap_or_else(|| "en".to_string())
 }
 
