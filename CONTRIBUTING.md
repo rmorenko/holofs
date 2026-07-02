@@ -36,6 +36,7 @@ crates/
   holofs-testutils/ shared DisablePool + spawn_mock_node helpers (dev-only)
   holofs-mcp/       Streamable-HTTP Model Context Protocol server
   holofs-web/       axum + Leptos 0.7 SSR frontend (binary: holofs-web)
+                    (21-module fan-out post v0.6.1; see docs/architecture.md § 1.3)
   holofs-cli/       binaries (holofs-admin, holofs-bench, holofs-inspect, ...)
   holofs-e2e/       browser-driven (thirtyfour + chromedriver) end-to-end test harness
 ```
@@ -137,6 +138,23 @@ New `Gateway` methods belong to their concern's sibling module
 (`ingest`, `decode`, `search`, `versions`, ...) — see
 `docs/architecture.md § 1.1` for the map. Nothing should grow
 back into `http_gateway.rs`.
+
+### Where new UI code and handlers go (post v0.6.1 — Phase R2)
+
+`holofs-web` was similarly decomposed. Nothing new should grow
+back into `lib.rs` or `handlers.rs` — both are now pure
+module-registration front-doors.
+
+| Concern | Module | Notes |
+|---|---|---|
+| New `#[server]` function | `holofs_web::server_fns` | Reads `Gateway` from Leptos context; hydrate stub is auto-generated. |
+| New catalog / tree Leptos component | `holofs_web::catalog_ui` | Fifteen existing components + `MkdirForm` / `UploadForm` / `ObjectCard`. |
+| New standalone page (`/foo`) | new sibling module (e.g. `holofs_web::foo`) | Mirror `holofs_web::health` / `holofs_web::similar` — add a `pub mod` to `lib.rs` and a `<Route path=path!("/foo") view=foo::Page/>` to `RoutedApp`. |
+| New axum handler | pick a `handlers/*.rs` domain | `objects`, `dirops`, `uploads`, `versions`, `analytics`, `search`, `health`, `escrow`. Shared helpers → `handlers/util.rs`; new response projections → `handlers/response.rs`. |
+| New pure helper (path validation, escape, header shortcut) | `handlers/util.rs` | pub(crate); handlers.rs itself owns no code — the top-level `pub use handlers::foo` is the only surface. |
+
+See `docs/architecture.md § 1.3` for the full 21-module map and
+the "rule of thumb" for extending each concern.
 
 ## PR checklist
 

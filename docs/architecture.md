@@ -33,7 +33,7 @@ graph BT
     analytics["holofs-analytics<br/>fingerprint, MinHash, escrow"]
     gateway["holofs-gateway<br/>catalog, decode, auto-repair, scrub<br/>(18-module fan-out post v0.6.0)"]
     mcp["holofs-mcp<br/>Streamable-HTTP MCP server"]
-    web["holofs-web<br/>axum + Leptos 0.7 SSR + WASM hydrate"]
+    web["holofs-web<br/>axum + Leptos 0.7 SSR + WASM hydrate<br/>(21-module fan-out post v0.6.1)"]
     cli["holofs-cli<br/>holofs-admin, -bench, -inspect, ..."]
     e2e["holofs-e2e<br/>thirtyfour + chromedriver test harness"]
 
@@ -134,6 +134,58 @@ for the full behaviour matrix.
 holofs-web one: `Gateway::persist_catalog` returns
 `Result<(), GatewayError::Persist>` and every writer path (`ingest`,
 `dirops`, `versions`) propagates via `?`.
+
+### 1.3. Web crate module layout (post v0.6.1 — Phase R2)
+
+`holofs-web` was originally two god-files:
+`src/lib.rs` (2487 lines — Leptos SSR components + server_fns + filter)
+and `src/handlers.rs` (1857 lines — 25 axum handlers + ~30 helpers).
+Phase R2 split both into single-purpose sibling modules.
+
+**Post-R2a: `lib.rs` (253 lines)** — module registry + crate-root
+`pub use` re-exports + [`Shell`] / [`App`] / [`RoutedApp`] top-level
+components + `url_encode` utility + WASM `hydrate` entry.
+Everything else moved to:
+
+| Module | Purpose |
+|---|---|
+| `catalog_types` | `CatalogEntry` view-model shared across SSR + hydrate boundaries. `from_manifest` (SSR-only). |
+| `filter` | Stage 11.17 catalog filter — `CatalogFilter`, `apply_filter`, `compile_glob`, `parse_date_to_unix`, `ymd_to_unix` + seven unit tests. SSR-only. |
+| `server_fns` | The three `#[server]` functions (`get_catalog`, `list_dir`, `list_dir_page`) + `ListDirPage` + `TreeSort` + `compare_entries`. |
+| `catalog_ui` | Fifteen Leptos components — `CatalogPage`, `CatalogFocusView`, `FilterBar`, `TreeZoomButtons`, `Breadcrumb`, `CatalogTreeView` + eager/lazy variants, `LazyLevel`, `LazyDirNode`, `CatalogTreeBody`, `TreeNodeView`, `MkdirForm`, `UploadForm`, `ObjectCard`. |
+
+**Post-R2b: `handlers.rs` (64 lines)** — pure module-registration
+front-door + `pub use` re-exports. Every handler lives in a
+domain submodule under `handlers/`:
+
+| Module | Handlers |
+|---|---|
+| `handlers/objects` | GET / PUT / DELETE `/*path`, `/preview/*`, `/preview/stream/*`, `/api/shard/…`, wasm alias. |
+| `handlers/dirops` | mkdir, rmdir, rm, mv (JSON + form flavours). |
+| `handlers/uploads` | multipart `/api/upload`. |
+| `handlers/versions` | `/api/restore`, `/api/versions/delete`. |
+| `handlers/analytics` | `/api/fingerprint/*`, `/api/mix.png`, `/api/mix-save`, `/api/spotlight.png`. |
+| `handlers/search` | `/api/embed_all`, `/api/search`. |
+| `handlers/health` | `/api/stats`, `/metrics`, `/api/gc`, `/admin/node`, `/api/health/events` SSE. |
+| `handlers/escrow` | `/escrow/split`, `/escrow/download`, `/escrow/recover`. |
+| `handlers/util` | Pure helpers — path validation, form parsing, HTML/JSON escape, header shortcuts, `error_to_response`. |
+| `handlers/response` | Response builders — `serve_with_range`, ingest / remove / mkdir / rmdir / rename → HTTP, stats + fingerprint → JSON. |
+
+Public API is preserved via `pub use handlers::foo` at the
+`handlers.rs` root, so `main.rs`'s existing
+`handlers::mkdir` / `handlers::spotlight_png` / etc. references
+resolve unchanged.
+
+Reliability primitives from § 1.2 (`supervised`, `timeout`,
+`backpressure`, `admin_auth`, `bootstrap`) are unaffected — they
+already lived in their own modules.
+
+**Rule of thumb.** New Leptos components go into `catalog_ui.rs`
+(catalog-related) or a fresh sibling module (page-scale like
+`/health`, `/search`, `/versions`). New axum handlers go into the
+domain module whose concern they extend
+(`handlers/dirops.rs` for a new mkdir variant, etc.). Nothing new
+should grow the top-level `lib.rs` or `handlers.rs` file.
 
 ---
 

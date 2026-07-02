@@ -7,7 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet; the slate is clean after the 0.6.0 cut._
+### Changed — Phase R2: holofs-web module decomposition
+
+- **`crates/holofs-web/src/lib.rs` shrunk from 2487 → 253 lines
+  (~90%).** The historical file (Leptos SSR components +
+  server_fns + filter + view-models all in one module) split
+  into four sibling modules:
+  - `catalog_types` — `CatalogEntry` view-model shared across
+    SSR + hydrate boundaries, plus SSR-only `from_manifest`.
+  - `filter` — Stage 11.17 catalog filter (`CatalogFilter`,
+    `apply_filter`, `compile_glob`, `parse_date_to_unix`,
+    `ymd_to_unix`) + seven unit tests.
+  - `server_fns` — the three `#[server]` functions
+    (`get_catalog`, `list_dir`, `list_dir_page`) + `ListDirPage`
+    + `TreeSort` + `compare_entries`.
+  - `catalog_ui` — the fifteen Leptos components
+    (`CatalogPage`, `CatalogFocusView`, `FilterBar`,
+    `TreeZoomButtons`, `Breadcrumb`, `CatalogTreeView` + eager /
+    lazy variants, `LazyLevel`, `LazyDirNode`,
+    `CatalogTreeBody`, `TreeNodeView`, `MkdirForm`, `UploadForm`,
+    `ObjectCard`).
+  What remains in `lib.rs`: module registry + crate-root
+  `pub use` re-exports + `Shell` / `App` / `RoutedApp` top-level
+  components + `url_encode` utility + WASM `hydrate` entry.
+
+- **`crates/holofs-web/src/handlers.rs` shrunk from 1857 → 64
+  lines (~96%).** Every axum handler moved into a domain
+  submodule under `handlers/`:
+  - `handlers/objects` — GET / PUT / DELETE `/*path`, preview,
+    streaming preview, `/api/shard/…`, wasm alias.
+  - `handlers/dirops` — mkdir, rmdir, rm, mv (JSON + form).
+  - `handlers/uploads` — multipart `/api/upload`.
+  - `handlers/versions` — `/api/restore`, `/api/versions/delete`.
+  - `handlers/analytics` — `/api/fingerprint/*`, `/api/mix.png`,
+    `/api/mix-save`, `/api/spotlight.png`.
+  - `handlers/search` — `/api/embed_all`, `/api/search`.
+  - `handlers/health` — `/api/stats`, `/metrics`, `/api/gc`,
+    `/admin/node`, `/api/health/events` SSE.
+  - `handlers/escrow` — `/escrow/{split,download,recover}`.
+  - `handlers/util` — pure helpers (form parsing, JSON escape,
+    path validation, `error_to_response`, header shortcuts).
+  - `handlers/response` — response builders (range serving,
+    ingest / remove / mkdir / rmdir / rename → HTTP, stats +
+    fingerprint → JSON).
+  Public API preserved via `pub use handlers::foo` re-exports.
+
+Together with the R1 gateway split (v0.6.0), no source file in
+the workspace should now materially exceed 500 lines — the
+"god-module" era is over. See `docs/architecture.md § 1.3` for
+the full module map and the "rule of thumb" for where new
+components / handlers belong.
 
 ## [0.6.0] - 2026-07-02
 
