@@ -100,6 +100,13 @@ impl NodeIdentity {
         self.signing.verifying_key().to_bytes()
     }
 
+    /// Raw 32-byte Ed25519 seed. Handled as key material — the caller
+    /// (currently only [`crate::crypto::derive_shard_key`]) is expected
+    /// to feed it into an HKDF and drop the copy quickly.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.signing.to_bytes()
+    }
+
     /// Sign `nonce` under the `holofs-auth-v1` domain prefix. This is the
     /// response to the handshake challenge.
     pub fn sign_challenge(&self, nonce: &Nonce) -> Sig {

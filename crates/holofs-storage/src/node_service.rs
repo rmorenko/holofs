@@ -42,7 +42,14 @@ use holofs_wire::{read_frame, write_frame, Request, Response};
 
 type Key = (u64, u8, u8);
 
-const SHARD_MAGIC: &[u8; 8] = b"HOLOFSS1";
+const SHARD_MAGIC_V1: &[u8; 8] = b"HOLOFSS1";
+/// v0.7: same file layout as v1 but the `coeffs || payload` blob is
+/// sealed with AES-256-GCM. See [`crate::crypto`] for the wire format.
+const SHARD_MAGIC_V2: &[u8; 8] = b"HOLOFSS2";
+/// Legacy alias kept for pre-v0.7 call sites (tests). New writers
+/// pick the magic based on the store's `enc_key` field.
+#[allow(dead_code)]
+const SHARD_MAGIC: &[u8; 8] = SHARD_MAGIC_V1;
 
 /// Store: for each (object_id, channel, layer) — `HashMap<shard_hash, Shard>`.
 /// Using the hash as the key gives O(1) dedup: a repeated PUT of the same
@@ -53,6 +60,12 @@ const SHARD_MAGIC: &[u8; 8] = b"HOLOFSS1";
 pub struct Store {
     shards: HashMap<Key, HashMap<Hash, Shard>>,
     dir: Option<PathBuf>,
+    /// v0.7: per-node AES-256-GCM key derived from
+    /// `NodeIdentity::to_bytes()` via HKDF-SHA256. `None` = plaintext
+    /// shard files on disk. Reads accept both formats regardless of
+    /// this field so upgrades roll gracefully. Writes pick the
+    /// format based on this being `Some(_)`.
+    enc_key: Option<[u8; crate::crypto::KEY_LEN]>,
 }
 
 impl Store {
@@ -65,11 +78,31 @@ impl Store {
     /// scans `dir` and rebuilds the index from existing files. `dir` is
     /// created if it does not exist.
     pub fn open(dir: impl AsRef<Path>) -> io::Result<Self> {
+        Self::open_inner(dir, None)
+    }
+
+    /// Persistent store with an AES-256-GCM key for at-rest encryption.
+    /// The key is what [`crate::crypto::derive_shard_key`] returns when
+    /// fed the node's [`crate::identity::NodeIdentity::to_bytes`] seed.
+    /// New writes land as `HOLOFSS2` sealed files; reads accept both
+    /// `HOLOFSS1` (legacy plaintext) and `HOLOFSS2` (sealed) transparently
+    /// so upgrades roll without a rewrite pass.
+    pub fn open_with_key(
+        dir: impl AsRef<Path>,
+        key: [u8; crate::crypto::KEY_LEN],
+    ) -> io::Result<Self> {
+        Self::open_inner(dir, Some(key))
+    }
+
+    fn open_inner(
+        dir: impl AsRef<Path>,
+        enc_key: Option<[u8; crate::crypto::KEY_LEN]>,
+    ) -> io::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
         let mut shards: HashMap<Key, HashMap<Hash, Shard>> = HashMap::new();
         for entry in walk_shard_files(&dir)? {
-            match read_shard_file(&entry) {
+            match read_shard_file(&entry, enc_key.as_ref()) {
                 Ok((k, h, shard)) => {
                     shards.entry(k).or_default().insert(h, shard);
                 }
@@ -81,6 +114,7 @@ impl Store {
         Ok(Store {
             shards,
             dir: Some(dir),
+            enc_key,
         })
     }
 
@@ -92,7 +126,7 @@ impl Store {
             return false;
         }
         if let Some(dir) = &self.dir {
-            if let Err(e) = write_shard_file(dir, k, &h, &shard) {
+            if let Err(e) = write_shard_file(dir, k, &h, &shard, self.enc_key.as_ref()) {
                 eprintln!("Store::put: could not write shard file: {e}");
                 return false;
             }
@@ -214,7 +248,13 @@ fn shard_path(dir: &Path, h: &Hash) -> PathBuf {
     dir.join(head).join(format!("{tail}.shard"))
 }
 
-fn write_shard_file(dir: &Path, k: Key, h: &Hash, shard: &Shard) -> io::Result<()> {
+fn write_shard_file(
+    dir: &Path,
+    k: Key,
+    h: &Hash,
+    shard: &Shard,
+    enc_key: Option<&[u8; crate::crypto::KEY_LEN]>,
+) -> io::Result<()> {
     let path = shard_path(dir, h);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -222,38 +262,98 @@ fn write_shard_file(dir: &Path, k: Key, h: &Hash, shard: &Shard) -> io::Result<(
     let tmp = path.with_extension("shard.tmp");
     {
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(SHARD_MAGIC)?;
-        f.write_all(&k.0.to_be_bytes())?;
-        f.write_all(&[k.1, k.2])?;
-        f.write_all(&(shard.coeffs.len() as u32).to_be_bytes())?;
-        f.write_all(&(shard.payload.len() as u32).to_be_bytes())?;
-        f.write_all(&shard.coeffs)?;
-        f.write_all(&shard.payload)?;
+        // Build the 26-byte header once. It's plaintext in either
+        // format and — when enc_key is set — feeds the AES-GCM AAD
+        // so any tamper with these bytes trips the tag on decrypt.
+        let mut header = [0u8; 26];
+        let magic = if enc_key.is_some() {
+            SHARD_MAGIC_V2
+        } else {
+            SHARD_MAGIC_V1
+        };
+        header[..8].copy_from_slice(magic);
+        header[8..16].copy_from_slice(&k.0.to_be_bytes());
+        header[16] = k.1;
+        header[17] = k.2;
+        header[18..22].copy_from_slice(&(shard.coeffs.len() as u32).to_be_bytes());
+        header[22..26].copy_from_slice(&(shard.payload.len() as u32).to_be_bytes());
+        f.write_all(&header)?;
+
+        // v1 = plaintext body; v2 = [nonce | ct+tag] under GCM with
+        // the header as AAD.
+        match enc_key {
+            None => {
+                f.write_all(&shard.coeffs)?;
+                f.write_all(&shard.payload)?;
+            }
+            Some(key) => {
+                let mut plaintext = Vec::with_capacity(shard.coeffs.len() + shard.payload.len());
+                plaintext.extend_from_slice(&shard.coeffs);
+                plaintext.extend_from_slice(&shard.payload);
+                let sealed = crate::crypto::encrypt(key, &header, &plaintext);
+                f.write_all(&sealed)?;
+            }
+        }
         f.sync_all()?;
     }
     fs::rename(&tmp, &path)?;
     Ok(())
 }
 
-fn read_shard_file(path: &Path) -> io::Result<(Key, Hash, Shard)> {
+fn read_shard_file(
+    path: &Path,
+    enc_key: Option<&[u8; crate::crypto::KEY_LEN]>,
+) -> io::Result<(Key, Hash, Shard)> {
     let mut f = fs::File::open(path)?;
-    let mut header = [0u8; 8 + 8 + 1 + 1 + 4 + 4];
+    let mut header = [0u8; 26];
     f.read_exact(&mut header)?;
-    if &header[..8] != SHARD_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "not a holofs shard file",
-        ));
-    }
+    let magic = &header[..8];
     let object_id = u64::from_be_bytes(header[8..16].try_into().unwrap());
     let channel = header[16];
     let layer = header[17];
     let coeffs_len = u32::from_be_bytes(header[18..22].try_into().unwrap()) as usize;
     let payload_len = u32::from_be_bytes(header[22..26].try_into().unwrap()) as usize;
-    let mut coeffs = vec![0u8; coeffs_len];
-    f.read_exact(&mut coeffs)?;
-    let mut payload = vec![0u8; payload_len];
-    f.read_exact(&mut payload)?;
+
+    let (coeffs, payload) = if magic == SHARD_MAGIC_V1 {
+        // Legacy plaintext file — enc_key is irrelevant.
+        let mut coeffs = vec![0u8; coeffs_len];
+        f.read_exact(&mut coeffs)?;
+        let mut payload = vec![0u8; payload_len];
+        f.read_exact(&mut payload)?;
+        (coeffs, payload)
+    } else if magic == SHARD_MAGIC_V2 {
+        // Sealed file — need the key or we can't recover the body.
+        let key = enc_key.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "shard file is sealed (HOLOFSS2) but no encryption key configured",
+            )
+        })?;
+        let mut sealed = Vec::new();
+        f.read_to_end(&mut sealed)?;
+        let plaintext = crate::crypto::decrypt(key, &header, &sealed).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("shard decrypt: {e}"))
+        })?;
+        if plaintext.len() != coeffs_len + payload_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "decrypted shard length mismatch: got {}, header wants {}+{}",
+                    plaintext.len(),
+                    coeffs_len,
+                    payload_len,
+                ),
+            ));
+        }
+        let (c_slice, p_slice) = plaintext.split_at(coeffs_len);
+        (c_slice.to_vec(), p_slice.to_vec())
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a holofs shard file (unknown magic)",
+        ));
+    };
+
     let shard = Shard { coeffs, payload };
     let h = shard_hash(&shard);
     Ok(((object_id, channel, layer), h, shard))
@@ -317,8 +417,22 @@ pub async fn spawn_node_persistent_with_tls(
     tls: Option<Arc<rustls::ServerConfig>>,
 ) -> io::Result<(SocketAddr, SharedStore, tokio::task::JoinHandle<()>)> {
     let dir = storage_dir.as_ref().to_path_buf();
-    let store = Store::open(&dir)?;
+    // v0.7: opt in to at-rest shard encryption via
+    // `HOLOFS_AT_REST_ENC=1`. Key material comes from the node's
+    // own identity seed — no new secret to manage. Reads accept
+    // both plaintext (v1) and sealed (v2) files, so nothing needs
+    // to move on a rolling upgrade.
     let identity = NodeIdentity::load_or_create(dir.join("identity.key"))?;
+    let at_rest_on = std::env::var("HOLOFS_AT_REST_ENC")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let store = if at_rest_on {
+        let key = crate::crypto::derive_shard_key(&identity.to_bytes());
+        Store::open_with_key(&dir, key)?
+    } else {
+        Store::open(&dir)?
+    };
     let h = spawn_node_with_identity(addr, store, identity, tls).await?;
     Ok((h.addr, h.store, h.task))
 }
@@ -643,6 +757,80 @@ mod tests {
         let set: std::collections::HashSet<_> = got.into_iter().collect();
         assert!(set.contains(&sh1) && set.contains(&sh2));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn encrypted_store_roundtrip_and_disk_ciphertext() {
+        // v0.7: writing under `open_with_key` yields HOLOFSS2 files.
+        // Reading them back reconstructs the shards; and inspecting
+        // the raw bytes confirms the payload is not plaintext.
+        let dir = tmpdir("enc-roundtrip");
+        let key = crate::crypto::derive_shard_key(&[0xEE; 32]);
+
+        // Round 1: sealed writes.
+        let mut s1 = Store::open_with_key(&dir, key).unwrap();
+        let sh = make_shard(0xAA);
+        assert!(s1.put((100, 1, 2), sh.clone()));
+        drop(s1);
+
+        // File exists and starts with the v0.7 magic.
+        let files = walk_shard_files(&dir).unwrap();
+        assert_eq!(files.len(), 1);
+        let raw = std::fs::read(&files[0]).unwrap();
+        assert_eq!(&raw[..8], b"HOLOFSS2");
+        // The plaintext payload bytes must NOT appear verbatim on disk.
+        assert!(
+            !raw.windows(sh.payload.len()).any(|w| w == sh.payload.as_slice()),
+            "encrypted file contains plaintext payload — GCM broken?"
+        );
+
+        // Round 2: opening WITH the right key must succeed.
+        let s2 = Store::open_with_key(&dir, key).unwrap();
+        assert_eq!(s2.total(), 1);
+        assert_eq!(s2.get((100, 1, 2)), vec![sh.clone()]);
+
+        // Round 3: opening WITHOUT a key sees the file but can't
+        // decrypt — it skips with an eprintln, so the index is empty.
+        let s3 = Store::open(&dir).unwrap();
+        assert_eq!(s3.total(), 0);
+
+        // Round 4: WRONG key also fails to decrypt.
+        let wrong_key = crate::crypto::derive_shard_key(&[0xDD; 32]);
+        let s4 = Store::open_with_key(&dir, wrong_key).unwrap();
+        assert_eq!(s4.total(), 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mixed_format_directory_reads_both_v1_and_v2() {
+        // A rolling upgrade leaves some legacy plaintext files
+        // alongside new sealed ones. `open_with_key` must accept
+        // both on read; only new writes go v2.
+        let dir = tmpdir("mixed");
+        let key = crate::crypto::derive_shard_key(&[0xEE; 32]);
+
+        // Seed a legacy (v1) file.
+        {
+            let mut s0 = Store::open(&dir).unwrap();
+            s0.put((1, 0, 0), make_shard(1));
+        }
+        // Open with key and add a sealed one.
+        {
+            let mut s1 = Store::open_with_key(&dir, key).unwrap();
+            s1.put((2, 0, 0), make_shard(2));
+        }
+        // Re-open with key: both must be visible.
+        let s2 = Store::open_with_key(&dir, key).unwrap();
+        assert_eq!(s2.total(), 2);
+        let all: std::collections::HashSet<_> = s2
+            .get((1, 0, 0))
+            .into_iter()
+            .chain(s2.get((2, 0, 0)))
+            .collect();
+        assert!(all.contains(&make_shard(1)));
+        assert!(all.contains(&make_shard(2)));
         std::fs::remove_dir_all(&dir).ok();
     }
 

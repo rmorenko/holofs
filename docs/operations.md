@@ -416,6 +416,43 @@ a typo in `medium_concurency` (missing 'r') fails loud at boot
 with the exact key name in the error. This is intentional; a
 silent fallback would defeat the purpose of the file.
 
+### 5.9. At-rest shard encryption (v0.7)
+
+Enable with `HOLOFS_AT_REST_ENC=1` (or `[security]
+at_rest_encryption = true` in the TOML). When on, every shard file
+written to disk is sealed with AES-256-GCM. The header stays in
+plaintext (so `Store::open` can still index without the key), but
+the coefficients + encoded chunk payload are ciphertext.
+
+**Key management.** The 32-byte AES key is derived at boot from the
+node's identity seed via HKDF-SHA256
+(`salt = "holofs-shard-salt-v1"`, `info = "holofs-shard-key-v1"`).
+No new secret to rotate — losing `identity.key` already loses the
+node's identity. The key stays in RAM for the process's lifetime;
+root on a running node can read plaintext through a legitimate
+audit path.
+
+**Wire format.** Two shard magics coexist:
+
+| Magic       | Meaning                                                     |
+|-------------|-------------------------------------------------------------|
+| `HOLOFSS1`  | Plaintext (pre-v0.7). Read by every version.                |
+| `HOLOFSS2`  | Sealed. `[8 B magic][18 B header][12 B nonce][ct+tag]`.     |
+
+The 18-byte header is AAD to the GCM tag, so any post-hoc header
+rewrite (object_id, channel, layer, lengths) invalidates the shard
+on decrypt. Reads sniff the first 8 bytes and dispatch — mixed v1
++ v2 directories are supported so enabling on an existing store
+seals only *new* writes. A full re-encryption pass is out of scope;
+the recommended migration is to spawn a fresh node with a fresh
+identity and let the auto-repair pass rebalance shards onto it.
+
+**Threat model.** In scope: an adversary snapshots the shard files
+off a powered-off node (backup leak, decommissioned disk, RAID
+rebuild left the old drive readable). Out of scope: root on a
+running node — once the derived key is in RAM,
+`read_shard_file` produces plaintext for legitimate audits.
+
 ---
 
 ## 6. Monitoring & alerting

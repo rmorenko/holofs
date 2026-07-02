@@ -88,3 +88,13 @@
 # `Authorization: Bearer <token>`.
 # token = "..."
 # token_file = "/etc/holofs/mcp.token"
+
+[security]
+# v0.7: at-rest shard encryption. When true, every shard file written
+# to disk is sealed with AES-256-GCM. The key is derived from the
+# node's identity seed (identity.key) via HKDF-SHA256 — no new secret
+# to manage. Reads accept both the pre-v0.7 plaintext format
+# (HOLOFSS1) and the sealed format (HOLOFSS2), so enabling on an
+# existing store just seals *new* writes; a full rewrite is out of
+# scope. Env var: HOLOFS_AT_REST_ENC.
+# at_rest_encryption = true

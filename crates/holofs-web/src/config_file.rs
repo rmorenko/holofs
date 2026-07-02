@@ -55,6 +55,8 @@ pub struct ConfigFile {
     pub admin: AdminSection,
     #[serde(default)]
     pub mcp: McpSection,
+    #[serde(default)]
+    pub security: SecuritySection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -132,6 +134,16 @@ pub struct AdminSection {
 pub struct McpSection {
     pub token: Option<String>,
     pub token_file: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecuritySection {
+    /// Seal shard payloads at rest with AES-256-GCM. Key is derived
+    /// from the node's identity via HKDF-SHA256. Off by default —
+    /// enabling on an existing store leaves old shards readable
+    /// (mixed v1/v2 format is supported) but new writes become v2.
+    pub at_rest_encryption: Option<bool>,
 }
 
 impl ConfigFile {
@@ -252,6 +264,9 @@ impl ConfigFile {
 
         // mcp
         set_if_missing("HOLOFS_MCP_TOKEN", mcp_token.as_deref());
+
+        // security
+        set_bool_if_missing("HOLOFS_AT_REST_ENC", self.security.at_rest_encryption);
     }
 }
 

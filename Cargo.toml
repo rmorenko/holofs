@@ -63,6 +63,12 @@ symphonia = { version = "0.5", default-features = false, features = ["wav", "mp3
 # Crypto
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+# v0.7 at-rest shard encryption. AES-256-GCM, HKDF-SHA256 for
+# derivation from NodeIdentity's seed. Default-features off keeps
+# the sha2 pull minimal (no asm).
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+hkdf = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
 # Stage 6: rustls TLS on the wire protocol. tokio-rustls 0.26 lines up with
 # the rustls 0.23 line; rcgen self-signs the embedded-mode CA. Stage 8
 # dropped the unmaintained rustls-pemfile in favour of the PEM parser
