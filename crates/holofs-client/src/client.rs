@@ -17,7 +17,8 @@ use holofs_core::rlnc::{decode_layer, decode_layer_with_holes, encode_layer, Sha
 use holofs_core::rng::Rng;
 use holofs_core::transform::{haar_forward, haar_inverse};
 use holofs_core::transform::{haar_forward_1d, haar_inverse_1d};
-use holofs_model::manifest::Manifest;
+use holofs_model::manifest::{Manifest, ObjectEncoding};
+use holofs_model::placement::{place_replicas, ShardKey};
 use holofs_storage::identity::{fresh_nonce, verify_challenge, PubKey};
 use holofs_wire::{read_frame, write_frame, Request, Response};
 
@@ -264,6 +265,140 @@ pub async fn put_object(
     Ok(())
 }
 
+/// Stage 15.1: per-block replicated encoder.
+///
+/// For each `(channel, layer)`, groups the layer's DWT coefficients
+/// into contiguous blocks of `block_size` coefficients (last block
+/// short as needed), replicates each block to `replication` cluster
+/// nodes chosen by HRW, and dispatches them via
+/// [`Request::PutBatch`] — one batch per `(channel, layer, node)`.
+///
+/// Manifest mutations (mirroring [`put_object`]): `data_cid`,
+/// `object_id`, `merkle_root`, and `shard_hashes` land in the
+/// manifest. Additionally this function sets:
+///
+///   * `n_per_layer[l] = ceil(layer_positions[l].len() / block_size)`
+///     — number of blocks in the layer.
+///   * `sym_len[l] = block_size * 4` — bytes per full block payload
+///     (last block may be shorter but the manifest carries the max).
+///   * `encoding = ObjectEncoding::Replicated { replication,
+///     block_size }`.
+///
+/// Sizing rule: total shards dispatched per PUT ≈
+/// `channels × (Σ layer_lengths / block_size) × replication`.
+/// Pick `block_size` conservatively — 64 for a 512×512 RGB image
+/// yields ~36 k shards, well within the disk store's budget, while
+/// still keeping the smallest ROI (single 8×8 tile) at ≤4 blocks
+/// per touched layer.
+pub async fn put_object_replicated_blocks(
+    manifest: &mut Manifest,
+    live: &LiveNodes,
+    channels: &[Vec<f32>],
+    block_size: u32,
+    replication: u8,
+) -> Result<(), ClientError> {
+    assert!(block_size >= 1, "block_size must be >= 1");
+    assert!(replication >= 1, "replication must be >= 1");
+    let w = manifest.width as usize;
+    let h = manifest.height as usize;
+    let levels = manifest.levels as usize;
+    let nlayers = manifest.nlayers as usize;
+    let ch = manifest.channels as usize;
+
+    // 1. Deterministic object identity — same as put_object.
+    let cid = data_cid(channels, w, h, manifest.levels, manifest.k);
+    manifest.data_cid = cid;
+    manifest.object_id = u64::from_be_bytes(cid[0..8].try_into().unwrap());
+
+    // 2. Set the encoding-driven manifest fields *before* the encode
+    //    loop so we can index into `n_per_layer` uniformly.
+    let bs = block_size as usize;
+    let mut n_per_layer: Vec<u32> = Vec::with_capacity(nlayers);
+    for l in 0..nlayers {
+        let n = manifest.layer_positions[l].len();
+        n_per_layer.push(n.div_ceil(bs) as u32);
+    }
+    manifest.n_per_layer = n_per_layer;
+    manifest.sym_len = vec![block_size * 4; nlayers];
+    manifest.encoding = ObjectEncoding::Replicated {
+        replication,
+        block_size,
+    };
+
+    // 3. Encode each channel, group per-(c, l, node) shard sets so
+    //    every node receives one PutBatch per (c, l) — RPC count is
+    //    channels * nlayers * min(replication, live.len()).
+    let mut shard_hashes: Vec<Vec<Vec<Hash>>> = vec![vec![Vec::new(); nlayers]; ch];
+    let mut leaves_flat: Vec<Hash> = Vec::new();
+
+    for c in 0..ch {
+        let mut plane = channels[c].clone();
+        haar_forward(&mut plane, w, h, levels);
+        for l in 0..nlayers {
+            let positions = &manifest.layer_positions[l];
+            let n_blocks = manifest.n_per_layer[l] as usize;
+            // Build shards + placements first.
+            // batches[node] -> Vec<Shard> to send to that node.
+            let mut batches: std::collections::HashMap<usize, Vec<Shard>> =
+                std::collections::HashMap::new();
+            let mut layer_hashes: Vec<Hash> = Vec::with_capacity(n_blocks);
+            for b in 0..n_blocks {
+                let start = b * bs;
+                let end = (start + bs).min(positions.len());
+                let mut payload = Vec::with_capacity((end - start) * 4);
+                for &p in &positions[start..end] {
+                    payload.extend_from_slice(&plane[p as usize].to_le_bytes());
+                }
+                // Replicated shards carry no RLNC coefficient
+                // vector — the payload IS the block's bytes and
+                // every replica is byte-identical.
+                let shard = Shard {
+                    coeffs: Vec::new(),
+                    payload,
+                };
+                let h = shard_hash(&shard);
+                layer_hashes.push(h);
+                leaves_flat.push(h);
+                let key = ShardKey {
+                    object_id: manifest.object_id,
+                    channel: c as u8,
+                    layer: l as u8,
+                    shard_idx: b as u32,
+                };
+                for node in place_replicas(key, replication, live)? {
+                    batches.entry(node).or_default().push(shard.clone());
+                }
+            }
+            shard_hashes[c][l] = layer_hashes;
+
+            // Dispatch one PutBatch per node covering all blocks
+            // this node holds for (c, l).
+            for (node, shards) in batches {
+                let req = Request::PutBatch {
+                    object_id: manifest.object_id,
+                    channel: c as u8,
+                    layer: l as u8,
+                    shards,
+                };
+                match rpc(&manifest.nodes[node], req).await? {
+                    Response::Ack => {}
+                    Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
+                    other => {
+                        return Err(ClientError::UnexpectedResponse {
+                            expected: "Ack from PutBatch",
+                            got: format!("{other:?}"),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    manifest.shard_hashes = shard_hashes;
+    manifest.merkle_root = merkle_root(&leaves_flat);
+    Ok(())
+}
+
 // === Gather and decode =====================================================
 
 /// Progressive read: decode only layers `0..=max_layer`; anything above stays
@@ -498,6 +633,136 @@ pub async fn get_object(
         out[c] = plane;
     }
     Ok(out)
+}
+
+/// Stage 15.1 companion to [`get_object_up_to_layer`]: fetches only
+/// the specific block ids requested per layer instead of the whole
+/// layer, then places those blocks' coefficients into the DWT plane
+/// (leaving un-fetched positions at zero) and runs inverse-Haar.
+///
+/// `layer_block_ids[l]` lists which block ids to fetch for layer
+/// `l`; an empty vec means "skip this layer entirely" (its plane
+/// coefficients stay zero, the same as `get_object_up_to_layer` for
+/// layers above `max_layer`).
+///
+/// Bandwidth = sum of downloaded payload bytes across all fetched
+/// blocks — the bandwidth-aware `/spotlight` numerator. Each block
+/// contributes `block_size * 4` bytes (or less for the final short
+/// block in a layer).
+///
+/// Fetch strategy: one `Request::Audit` per (channel, block) against
+/// the first replica by HRW; falls back to the next replica on RPC
+/// error / hash-mismatch / not-found. Returns `LayerLost` when every
+/// replica fails for at least one requested block — that's a
+/// data-loss signal for the caller.
+pub async fn get_object_blocks(
+    manifest: &Manifest,
+    live: &LiveNodes,
+    layer_block_ids: &[Vec<u32>],
+) -> Result<(Vec<Vec<f32>>, u64), ClientError> {
+    let w = manifest.width as usize;
+    let h = manifest.height as usize;
+    let levels = manifest.levels as usize;
+    let nlayers = manifest.nlayers as usize;
+    let (replication, block_size) = match manifest.encoding {
+        ObjectEncoding::Replicated {
+            replication,
+            block_size,
+        } => (replication, block_size as usize),
+        ObjectEncoding::Rlnc => {
+            return Err(ClientError::Incompatible(
+                "get_object_blocks called on an Rlnc-encoded object; \
+                 use get_object_up_to_layer / get_object_with_coeff_mask instead"
+                    .into(),
+            ))
+        }
+    };
+    assert_eq!(
+        layer_block_ids.len(),
+        nlayers,
+        "layer_block_ids must have one entry per layer"
+    );
+    let mut out = vec![vec![0f32; w * h]; manifest.channels as usize];
+    let mut bytes_used: u64 = 0;
+
+    for c in 0..manifest.channels as usize {
+        let mut plane = vec![0f32; w * h];
+        for l in 0..nlayers {
+            let ids = &layer_block_ids[l];
+            if ids.is_empty() {
+                continue;
+            }
+            let positions = &manifest.layer_positions[l];
+            for &b in ids {
+                let expected_hash = *manifest.shard_hashes[c][l]
+                    .get(b as usize)
+                    .ok_or(ClientError::LayerLost {
+                        channel: c as u8,
+                        layer: l as u8,
+                    })?;
+                let key = ShardKey {
+                    object_id: manifest.object_id,
+                    channel: c as u8,
+                    layer: l as u8,
+                    shard_idx: b,
+                };
+                let replicas = place_replicas(key, replication, live)?;
+                // Walk replicas in HRW order — first hit wins.
+                let mut fetched: Option<Shard> = None;
+                for node in &replicas {
+                    let req = Request::Audit {
+                        object_id: manifest.object_id,
+                        channel: c as u8,
+                        layer: l as u8,
+                        shard_hash: expected_hash,
+                    };
+                    match rpc(&manifest.nodes[*node], req).await {
+                        Ok(Response::AuditResp { shard: Some(s) })
+                            if shard_hash(&s) == expected_hash =>
+                        {
+                            fetched = Some(s);
+                            break;
+                        }
+                        Ok(_) => continue,
+                        Err(_) => continue,
+                    }
+                }
+                let shard = fetched.ok_or(ClientError::LayerLost {
+                    channel: c as u8,
+                    layer: l as u8,
+                })?;
+                bytes_used += shard.payload.len() as u64;
+                // Scatter payload bytes → coefficients → plane
+                // positions. Block b spans positions
+                // [b*bs .. (b+1)*bs], truncated by the layer end.
+                let start = (b as usize) * block_size;
+                let end = (start + block_size).min(positions.len());
+                if shard.payload.len() != (end - start) * 4 {
+                    return Err(ClientError::UnexpectedResponse {
+                        expected: "block payload size = (end-start)*4",
+                        got: format!(
+                            "block {b} in layer {l}: payload len {} != expected {}",
+                            shard.payload.len(),
+                            (end - start) * 4
+                        ),
+                    });
+                }
+                for (i, &p) in positions[start..end].iter().enumerate() {
+                    let off = i * 4;
+                    let arr = [
+                        shard.payload[off],
+                        shard.payload[off + 1],
+                        shard.payload[off + 2],
+                        shard.payload[off + 3],
+                    ];
+                    plane[p as usize] = f32::from_le_bytes(arr);
+                }
+            }
+        }
+        haar_inverse(&mut plane, w, h, levels);
+        out[c] = plane;
+    }
+    Ok((out, bytes_used))
 }
 
 // === Stage 8: text path ====================================================

@@ -4,9 +4,10 @@
 use std::net::Ipv4Addr;
 
 use holofs_client::{
-    auth_check, discover_live, discover_live_with_whitelist, gather_layer, get_object, put_object,
-    repair_node,
+    auth_check, discover_live, discover_live_with_whitelist, gather_layer, get_object,
+    get_object_blocks, put_object, put_object_replicated_blocks, repair_node,
 };
+use holofs_core::transform::roi_to_block_ids_with_stride;
 use holofs_cluster::audit::{audit_shard, AuditOutcome};
 use holofs_cluster::rebalance::add_node;
 use holofs_cluster::reputation::Reputation;
@@ -160,6 +161,113 @@ async fn put_then_get_roundtrip_exact() {
     let recon = get_object(&gf, &manifest, &live).await.unwrap();
     let p = psnr(&channels, &recon);
     assert!(p > 80.0, "PSNR should be high, got {p:.1} dB");
+}
+
+#[tokio::test]
+async fn put_replicated_blocks_full_roundtrip_is_exact() {
+    // Stage 15.1: put_object_replicated_blocks → get_object_blocks
+    // with every block requested must reconstruct the original
+    // bit-exact (no RLNC randomness, no linear-combination lossy
+    // reduction — a block IS its raw f32 payload).
+    let (addrs, _stores) = spawn_cluster(N_NODES).await;
+    let mut manifest = build_manifest(addrs);
+    let channels = synth_channels();
+    let live = discover_live(&manifest).await;
+    assert_eq!(live.len(), N_NODES);
+
+    let block_size: u32 = 8;
+    let replication: u8 = 3;
+    put_object_replicated_blocks(&mut manifest, &live, &channels, block_size, replication)
+        .await
+        .unwrap();
+    // Manifest side effects match the RLNC path where they overlap.
+    assert_ne!(manifest.data_cid, [0; 32]);
+    assert_ne!(manifest.merkle_root, [0; 32]);
+    assert_ne!(manifest.object_id, 0);
+    assert!(matches!(
+        manifest.encoding,
+        holofs_model::manifest::ObjectEncoding::Replicated { replication: 3, block_size: 8 }
+    ));
+    // Block count matches ceil(positions / block_size).
+    for l in 0..NLAYERS {
+        let expected = manifest.layer_positions[l].len().div_ceil(block_size as usize) as u32;
+        assert_eq!(manifest.n_per_layer[l], expected);
+        // shard_hashes populated per channel.
+        for c in 0..manifest.channels as usize {
+            assert_eq!(manifest.shard_hashes[c][l].len(), expected as usize);
+        }
+    }
+
+    // Ask for every block.
+    let all_ids: Vec<Vec<u32>> = manifest
+        .n_per_layer
+        .iter()
+        .map(|&n| (0..n).collect())
+        .collect();
+    let (recon, bytes) = get_object_blocks(&manifest, &live, &all_ids).await.unwrap();
+    // Bytes downloaded = per-channel Σ layer_positions * 4 (every
+    // coefficient is fetched exactly once from one replica).
+    let expected_bytes: u64 = manifest.channels as u64
+        * manifest
+            .layer_positions
+            .iter()
+            .map(|p| p.len() as u64 * 4)
+            .sum::<u64>();
+    assert_eq!(bytes, expected_bytes);
+    // Bit-exact reconstruction — Haar is invertible, block payloads
+    // are the raw f32 coefficients.
+    let p = psnr(&channels, &recon);
+    assert!(p > 90.0, "block roundtrip PSNR should be near-perfect, got {p:.1} dB");
+}
+
+#[tokio::test]
+async fn get_object_blocks_roi_saves_bandwidth() {
+    // Stage 15.1 marquee property: a corner ROI fetches strictly
+    // fewer bytes than the full image, and reconstructs the
+    // interior of the ROI correctly (positions outside the touched
+    // set stay at their zero-decoded value → after inverse-Haar
+    // spread across the image but concentrated on the ROI).
+    let (addrs, _stores) = spawn_cluster(N_NODES).await;
+    let mut manifest = build_manifest(addrs);
+    let channels = synth_channels();
+    let live = discover_live(&manifest).await;
+
+    let block_size: u32 = 4;
+    put_object_replicated_blocks(&mut manifest, &live, &channels, block_size, 3)
+        .await
+        .unwrap();
+
+    // Corner ROI: top-left 8×8 tile.
+    let roi = (0usize, 0usize, 8usize, 8usize);
+    let ids = roi_to_block_ids_with_stride(
+        roi.0,
+        roi.1,
+        roi.2,
+        roi.3,
+        W,
+        H,
+        &manifest.layer_positions,
+        block_size as usize,
+    );
+    let roi_block_total: usize = ids.iter().map(|v| v.len()).sum();
+    let full_block_total: usize =
+        manifest.n_per_layer.iter().map(|&n| n as usize).sum();
+    assert!(
+        roi_block_total < full_block_total,
+        "ROI blocks ({roi_block_total}) must be < full blocks ({full_block_total})"
+    );
+
+    let (_recon_roi, bytes_roi) = get_object_blocks(&manifest, &live, &ids).await.unwrap();
+    let all_ids: Vec<Vec<u32>> = manifest
+        .n_per_layer
+        .iter()
+        .map(|&n| (0..n).collect())
+        .collect();
+    let (_recon_full, bytes_full) = get_object_blocks(&manifest, &live, &all_ids).await.unwrap();
+    assert!(
+        bytes_roi < bytes_full,
+        "ROI bytes {bytes_roi} must be < full bytes {bytes_full}"
+    );
 }
 
 #[tokio::test]

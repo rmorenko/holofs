@@ -155,6 +155,40 @@ pub fn place_layer_zone_aware(
     Ok(out)
 }
 
+/// Stage 15.1 replicated encoding: pick the top-`replication` nodes
+/// for a given block by HRW score, in descending order (highest
+/// score first). Zone-aware placement is deliberately NOT applied
+/// here — replication already spreads a block across R nodes and
+/// forcing zone diversity on top of that would double the fault
+/// budget per block. Callers that want zone-aware replicas can
+/// layer that on top by picking the first R distinct-zone entries
+/// from `sort_nodes_by_hrw` output.
+///
+/// Returns [`NoLiveNodes`] when `live_nodes` is empty. Truncates
+/// silently when `live_nodes.len() < replication` — the placement is
+/// best-effort, matching how RLNC's `place` handles under-provisioned
+/// clusters.
+pub fn place_replicas(
+    key: ShardKey,
+    replication: u8,
+    live_nodes: &[usize],
+) -> Result<Vec<usize>, NoLiveNodes> {
+    if live_nodes.is_empty() {
+        return Err(NoLiveNodes);
+    }
+    let mut scored: Vec<(u64, usize)> = live_nodes
+        .iter()
+        .map(|&n| (rendezvous_hash(key, n), n))
+        .collect();
+    // Descending HRW — same convention as `place`.
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(scored
+        .into_iter()
+        .take(replication as usize)
+        .map(|(_, n)| n)
+        .collect())
+}
+
 fn rendezvous_hash(key: ShardKey, node: usize) -> u64 {
     let mut h = mix64(key.object_id);
     h ^= mix64((node as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
@@ -363,5 +397,55 @@ mod tests {
         let empty: Vec<usize> = Vec::new();
         let r = place_layer_zone_aware(0x1234, 0, 0, 8, 16, &empty, &zones);
         assert!(matches!(r, Err(NoLiveNodes)));
+    }
+
+    #[test]
+    fn place_replicas_returns_r_distinct_nodes() {
+        let live: Vec<usize> = (0..8).collect();
+        let out = place_replicas(key(42), 3, &live).unwrap();
+        assert_eq!(out.len(), 3);
+        // All distinct.
+        let mut sorted = out.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 3);
+    }
+
+    #[test]
+    fn place_replicas_is_deterministic() {
+        let live: Vec<usize> = (0..8).collect();
+        for i in 0..64 {
+            let a = place_replicas(key(i), 3, &live).unwrap();
+            let b = place_replicas(key(i), 3, &live).unwrap();
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn place_replicas_truncates_when_live_smaller_than_r() {
+        let live: Vec<usize> = vec![1, 5];
+        let out = place_replicas(key(7), 3, &live).unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|n| live.contains(n)));
+    }
+
+    #[test]
+    fn place_replicas_first_matches_place_rendezvous() {
+        // Top-1 replica set must equal the single Rendezvous pick.
+        let live: Vec<usize> = (0..8).collect();
+        for i in 0..64 {
+            let solo = place(Placement::Rendezvous, key(i), 8, &live).unwrap();
+            let rep = place_replicas(key(i), 1, &live).unwrap();
+            assert_eq!(vec![solo], rep);
+        }
+    }
+
+    #[test]
+    fn place_replicas_returns_error_on_empty_live() {
+        let empty: Vec<usize> = Vec::new();
+        assert!(matches!(
+            place_replicas(key(0), 3, &empty),
+            Err(NoLiveNodes)
+        ));
     }
 }
