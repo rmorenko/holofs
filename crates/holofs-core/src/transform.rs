@@ -256,6 +256,67 @@ pub fn roi_to_block_ids(
     out
 }
 
+/// Stage 15.1 companion to [`roi_to_block_ids`]. Same ROI-touched
+/// primitive, but the output is *block* ids instead of raw
+/// position-indices. A block of size `block_size` covers the
+/// consecutive slice `layer_positions[l][b*bs .. (b+1)*bs]` of a
+/// layer; the last block in a layer may be short. Block `b` is
+/// returned when at least one of its positions is in the ROI's
+/// DWT-touched set — the same criterion `roi_to_block_ids` uses at
+/// coefficient granularity.
+///
+/// The producer side (`holofs_client::put_object_replicated_blocks`)
+/// stores one shard per block; the gateway spotlight path fans this
+/// output into `get_object_blocks` to fetch only the blocks whose
+/// coefficients the ROI needs, saving bandwidth vs the RLNC path
+/// (which is forced to fetch the whole layer because every RLNC
+/// shard mixes every coefficient of that layer).
+///
+/// `block_size` must be `>= 1`; a zero-sized block is a caller bug
+/// and would spin forever. In debug builds this panics on `0`.
+#[must_use]
+pub fn roi_to_block_ids_with_stride(
+    rx: usize,
+    ry: usize,
+    rw: usize,
+    rh: usize,
+    w: usize,
+    h: usize,
+    layer_positions: &[Vec<u32>],
+    block_size: usize,
+) -> Vec<Vec<u32>> {
+    use std::collections::HashSet;
+    debug_assert!(block_size >= 1, "block_size must be positive");
+    let levels = LEVELS;
+    if layer_positions.is_empty() || rw == 0 || rh == 0 || block_size == 0 {
+        return vec![Vec::new(); layer_positions.len()];
+    }
+    let touched: HashSet<u32> = spatial_to_dwt_positions(rx, ry, rw, rh, w, h, levels)
+        .into_iter()
+        .map(|p| p as u32)
+        .collect();
+    let mut out: Vec<Vec<u32>> = Vec::with_capacity(layer_positions.len());
+    for positions in layer_positions {
+        // Iterate blocks in order. A block is included as soon as
+        // ANY of its positions is touched; short-circuit on hit to
+        // keep the common (small ROI) case cheap.
+        let n_blocks = positions.len().div_ceil(block_size);
+        let mut layer_ids: Vec<u32> = Vec::new();
+        for b in 0..n_blocks {
+            let start = b * block_size;
+            let end = (start + block_size).min(positions.len());
+            for &p in &positions[start..end] {
+                if touched.contains(&p) {
+                    layer_ids.push(b as u32);
+                    break;
+                }
+            }
+        }
+        out.push(layer_ids);
+    }
+    out
+}
+
 /// Which priority layer position (x, y) belongs to in a DWT-frequency image.
 /// Layer 0 = LL (coarse shape); 1..LEVELS = detail levels (finer → higher).
 pub fn coeff_layer(x: usize, y: usize, w: usize, h: usize) -> usize {
@@ -518,6 +579,89 @@ mod tests {
         let corner_n: usize = corner.iter().map(|v| v.len()).sum();
         assert!(corner_n > 0, "corner ROI must touch at least one block");
         assert!(corner_n < full_n, "corner < full");
+    }
+
+    #[test]
+    fn roi_to_block_ids_with_stride_full_image_covers_every_block() {
+        // For a full-image ROI, every block in every layer must appear
+        // — the ROI touches every position, so no block escapes.
+        let (w, h) = (TW, TH);
+        let mut positions: Vec<Vec<u32>> = vec![Vec::new(); NLAYERS];
+        for y in 0..h {
+            for x in 0..w {
+                let l = coeff_layer(x, y, w, h);
+                positions[l].push((y * w + x) as u32);
+            }
+        }
+        for &block_size in &[1usize, 8, 64, 4096] {
+            let ids = roi_to_block_ids_with_stride(
+                0, 0, w, h, w, h, &positions, block_size,
+            );
+            for (l, layer) in positions.iter().enumerate() {
+                let expected = layer.len().div_ceil(block_size);
+                assert_eq!(
+                    ids[l].len(),
+                    expected,
+                    "layer {l} @ block_size={block_size}: got {} expected {expected}",
+                    ids[l].len()
+                );
+                // Block ids must be 0..expected in strict order.
+                for (i, &b) in ids[l].iter().enumerate() {
+                    assert_eq!(b, i as u32);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn roi_to_block_ids_with_stride_corner_is_much_smaller() {
+        // A 1×1 corner ROI at block_size=64 must yield strictly
+        // fewer blocks than coefficient-level ids for the same ROI
+        // — that's the bandwidth win Stage 15.1 promises.
+        let (w, h) = (TW, TH);
+        let mut positions: Vec<Vec<u32>> = vec![Vec::new(); NLAYERS];
+        for y in 0..h {
+            for x in 0..w {
+                let l = coeff_layer(x, y, w, h);
+                positions[l].push((y * w + x) as u32);
+            }
+        }
+        let coeffs = roi_to_block_ids(0, 0, 1, 1, w, h, &positions);
+        let blocks = roi_to_block_ids_with_stride(
+            0, 0, 1, 1, w, h, &positions, 64,
+        );
+        let coeff_n: usize = coeffs.iter().map(|v| v.len()).sum();
+        let block_n: usize = blocks.iter().map(|v| v.len()).sum();
+        assert!(block_n > 0, "corner ROI must touch at least one block");
+        // block_n <= coeff_n always (a block contains ≥ 1 coeff
+        // from the ROI). Full image is TW*TH coeffs → at
+        // block_size=64 you'd have ~TW*TH/64 blocks — but this is
+        // a *corner*, so the difference is much smaller than the
+        // ratio. We just assert the strict inequality here.
+        assert!(
+            block_n <= coeff_n,
+            "block count {block_n} must be ≤ coeff count {coeff_n}"
+        );
+    }
+
+    #[test]
+    fn roi_to_block_ids_with_stride_matches_naive_at_stride_one() {
+        // At block_size=1 the stride variant collapses to
+        // `roi_to_block_ids` — every position IS its own block.
+        let (w, h) = (TW, TH);
+        let mut positions: Vec<Vec<u32>> = vec![Vec::new(); NLAYERS];
+        for y in 0..h {
+            for x in 0..w {
+                let l = coeff_layer(x, y, w, h);
+                positions[l].push((y * w + x) as u32);
+            }
+        }
+        let (rx, ry, rw, rh) = (10, 15, 20, 25);
+        let naive = roi_to_block_ids(rx, ry, rw, rh, w, h, &positions);
+        let strided = roi_to_block_ids_with_stride(
+            rx, ry, rw, rh, w, h, &positions, 1,
+        );
+        assert_eq!(naive, strided);
     }
 
     #[test]

@@ -39,37 +39,41 @@ pub enum ObjectKind {
     Directory,
 }
 
-/// Stage 15.0: how an object's per-(channel, layer) shards are laid out.
+/// Stage 15.0/.1: how an object's per-(channel, layer) shards are
+/// laid out.
 ///
 /// `Rlnc` (the historical default) packs each layer's coefficients into
 /// `K` source chunks and emits `n_per_layer[l]` linear combinations —
 /// fault-tolerant but opaque to ROI fetches because every shard mixes
 /// every coefficient.
 ///
-/// `Replicated { replication }` is **scaffolding for Stage 15.1**: the
-/// discriminant byte is locked in the on-wire HOLOFSM9 schema so that
-/// when we ship a real per-block encoding we don't have to bump magic
-/// again. There's no producer yet — the first cut shipped as v1
-/// ("one shard per coefficient") didn't survive smoke-testing on a
-/// 512×512 image (~786 k file writes per PUT, server pinned at 99%
-/// CPU). Future Stage 15.1 will add a `block_size` parameter to keep
-/// the cluster-side workload sane.
+/// `Replicated { replication, block_size }` ships in Stage 15.1: each
+/// layer's coefficients are grouped into `block_size`-wide blocks and
+/// each block is replicated to `replication` cluster nodes. Payload
+/// per shard is `block_size * 4` bytes (raw `f32` coefficients).
+/// Because a block is a contiguous slice of `layer_positions`, the
+/// gateway can ask for exactly the blocks that overlap a ROI —
+/// bandwidth-aware `/spotlight` is the marquee use case.
 ///
-/// **Invariant:** any manifest produced in this codebase today has
-/// `encoding == Rlnc`. Decoding a `Replicated` variant is supported so
-/// future producers stay forward-compatible.
+/// **Sizing rule of thumb (worth the same 5-second sanity-check the
+/// Stage 15.0 rollback taught us):** total shards per PUT ≈
+/// `channels × (Σ layer_lengths / block_size) × replication`. A
+/// 512×512 RGB image at `block_size=64, replication=3` hits ≈ 36 k
+/// shards — comfortable for the disk-backed store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectEncoding {
     /// Default. Each layer's K chunks fan into n_per_layer[l] RLNC
     /// shards. `shard_hashes[c][l]` length matches `n_per_layer[l]`.
     Rlnc,
-    /// Reserved for Stage 15.1 (per-block replicated encoding). Not
-    /// produced yet — see the type doc-comment for the scope-shift
-    /// rationale. Decode path stays so the wire format is locked.
+    /// Stage 15.1 per-block replicated encoding. See the type doc.
     Replicated {
-        /// How many cluster nodes will hold each block once the
-        /// producer ships.
+        /// How many cluster nodes hold each block. Also the
+        /// per-block fault-tolerance budget: `replication - 1`
+        /// nodes may drop a block before it's unrecoverable.
         replication: u8,
+        /// Block width in coefficients. Payload of one shard =
+        /// `block_size * 4` bytes.
+        block_size: u32,
     },
 }
 
@@ -329,12 +333,16 @@ impl Manifest {
         // === Stage 11.12: creation timestamp ==================================
         b.extend_from_slice(&self.created_at_unix.to_be_bytes());
 
-        // === Stage 15.0: encoding selector ====================================
+        // === Stage 15.0/.1: encoding selector =================================
         b.push(self.encoding.tag());
         match self.encoding {
             ObjectEncoding::Rlnc => {}
-            ObjectEncoding::Replicated { replication } => {
+            ObjectEncoding::Replicated {
+                replication,
+                block_size,
+            } => {
                 b.push(replication);
+                b.extend_from_slice(&block_size.to_be_bytes());
             }
         }
         b
@@ -460,14 +468,22 @@ impl Manifest {
         } else {
             0
         };
-        // Stage 15.0: trailing encoding selector. Only present in
-        // HOLOFSM9; everything older defaults to `Rlnc`.
+        // Stage 15.0/.1: trailing encoding selector. Only present in
+        // HOLOFSM9; everything older defaults to `Rlnc`. The
+        // Replicated tail grew a `block_size: u32` in Stage 15.1
+        // without a magic bump — the invariant carried over from
+        // 15.0 that no `Replicated` manifest was ever persisted
+        // means there's no backwards-compat load-path to preserve.
         let encoding = if is_current {
             match c.u8()? {
                 0 => ObjectEncoding::Rlnc,
                 1 => {
                     let replication = c.u8()?;
-                    ObjectEncoding::Replicated { replication }
+                    let block_size = c.u32()?;
+                    ObjectEncoding::Replicated {
+                        replication,
+                        block_size,
+                    }
                 }
                 other => {
                     return Err(io::Error::new(
@@ -683,6 +699,29 @@ mod tests {
         let back = Manifest::decode(&bytes).unwrap();
         assert_eq!(back.created_at_unix, 0);
         assert_eq!(back.kind, ObjectKind::Directory);
+    }
+
+    #[test]
+    fn replicated_encoding_roundtrips_block_size() {
+        // Stage 15.1: Replicated tail now carries block_size after
+        // replication. Build a small manifest with a Replicated
+        // encoding, roundtrip through encode/decode, verify both
+        // fields survive.
+        let mut m = Manifest::directory(0xC01D, 1_700_000_000);
+        // `directory` starts as Rlnc; swap the field directly.
+        m.encoding = ObjectEncoding::Replicated {
+            replication: 3,
+            block_size: 64,
+        };
+        let bytes = m.encode();
+        let back = Manifest::decode(&bytes).unwrap();
+        assert_eq!(
+            back.encoding,
+            ObjectEncoding::Replicated {
+                replication: 3,
+                block_size: 64,
+            }
+        );
     }
 
     #[test]
