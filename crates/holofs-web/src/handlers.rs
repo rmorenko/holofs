@@ -17,22 +17,15 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Extension, Path};
+use axum::extract::{Extension, Multipart, Path};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
-
-use crate::range::{parse_range, ByteRange, RangeOutcome};
-
-use axum::extract::Multipart;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use futures_util::stream::Stream;
 use std::convert::Infallible;
 use std::time::Duration;
 
-use holofs_gateway::{
-    ApiStats, DecodedObject, FingerprintInfo, Gateway, GatewayError, IngestResult, KindCounts,
-    MkdirResult, RemoveResult, RenameResult, RmdirResult,
-};
+use holofs_gateway::{FingerprintInfo, Gateway, GatewayError};
 use holofs_model::manifest::ObjectKind;
 
 use crate::health::HealthSnapshot;
@@ -43,6 +36,23 @@ use crate::health::HealthSnapshot;
 // / `handlers::escrow_recover` paths resolving in main.rs.
 mod escrow;
 pub use escrow::{escrow_download, escrow_recover, escrow_split};
+
+// R2b.2: pure helpers + response builders split off. Their
+// pub(crate) items are re-exported here so this file (and the
+// escrow submodule) can `use super::bad_request` etc. — nothing
+// changes at the call sites.
+pub(crate) mod response;
+pub(crate) mod util;
+pub(crate) use response::{
+    decoded_to_response, fingerprint_to_json, ingest_to_response, mkdir_to_response,
+    partial_response, remove_to_response, rename_to_response, rmdir_to_response,
+    serve_with_range, stats_to_json, unsatisfiable_response,
+};
+pub(crate) use util::{
+    bad_request, bad_request_owned, error_to_response, is_reserved_name, is_valid_put_name,
+    json_escape, json_response, kind_label, not_found, parse_urlencoded_field, pick_return_to,
+    redirect_to, render_shard_as_png, top_segment, url_decode_simple, url_encode_simple, x,
+};
 
 /// `GET /<name>` — full-quality decode. Honours the `Range:` header per
 /// RFC 9110 §14.2 — see [`serve_with_range`] for the slicing logic.
@@ -930,20 +940,6 @@ pub async fn semantic_search(
     }
 }
 
-/// Tiny URL-encode for redirect targets — only escapes the few
-/// characters that mangle a `/?open=` query value. Kept local to
-/// avoid pulling another crate.
-fn url_encode_simple(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
 
 /// `POST /api/rmdir` (form-urlencoded `path=`) — form-friendly variant for
 /// the delete button on directory cards. Redirects back to the parent
@@ -971,35 +967,6 @@ pub async fn rmdir_form(
     }
 }
 
-/// Resolve where to send the user after a form mutation. Honours an
-/// explicit `return_to` field when present (the tree-view forms set
-/// this to `/` so the page doesn't switch to focus mode); otherwise
-/// falls back to `/?p=<parent>` for backward-compat with the
-/// focus-view forms that omit the field.
-fn pick_return_to(return_to: &str, parent: &str) -> String {
-    if !return_to.is_empty() {
-        return return_to.to_string();
-    }
-    if parent.is_empty() {
-        "/".to_string()
-    } else {
-        format!("/?p={parent}")
-    }
-}
-
-/// 303 redirect to an absolute or relative URL. The form-friendly
-/// mkdir/rmdir/upload handlers pick the target from a hidden
-/// `return_to` field so each calling page can decide where to go after
-/// success — the tree-view stays on `/`, the focus-view comes back to
-/// `/?p=<parent>`, etc. Falls back to `/` if no target was given.
-fn redirect_to(target: &str) -> Response {
-    let target = if target.is_empty() { "/" } else { target };
-    Response::builder()
-        .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, target)
-        .body(axum::body::Body::empty())
-        .expect("redirect build")
-}
 
 /// `POST /api/mv` — rename / move an entry. Body is form-urlencoded
 /// `from=...&to=...` so the dropzone HTML form can submit it without JS.
@@ -1073,50 +1040,6 @@ pub async fn get_shard_png(
         .expect("png response build")
 }
 
-pub(crate) fn bad_request(msg: &'static str) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        [(header::CONTENT_TYPE, "text/plain")],
-        msg,
-    )
-        .into_response()
-}
-
-/// String-owning variant of [`bad_request`]. Used by multipart-body
-/// handlers where the error message includes the underlying parse
-/// error (`format!(...)`), so a `&'static str` bound would be too
-/// restrictive.
-pub(crate) fn bad_request_owned(msg: String) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        [(header::CONTENT_TYPE, "text/plain")],
-        msg,
-    )
-        .into_response()
-}
-
-/// Turn arbitrary bytes into a square grayscale PNG: side = ceil(sqrt(len)),
-/// tail padded with zeros. Mirrors the legacy gateway's `render_shard_as_png`.
-fn render_shard_as_png(bytes: &[u8]) -> Vec<u8> {
-    let side = (bytes.len() as f64).sqrt().ceil() as usize;
-    let side = side.max(1);
-    let total = side * side;
-    let mut padded = bytes.to_vec();
-    padded.resize(total, 0);
-    let mut rgb = Vec::with_capacity(total * 3);
-    for &g in &padded {
-        rgb.extend_from_slice(&[g, g, g]);
-    }
-    let mut buf = Vec::new();
-    {
-        let mut enc = png::Encoder::new(&mut buf, side as u32, side as u32);
-        enc.set_color(png::ColorType::Rgb);
-        enc.set_depth(png::BitDepth::Eight);
-        let mut writer = enc.write_header().expect("png header");
-        writer.write_image_data(&rgb).expect("png write");
-    }
-    buf
-}
 
 /// `POST /admin/node` — toggle admin-kill for node `i` (form field). Used by
 /// the kill/revive buttons on `/health`; redirects back to `/health` (303).
@@ -1154,444 +1077,6 @@ pub async fn toggle_node(
     }
 }
 
-/// Minimal `application/x-www-form-urlencoded` field extractor. Good enough
-/// for the single-field admin-node form; full multipart handling stays in
-/// the legacy gateway until Phase 4b.5.
-fn parse_urlencoded_field(body: &str, field: &str) -> Option<String> {
-    for pair in body.split('&') {
-        let mut it = pair.splitn(2, '=');
-        let key = it.next()?;
-        let val = it.next().unwrap_or("");
-        if key == field {
-            return Some(url_decode_simple(val));
-        }
-    }
-    None
-}
-
-/// Decode `+` → space and `%XX` → byte for a single form field.
-///
-/// Stage 11.13: bytes flow through a `Vec<u8>` rather than being pushed
-/// straight into a `String`. The old code did `out.push(byte as char)`,
-/// which treated each decoded byte as a Unicode code point — fine for
-/// ASCII, garbage for any multi-byte UTF-8 sequence. A Russian "С"
-/// (UTF-8 `D0 A1`) used to render as `Ð¡`; with the byte-buffer path we
-/// reassemble the original UTF-8 bytes and `String::from_utf8_lossy`
-/// hands back the right characters.
-fn url_decode_simple(s: &str) -> String {
-    let mut out: Vec<u8> = Vec::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    out.push(byte);
-                } else {
-                    out.push(b'%');
-                }
-                i += 3;
-            }
-            c => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-// === Response builders ====================================================
-
-/// Dispatch based on the request's `Range` header:
-/// - none / malformed → full 200 body via [`decoded_to_response`];
-/// - single satisfiable range → 206 via [`partial_response`];
-/// - unsatisfiable → 416 with `Content-Range: bytes */<total>`;
-/// - multi-range → degrade gracefully to a full 200.
-///
-/// The full decoded buffer is always materialised first — partial reads
-/// are slice operations, not progressive decode. This matches the rest of
-/// the gateway's read path and is enough for the workloads Range actually
-/// helps with (resume, `<audio>` scrubbing).
-fn serve_with_range(name: &str, obj: DecodedObject, headers: &HeaderMap) -> Response {
-    let total = obj.bytes.len() as u64;
-    let outcome = headers
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| parse_range(s, total))
-        .unwrap_or(RangeOutcome::NoRange);
-    match outcome {
-        RangeOutcome::NoRange | RangeOutcome::Multiple | RangeOutcome::Malformed => {
-            decoded_to_response(name, obj)
-        }
-        RangeOutcome::Range(r) => partial_response(name, obj, r),
-        RangeOutcome::Unsatisfiable => unsatisfiable_response(total),
-    }
-}
-
-/// 416 Range Not Satisfiable. Per RFC 9110 §15.5.17 the response MUST
-/// carry a `Content-Range: bytes */<total>` so the client knows the
-/// resource's true size and can retry sensibly.
-fn unsatisfiable_response(total: u64) -> Response {
-    Response::builder()
-        .status(StatusCode::RANGE_NOT_SATISFIABLE)
-        .header(header::CONTENT_TYPE, "text/plain")
-        .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CONTENT_RANGE, format!("bytes */{total}"))
-        .body("range not satisfiable".into())
-        .expect("416 build")
-}
-
-/// 206 Partial Content. Copies the requested slice out of `obj.bytes`,
-/// emits the standard `Content-Range: bytes A-B/total` header, and
-/// preserves the kind / cache / disposition headers from a full response.
-fn partial_response(name: &str, obj: DecodedObject, range: ByteRange) -> Response {
-    let total = obj.bytes.len() as u64;
-    let start = range.start as usize;
-    let end_inclusive = range.end_inclusive as usize;
-    let slice = obj.bytes[start..=end_inclusive].to_vec();
-    let slice_len = slice.len();
-
-    let mut builder = Response::builder()
-        .status(StatusCode::PARTIAL_CONTENT)
-        .header(header::CONTENT_TYPE, &obj.content_type)
-        .header(header::CONTENT_LENGTH, slice_len)
-        .header(header::ACCEPT_RANGES, "bytes")
-        .header(
-            header::CONTENT_RANGE,
-            format!("bytes {}-{}/{total}", range.start, range.end_inclusive),
-        )
-        .header(x("x-holofs-kind"), kind_label(obj.kind))
-        .header(x("x-holofs-bytes-downloaded"), obj.bytes_downloaded)
-        .header(x("x-holofs-decode-ms"), obj.decode_ms as u64);
-
-    if let Some(layer) = obj.max_layer {
-        builder = builder.header(x("x-holofs-layers"), format!("0-{layer}"));
-    }
-    if let Some(sr) = obj.sample_rate {
-        builder = builder.header(x("x-holofs-sample-rate"), sr);
-    }
-    if let Some(ch) = obj.channels {
-        builder = builder.header(x("x-holofs-channels"), u16::from(ch));
-    }
-    if obj.kind == ObjectKind::Image {
-        builder = builder.header(header::CACHE_CONTROL, "public, max-age=3600");
-    }
-    if let Some(filename) = obj.filename_for_disposition.as_deref() {
-        let safe = filename.replace('"', "");
-        builder = builder.header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{safe}\""),
-        );
-    }
-    let _ = name;
-    builder.body(slice.into()).expect("206 build")
-}
-
-fn decoded_to_response(name: &str, obj: DecodedObject) -> Response {
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, &obj.content_type)
-        .header(header::CONTENT_LENGTH, obj.bytes.len())
-        .header(header::ACCEPT_RANGES, "bytes")
-        .header(x("x-holofs-kind"), kind_label(obj.kind))
-        .header(x("x-holofs-bytes-downloaded"), obj.bytes_downloaded)
-        .header(x("x-holofs-decode-ms"), obj.decode_ms as u64);
-
-    if let Some(layer) = obj.max_layer {
-        builder = builder.header(x("x-holofs-layers"), format!("0-{layer}"));
-    }
-    if let Some(sr) = obj.sample_rate {
-        builder = builder.header(x("x-holofs-sample-rate"), sr);
-    }
-    if let Some(ch) = obj.channels {
-        builder = builder.header(x("x-holofs-channels"), u16::from(ch));
-    }
-    if let Some(total) = obj.chunks_total {
-        builder = builder.header(x("x-holofs-chunks-total"), total as u64);
-    }
-    if let Some(missing) = obj.chunks_missing {
-        builder = builder.header(x("x-holofs-chunks-missing"), missing as u64);
-    }
-    if obj.kind == ObjectKind::Image {
-        builder = builder.header(header::CACHE_CONTROL, "public, max-age=3600");
-    }
-    if let Some(filename) = obj.filename_for_disposition.as_deref() {
-        let safe = filename.replace('"', "");
-        builder = builder.header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{safe}\""),
-        );
-    }
-    let _ = name;
-    builder.body(obj.bytes.into()).expect("response build")
-}
-
-fn ingest_to_response(res: IngestResult) -> Response {
-    let body = format!(
-        "{{\"name\":\"{name}\",\
-\"object_id\":\"{oid:016x}\",\
-\"data_cid\":\"{cid}\",\
-\"width\":{w},\"height\":{h},\
-\"shards\":{shards},\
-\"put_ms\":{ms}}}\n",
-        name = json_escape(&res.name),
-        oid = res.object_id,
-        cid = res.data_cid_hex,
-        w = res.width,
-        h = res.height,
-        shards = res.total_shards,
-        ms = res.put_ms,
-    );
-    (
-        StatusCode::CREATED,
-        [(header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
-}
-
-fn remove_to_response(res: RemoveResult) -> Response {
-    let body = format!(
-        "{{\"deleted\":\"{name}\",\"object_id\":\"{oid:016x}\"}}\n",
-        name = json_escape(&res.name),
-        oid = res.object_id,
-    );
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
-}
-
-fn mkdir_to_response(res: MkdirResult) -> Response {
-    let body = format!(
-        "{{\"created\":\"{p}\",\"object_id\":\"{oid:016x}\"}}\n",
-        p = json_escape(&res.path),
-        oid = res.object_id,
-    );
-    (
-        StatusCode::CREATED,
-        [(header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
-}
-
-fn rmdir_to_response(res: RmdirResult) -> Response {
-    let body = format!(
-        "{{\"removed\":\"{p}\",\"object_id\":\"{oid:016x}\"}}\n",
-        p = json_escape(&res.path),
-        oid = res.object_id,
-    );
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
-}
-
-fn rename_to_response(res: RenameResult) -> Response {
-    let body = format!(
-        "{{\"from\":\"{f}\",\"to\":\"{t}\",\"moved\":{n}}}\n",
-        f = json_escape(&res.old),
-        t = json_escape(&res.new),
-        n = res.moved_entries,
-    );
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
-}
-
-pub(crate) fn error_to_response(e: GatewayError) -> Response {
-    let (status, msg) = match &e {
-        GatewayError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
-        GatewayError::BadRequest(s) => (StatusCode::BAD_REQUEST, s.clone()),
-        GatewayError::Decode(s) => (StatusCode::SERVICE_UNAVAILABLE, s.clone()),
-        GatewayError::PreviewUnsupported => (
-            StatusCode::NOT_FOUND,
-            "preview not supported for this kind".to_string(),
-        ),
-        GatewayError::IsDirectory => (StatusCode::CONFLICT, "is a directory".to_string()),
-        GatewayError::AlreadyExists => {
-            (StatusCode::CONFLICT, "already exists".to_string())
-        }
-        GatewayError::NotADirectory => {
-            (StatusCode::CONFLICT, "not a directory".to_string())
-        }
-        GatewayError::DirectoryNotEmpty => {
-            (StatusCode::CONFLICT, "directory not empty".to_string())
-        }
-        GatewayError::ClusterDegraded => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "cluster has no live nodes".to_string(),
-        ),
-        GatewayError::Persist(s) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("catalog persist failed: {s}"),
-        ),
-    };
-    (status, [(header::CONTENT_TYPE, "text/plain")], msg).into_response()
-}
-
-fn not_found() -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        [(header::CONTENT_TYPE, "text/plain")],
-        "not found",
-    )
-        .into_response()
-}
-
-// === Helpers ===============================================================
-
-fn x(s: &'static str) -> HeaderName {
-    HeaderName::from_static(s)
-}
-
-fn kind_label(kind: ObjectKind) -> HeaderValue {
-    HeaderValue::from_static(match kind {
-        ObjectKind::Image => "image",
-        ObjectKind::Audio => "audio",
-        ObjectKind::Text => "text",
-        ObjectKind::Opaque => "opaque",
-        ObjectKind::Directory => "directory",
-    })
-}
-
-/// Top-level path segments owned by the HTTP frontend itself. An object
-/// (or any of its parent directories) named with one of these would shadow
-/// a real route, so PUT/DELETE/mkdir refuse them.
-const RESERVED_TOP_SEGMENTS: &[&str] = &[
-    "health", "escrow", "preview", "inspect", "similar", "diff", "admin", "api",
-    "metrics", "pkg",
-    // Stage 10: in-app docs viewer + zoom variant of /inspect.
-    "help", "inspect-zoom",
-    // Stage 11.5: static-asset prefix served by ServeDir.
-    "assets",
-    // Stage 12.6: wavelet-mix composer page.
-    "mix",
-    // Stage 12.7: pitch / marketing page.
-    "about",
-    // Stage 12.9: semantic search page.
-    "search",
-    // Stage 13.1: streaming hologram demo page.
-    "holo",
-    // Stage 13.2: ROI spotlight composite page.
-    "spotlight",
-    // Stage 13.4: per-object version history page.
-    "versions",
-];
-
-fn top_segment(path: &str) -> &str {
-    path.split('/').next().unwrap_or("")
-}
-
-/// `true` if `name`'s top-level segment collides with an HTTP route. Empty
-/// name is also reserved (handled separately by path validation).
-fn is_reserved_name(name: &str) -> bool {
-    if name.is_empty() {
-        return true;
-    }
-    RESERVED_TOP_SEGMENTS.contains(&top_segment(name))
-}
-
-/// Names accepted by `PUT /<path>` and the directory-op endpoints. Slash is
-/// allowed (paths are multi-segment after Stage 9); only the top-level
-/// segment is checked against the reserved list. Structural validation
-/// (dot/double-slash/length) is the gateway's job — `Gateway::ingest_bytes`
-/// runs `holofs_model::path::validate` and returns `BadRequest` on failure.
-fn is_valid_put_name(name: &str) -> bool {
-    !name.is_empty() && !RESERVED_TOP_SEGMENTS.contains(&top_segment(name))
-}
-
-/// Build a JSON `Response` with the given status. Used by every `/api/*`
-/// handler so payloads always advertise `application/json`.
-fn json_response(status: StatusCode, body: String) -> Response {
-    (
-        status,
-        [(header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
-}
-
-fn stats_to_json(s: &ApiStats) -> String {
-    let KindCounts {
-        image,
-        audio,
-        text,
-        opaque,
-        directory,
-    } = s.objects_by_kind;
-    format!(
-        "{{\"nodes_total\":{nt},\
-\"nodes_live\":{nl},\
-\"objects_total\":{ot},\
-\"objects_by_kind\":{{\"image\":{image},\"audio\":{audio},\"text\":{text},\"opaque\":{opaque},\"directory\":{directory}}},\
-\"shards_total\":{sht},\
-\"shards_unique\":{shu},\
-\"dedup_savings_pct\":{dd:.2},\
-\"bytes_total\":{bt},\
-\"auto_repairs_total\":{ar},\
-\"auto_repair_failures_total\":{arf},\
-\"scrub_runs_total\":{srt},\
-\"scrub_repairs_total\":{srpt}}}\n",
-        nt = s.nodes_total,
-        nl = s.nodes_live,
-        ot = s.objects_total,
-        sht = s.shards_total,
-        shu = s.shards_unique,
-        dd = s.dedup_savings_pct,
-        bt = s.bytes_total,
-        ar = s.auto_repairs_total,
-        arf = s.auto_repair_failures_total,
-        srt = s.scrub_runs_total,
-        srpt = s.scrub_repairs_total,
-    )
-}
-
-fn fingerprint_to_json(info: &FingerprintInfo) -> String {
-    format!(
-        "{{\"name\":\"{n}\",\"fingerprint\":\"{fp}\",\"kind\":\"{k}\"}}\n",
-        n = json_escape(&info.name),
-        fp = info.fingerprint_hex,
-        k = match info.kind {
-            ObjectKind::Image => "image",
-            ObjectKind::Audio => "audio",
-            ObjectKind::Text => "text",
-            ObjectKind::Opaque => "opaque",
-            ObjectKind::Directory => "directory",
-        },
-    )
-}
-
-
-/// Minimal HTML escaper — escapes `< > & " '` for use in attributes and text nodes.
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            c => out.push(c),
-        }
-    }
-    out
-}
 
 /// `GET /api/health/events` — Server-Sent Events stream pushing one
 /// [`HealthSnapshot`] every 3 seconds. The browser's `EventSource` keeps
@@ -1626,20 +1111,3 @@ pub async fn health_events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-/// Escape a string for inline JSON (object names go straight into a JSON
-/// response so we need to neutralise quotes and backslashes).
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
