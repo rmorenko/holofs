@@ -38,6 +38,7 @@ use holofs_web::inspect::{GetInspect, GetInspectZoom};
 use holofs_web::help::{GetDoc, ListDocs};
 use holofs_web::admin_auth::{require_admin_token, AdminAuth};
 use holofs_web::backpressure::with_permit;
+use holofs_web::rate_limit::{run_with_rate_limit, RateLimit};
 use holofs_web::similar::GetSimilar;
 use holofs_web::timeout::{run_with_deadline, LONG, MEDIUM, SHORT};
 use holofs_web::{App, GetCatalog, ListDir, ListDirPageFn, Shell};
@@ -195,6 +196,8 @@ async fn main() {
     // permits (default 8) throttle concurrent expensive calls so a
     // burst doesn't saturate the shard cache.
     let (long_sem, long_rej) = gateway.long_bucket();
+    let rate_limit = RateLimit::from_env(gateway.rate_limit_rejected_counter());
+    let rate_limit_long = rate_limit.clone();
     let long_routes: Router<LeptosOptions> = Router::new()
         .route("/api/search", get(handlers::semantic_search))
         .route("/api/spotlight.png", get(handlers::spotlight_png))
@@ -205,6 +208,13 @@ async fn main() {
         }))
         .route_layer(from_fn(move |req, next| {
             with_permit(long_sem.clone(), long_rej.clone(), req, next)
+        }))
+        // v0.7: per-IP rate limit applied ABOVE backpressure so a
+        // rejected client doesn't consume a MEDIUM/LONG permit.
+        // Layer is a no-op when HOLOFS_RATE_LIMIT_RPS_PER_IP=0
+        // (default).
+        .route_layer(from_fn(move |req, next| {
+            run_with_rate_limit(rate_limit_long.clone(), req, next)
         }));
 
     // STREAMING — SSE + multipart/x-mixed-replace. Intentionally
@@ -299,10 +309,17 @@ async fn main() {
         }));
     // N3: MEDIUM-bucket backpressure. Cap default 64 concurrent
     // decodes / PUT / dir-ops so a burst can't DoS the process.
+    // v0.7: per-IP rate limit stacks on top so a single client
+    // can't exhaust MEDIUM permits and freeze out the rest.
     let (medium_sem, medium_rej) = gateway.medium_bucket();
-    let medium_routes = medium_routes.route_layer(from_fn(move |req, next| {
-        with_permit(medium_sem.clone(), medium_rej.clone(), req, next)
-    }));
+    let rate_limit_medium = rate_limit.clone();
+    let medium_routes = medium_routes
+        .route_layer(from_fn(move |req, next| {
+            with_permit(medium_sem.clone(), medium_rej.clone(), req, next)
+        }))
+        .route_layer(from_fn(move |req, next| {
+            run_with_rate_limit(rate_limit_medium.clone(), req, next)
+        }));
 
     let app = Router::new()
         .merge(short_routes)
@@ -406,7 +423,15 @@ async fn main() {
     // future resolves; we hand it the same token) for in-flight
     // requests to complete before returning from `.await`.
     let axum_shutdown = shutdown.clone();
-    let serve = axum::serve(listener, app.into_make_service()).with_graceful_shutdown(async move {
+    // v0.7: `with_connect_info` injects the peer SocketAddr into
+    // every request's extensions so `rate_limit::client_ip` can
+    // extract it. Zero cost when the rate limit is disabled — the
+    // middleware short-circuits on `enabled() == false`.
+    let serve = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
         axum_shutdown.cancelled().await;
     });
     if let Err(e) = serve.await {

@@ -42,6 +42,7 @@ pub struct ObservabilityCounters<'gw> {
     pub admin_auth_missing_total: &'gw Arc<std::sync::atomic::AtomicU64>,
     pub admin_auth_bad_total: &'gw Arc<std::sync::atomic::AtomicU64>,
     pub admin_auth_disabled_total: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub rate_limit_rejected_total: &'gw Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// N3: default MEDIUM-bucket concurrency (decodes, PUT, dir ops).
@@ -196,6 +197,11 @@ pub struct Gateway {
     pub(crate) admin_auth_missing_total: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) admin_auth_bad_total: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) admin_auth_disabled_total: Arc<std::sync::atomic::AtomicU64>,
+    /// v0.7: 429 responses caused by the per-IP rate limit
+    /// middleware. Zero when the limit is disabled
+    /// (`HOLOFS_RATE_LIMIT_RPS_PER_IP=0`). Emitted in `/metrics`
+    /// as `holofs_rate_limit_rejected_total`.
+    pub(crate) rate_limit_rejected_total: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// PNG cache entry: fully-encoded body + the layer it was decoded at
@@ -249,6 +255,7 @@ impl Gateway {
             admin_auth_missing_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             admin_auth_bad_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             admin_auth_disabled_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            rate_limit_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -293,6 +300,7 @@ impl Gateway {
             admin_auth_missing_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             admin_auth_bad_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             admin_auth_disabled_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            rate_limit_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -327,7 +335,16 @@ impl Gateway {
             admin_auth_missing_total: &self.admin_auth_missing_total,
             admin_auth_bad_total: &self.admin_auth_bad_total,
             admin_auth_disabled_total: &self.admin_auth_disabled_total,
+            rate_limit_rejected_total: &self.rate_limit_rejected_total,
         }
+    }
+
+    /// Owned handle to the per-IP rate-limit rejection counter.
+    /// `holofs-web`'s middleware captures this when building its
+    /// `RateLimit` config so both the middleware and `/metrics`
+    /// see the same atomic.
+    pub fn rate_limit_rejected_counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        Arc::clone(&self.rate_limit_rejected_total)
     }
 
     /// Owned handles to the three admin-auth failure counters, in

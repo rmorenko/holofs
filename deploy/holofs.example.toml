@@ -61,6 +61,16 @@
 # handler enforces this cap while streaming. Default 1 GiB.
 # upload_max_size = 1073741824
 
+# v0.7: per-client-IP rate limit. Token bucket refilled at
+# `rate_limit_rps_per_ip` requests/second, capped at `rate_limit_burst`.
+# `0` disables the layer. Only applies to MEDIUM (decode/PUT/dir ops)
+# and LONG (search/spotlight/GC) buckets — SHORT bucket + streaming
+# endpoints stay unlimited. Behind a reverse proxy the middleware
+# reads the first hop of `X-Forwarded-For`.
+# rate_limit_rps_per_ip = 20
+# rate_limit_burst = 40
+# rate_limit_idle_secs = 300              # per-IP bucket TTL
+
 [admin]
 # N6 admin bearer-token auth for /admin/* and /api/gc.
 #

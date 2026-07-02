@@ -188,6 +188,13 @@ pub async fn metrics(Extension(gw): Extension<Arc<Gateway>>) -> Response {
         obs.task_restarts_scrub.load(Ordering::Relaxed)
     ));
 
+    body.push_str("# HELP holofs_rate_limit_rejected_total v0.7 per-IP rate limit rejections (429 responses).\n");
+    body.push_str("# TYPE holofs_rate_limit_rejected_total counter\n");
+    body.push_str(&format!(
+        "holofs_rate_limit_rejected_total {}\n",
+        obs.rate_limit_rejected_total.load(Ordering::Relaxed)
+    ));
+
     body.push_str("# HELP holofs_admin_auth_failures_total N6 admin bearer-token rejections, split by reason.\n");
     body.push_str("# TYPE holofs_admin_auth_failures_total counter\n");
     body.push_str(&format!(

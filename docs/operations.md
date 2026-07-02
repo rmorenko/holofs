@@ -296,6 +296,32 @@ Every variable has a matching CLI flag (`--storage`, `--log`, etc.) — run
 | `HOLOFS_POOL_IDLE_SECS`     | `60`    | Drop pooled entries idle longer than this on `acquire`. |
 | `HOLOFS_POOL_DISABLE`       | `false` | Bypass the keepalive pool — every RPC dials fresh. Useful when chasing wire-level bugs. |
 
+### 5.5.c. Per-IP rate limit (v0.7)
+
+Complements the N3 global backpressure caps. N3 stops the process
+from exploding under any burst — this layer stops a single
+misbehaving client from starving every other caller. Both apply to
+the MEDIUM (decode / PUT / dir ops) and LONG (search / spotlight /
+GC) buckets; SHORT and streaming endpoints stay unlimited.
+
+| Variable                        | Default   | Description                                              |
+|---------------------------------|-----------|----------------------------------------------------------|
+| `HOLOFS_RATE_LIMIT_RPS_PER_IP`  | `0`       | Token bucket refill rate per client IP. Zero disables the layer entirely. |
+| `HOLOFS_RATE_LIMIT_BURST`       | `2 × rps` | Max tokens a bucket holds. On empty bucket the request 429s with `Retry-After: 1`. |
+| `HOLOFS_RATE_LIMIT_IDLE_SECS`   | `300`     | Idle-eviction threshold for the per-IP map (bounded memory under high-churn client populations). |
+
+**Client-IP source.** Behind a reverse proxy the middleware reads
+the first hop of `X-Forwarded-For`. Direct connections use
+`ConnectInfo<SocketAddr>` from
+`into_make_service_with_connect_info`. Neither present → shared
+`0.0.0.0` bucket so noisy hosts don't get a per-connection free
+pass.
+
+**Metric.** `holofs_rate_limit_rejected_total` counts every 429
+response. Sustained non-zero rate suggests either an abusive
+client (investigate) or an under-provisioned cap (raise
+`rate_limit_rps_per_ip`).
+
 ### 5.5.b. Streaming PUT (v0.7)
 
 | Variable                    | Default   | Description                                              |

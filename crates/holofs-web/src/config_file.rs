@@ -108,6 +108,10 @@ pub struct ReliabilitySection {
     pub versions_keep_last: Option<usize>,
     /// v0.7 streaming-PUT max body size, in bytes.
     pub upload_max_size: Option<u64>,
+    /// v0.7 per-IP rate-limit refill rate. `0` = disabled.
+    pub rate_limit_rps_per_ip: Option<f64>,
+    pub rate_limit_burst: Option<f64>,
+    pub rate_limit_idle_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -231,6 +235,15 @@ impl ConfigFile {
         }
         if let Some(v) = self.reliability.upload_max_size {
             set_if_missing_string("HOLOFS_UPLOAD_MAX_SIZE", &v.to_string());
+        }
+        if let Some(v) = self.reliability.rate_limit_rps_per_ip {
+            set_if_missing_string("HOLOFS_RATE_LIMIT_RPS_PER_IP", &v.to_string());
+        }
+        if let Some(v) = self.reliability.rate_limit_burst {
+            set_if_missing_string("HOLOFS_RATE_LIMIT_BURST", &v.to_string());
+        }
+        if let Some(v) = self.reliability.rate_limit_idle_secs {
+            set_if_missing_string("HOLOFS_RATE_LIMIT_IDLE_SECS", &v.to_string());
         }
 
         // admin

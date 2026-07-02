@@ -42,6 +42,8 @@ pub mod inspect;
 pub mod mix;
 #[cfg(feature = "ssr")]
 pub mod range;
+#[cfg(feature = "ssr")]
+pub mod rate_limit;
 pub mod search;
 pub mod server_fns;
 pub mod similar;
