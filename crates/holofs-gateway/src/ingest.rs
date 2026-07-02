@@ -14,7 +14,7 @@
 
 use std::time::Instant;
 
-use holofs_client::{put_object, LiveNodes};
+use holofs_client::{put_object, put_object_replicated_blocks, LiveNodes};
 use holofs_codec::image_io::load_photo_from_bytes;
 use holofs_core::hash::hex;
 use holofs_core::transform::coeff_layer;
@@ -354,6 +354,118 @@ impl Gateway {
         // tree view can sort by date.
         manifest.created_at_unix = now_unix();
         let put_ms = t0.elapsed().as_millis();
+        let object_id = manifest.object_id;
+        let cid_hex = hex(&manifest.data_cid);
+        let kind = manifest.kind;
+        let width = manifest.width;
+        let height = manifest.height;
+        self.catalog
+            .lock()
+            .await
+            .insert(name.to_string(), manifest);
+        self.invalidate_cache(name).await;
+        self.persist_catalog().await?;
+        Ok(IngestResult {
+            name: name.to_string(),
+            object_id,
+            data_cid_hex: cid_hex,
+            width,
+            height,
+            kind,
+            total_shards,
+            put_ms,
+        })
+    }
+
+    /// Stage 15.1: image-only PUT that stores the object under the
+    /// per-block Replicated encoding instead of the default RLNC.
+    ///
+    /// Semantically parallel to [`Self::ingest_bytes`] but:
+    ///   * The kind auto-detect is restricted to image — audio /
+    ///     text / opaque still ship via the RLNC path (they don't
+    ///     benefit from per-block ROI addressing).
+    ///   * Manifest `encoding` gets stamped as
+    ///     [`ObjectEncoding::Replicated`] so downstream fetch paths
+    ///     (spotlight-coeff, ROI decode) can pick the block-fetch
+    ///     branch automatically.
+    ///
+    /// Every gc / versions / caching / persist step is identical to
+    /// `ingest_bytes` — the split is only in the encode step.
+    pub async fn ingest_bytes_replicated(
+        &self,
+        name: &str,
+        body: &[u8],
+        block_size: u32,
+        replication: u8,
+    ) -> Result<IngestResult, GatewayError> {
+        if body.is_empty() {
+            return Err(GatewayError::BadRequest("empty body".into()));
+        }
+        if block_size == 0 {
+            return Err(GatewayError::BadRequest(
+                "block_size must be >= 1".into(),
+            ));
+        }
+        if replication == 0 {
+            return Err(GatewayError::BadRequest(
+                "replication must be >= 1".into(),
+            ));
+        }
+        catalog_path::validate(name)
+            .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
+        {
+            let cat = self.catalog.lock().await;
+            if let Some(existing) = cat.get(name) {
+                if existing.kind == ObjectKind::Directory {
+                    return Err(GatewayError::AlreadyExists);
+                }
+            }
+            if let Some(parent) = catalog_path::parent(name) {
+                match cat.get(parent) {
+                    Some(m) if m.kind == ObjectKind::Directory => {}
+                    Some(_) => return Err(GatewayError::NotADirectory),
+                    None => {
+                        return Err(GatewayError::BadRequest(format!(
+                            "parent directory does not exist: {parent}"
+                        )))
+                    }
+                }
+            }
+        }
+        // Only images ride the replicated-block path — everything
+        // else has no per-block ROI to save bandwidth on.
+        let arr = load_photo_from_bytes(body, self.cluster.width, self.cluster.height)
+            .map_err(|e| {
+                GatewayError::BadRequest(format!(
+                    "ingest_bytes_replicated: image decode failed \
+                     (audio/text/opaque go through ingest_bytes): {e}"
+                ))
+            })?;
+        let channels = vec![arr[0].clone(), arr[1].clone(), arr[2].clone()];
+        let live = self.effective_live().await;
+        if live.is_empty() {
+            return Err(GatewayError::ClusterDegraded);
+        }
+        let prev = self.catalog.lock().await.get(name).cloned();
+        if let Some(old) = &prev {
+            if self.versions_enabled().await {
+                if let Err(e) = self.archive_version(name, old).await {
+                    eprintln!("PUT {name}: version archive failed: {e}");
+                }
+            } else if let Err(e) = self.purge_orphans_of(old, &live, Some(name)).await {
+                eprintln!("PUT {name}: previous object failed to purge (continuing): {e}");
+            }
+        }
+        let t0 = Instant::now();
+        let mut manifest = self.blank_manifest();
+        put_object_replicated_blocks(&mut manifest, &live, &channels, block_size, replication)
+            .await
+            .map_err(|e| GatewayError::BadRequest(format!("put replicated: {e}")))?;
+        manifest.created_at_unix = now_unix();
+        let put_ms = t0.elapsed().as_millis();
+        let total_shards: u32 = manifest.n_per_layer.iter().sum::<u32>()
+            * manifest.channels as u32
+            * replication as u32;
         let object_id = manifest.object_id;
         let cid_hex = hex(&manifest.data_cid);
         let kind = manifest.kind;

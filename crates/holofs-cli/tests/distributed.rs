@@ -270,6 +270,159 @@ async fn get_object_blocks_roi_saves_bandwidth() {
     );
 }
 
+/// Stage 15.1 smoke: honor the 15.0 rollback lesson by actually
+/// running the 512×512 PUT the previous cut choked on. block_size=64,
+/// R=3 → ~36 k shards across 8 nodes. Must complete in tens of ms,
+/// not tens of seconds; must reconstruct near-perfectly; the ROI
+/// path must fetch strictly less than the full image.
+#[tokio::test]
+async fn smoke_512x512_shard_budget_and_roundtrip() {
+    // Local dims for this test only — the file-scope W/H/NLAYERS
+    // constants stay pointed at the smaller (32×32) figure so the
+    // other tests remain fast.
+    const W: usize = 512;
+    const H: usize = 512;
+    const LEVELS: usize = 3;
+    const NLAYERS: usize = LEVELS + 1;
+    fn layer_of(x: usize, y: usize) -> usize {
+        let llw = W >> LEVELS;
+        let llh = H >> LEVELS;
+        if x < llw && y < llh {
+            return 0;
+        }
+        for l in (1..=LEVELS).rev() {
+            let bw = W >> (l - 1);
+            let bh = H >> (l - 1);
+            let iw = W >> l;
+            let ih = H >> l;
+            if x < bw && y < bh && !(x < iw && y < ih) {
+                return LEVELS - l + 1;
+            }
+        }
+        LEVELS
+    }
+    let (addrs, stores) = spawn_cluster(N_NODES).await;
+    let n_nodes = addrs.len();
+    let mut layer_positions: Vec<Vec<u32>> = vec![Vec::new(); NLAYERS];
+    for y in 0..H {
+        for x in 0..W {
+            layer_positions[layer_of(x, y)].push((y * W + x) as u32);
+        }
+    }
+    let mut manifest = Manifest {
+        object_id: 0,
+        k: K as u16,
+        nlayers: NLAYERS as u8,
+        n_per_layer: vec![0; NLAYERS],
+        sym_len: vec![0; NLAYERS],
+        layer_positions,
+        channels: 3,
+        width: W as u32,
+        height: H as u32,
+        levels: LEVELS as u8,
+        nodes: addrs,
+        placement: Placement::Rendezvous,
+        zones: vec![0; n_nodes],
+        data_cid: [0; 32],
+        merkle_root: [0; 32],
+        shard_hashes: vec![vec![Vec::new(); NLAYERS]; 3],
+        kind: holofs_model::manifest::ObjectKind::Image,
+        content_type: "image/png".into(),
+        chunk_lens: vec![],
+        audio_sample_rate: 0,
+        text_minhash: vec![],
+        created_at_unix: 0,
+        encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
+    };
+    // Synthetic 512×512 RGB with high-frequency noise on top of
+    // the smooth base — smooth-only images push most detail-band
+    // coefficients to zero, then per-channel identical-zero blocks
+    // dedup on the store (same (key, hash) collapses to one entry)
+    // and break the "every block replicates to R distinct nodes"
+    // shard-count invariant we want to test. Noise makes every
+    // block distinct.
+    let mut rng_state: u64 = 0xC0FF_EE00_1234_5678;
+    let mut noise = || -> f32 {
+        // xorshift64 → f32 in [-1, 1)
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        (rng_state as i64 as f32 / i64::MAX as f32) * 25.0
+    };
+    let mut ch = vec![vec![0f32; W * H]; 3];
+    for y in 0..H {
+        for x in 0..W {
+            let i = y * W + x;
+            ch[0][i] = 128.0 + 50.0 * (x as f32 * 0.03).sin() + noise();
+            ch[1][i] = 128.0 + 50.0 * (y as f32 * 0.03).cos() + noise();
+            ch[2][i] = 128.0 + 50.0 * ((x + y) as f32 * 0.02).sin() + noise();
+        }
+    }
+    let live = discover_live(&manifest).await;
+    let block_size: u32 = 64;
+    let replication: u8 = 3;
+    let t0 = std::time::Instant::now();
+    put_object_replicated_blocks(&mut manifest, &live, &ch, block_size, replication)
+        .await
+        .unwrap();
+    let put_ms = t0.elapsed().as_millis();
+    // Sizing rule of thumb from the docs — verify the math holds.
+    // 512×512 × 3 channels = 786_432 coefficients; /64 = 12_288
+    // blocks; × R=3 = 36_864 replicated shards across the cluster.
+    let blocks_per_object: u64 = manifest.channels as u64
+        * manifest
+            .n_per_layer
+            .iter()
+            .map(|&n| n as u64)
+            .sum::<u64>();
+    assert_eq!(blocks_per_object, 12_288);
+    let expected_stored: u64 = blocks_per_object * replication as u64;
+    let stored_total: u64 = {
+        let mut s = 0u64;
+        for store in &stores {
+            s += store.lock().await.total() as u64;
+        }
+        s
+    };
+    assert_eq!(stored_total, expected_stored, "cluster-wide shard count off");
+    // 15.0 rollback pinned the server at 99% CPU with 786k shards.
+    // With 15.1's block_size=64 the same image must complete inside a
+    // reasonable budget — assert < 30 s (the 15.0 rollback test never
+    // returned at all).
+    assert!(
+        put_ms < 30_000,
+        "512×512 PUT took {put_ms} ms — the 15.0 rollback regression may be back"
+    );
+    // Roundtrip check.
+    let all_ids: Vec<Vec<u32>> = manifest
+        .n_per_layer
+        .iter()
+        .map(|&n| (0..n).collect())
+        .collect();
+    let (recon, bytes_full) =
+        get_object_blocks(&manifest, &live, &all_ids).await.unwrap();
+    let p = psnr(&ch, &recon);
+    assert!(p > 90.0, "PSNR must be near-perfect, got {p:.1} dB");
+    // ROI bandwidth check: 16×16 corner must fetch orders of
+    // magnitude less than the full image.
+    let corner = roi_to_block_ids_with_stride(
+        0,
+        0,
+        16,
+        16,
+        W,
+        H,
+        &manifest.layer_positions,
+        block_size as usize,
+    );
+    let (_recon_corner, bytes_corner) =
+        get_object_blocks(&manifest, &live, &corner).await.unwrap();
+    assert!(
+        bytes_corner * 10 < bytes_full,
+        "corner ROI bytes {bytes_corner} not <10% of full {bytes_full}"
+    );
+}
+
 #[tokio::test]
 async fn placement_lands_shards_only_on_chosen_node() {
     let gf = Gf::new();

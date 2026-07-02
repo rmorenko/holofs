@@ -14,8 +14,9 @@
 
 use std::time::Instant;
 
-use holofs_client::{get_object_up_to_layer, get_object_with_coeff_mask};
-use holofs_model::manifest::ObjectKind;
+use holofs_client::{get_object_blocks, get_object_up_to_layer, get_object_with_coeff_mask};
+use holofs_core::transform::roi_to_block_ids_with_stride;
+use holofs_model::manifest::{ObjectEncoding, ObjectKind};
 
 use crate::error::GatewayError;
 use crate::util::encode_png;
@@ -162,10 +163,16 @@ impl Gateway {
     ///     black, since Haar with masked high coefficients leaks a
     ///     little).
     ///
-    /// Same bandwidth as a full fetch — RLNC requires the whole
-    /// layer's shards to decode any coefficient. The win is purely
-    /// in the spatial primitive: this is "operate on shard-level
-    /// coefficients", made visible.
+    /// For **RLNC** objects: same bandwidth as a full fetch (RLNC
+    /// mixes every coefficient across every shard). The win is
+    /// spatial.
+    ///
+    /// For **Replicated** objects (Stage 15.1): the ROI's Haar
+    /// reverse-map is converted to per-layer block ids via
+    /// `roi_to_block_ids_with_stride`; only those blocks are
+    /// fetched. Bandwidth scales linearly with the ROI area — the
+    /// marquee "bandwidth-aware spotlight" the Stage 14.1 mask
+    /// primitive predicted but couldn't deliver on RLNC.
     pub async fn spotlight_coeff(
         &self,
         name: &str,
@@ -195,23 +202,49 @@ impl Gateway {
                 "spotlight_coeff: empty ROI".into(),
             ));
         }
-        let positions = holofs_core::transform::spatial_to_dwt_positions(
-            x0,
-            y0,
-            x1 - x0,
-            y1 - y0,
-            w,
-            h,
-            levels,
-        );
-        let allowed: std::collections::HashSet<usize> = positions.into_iter().collect();
-
         let live = self.effective_live().await;
         let t0 = Instant::now();
-        let (channels, bytes_dl) =
-            get_object_with_coeff_mask(&self.gf, &manifest, &live, &allowed)
-                .await
-                .map_err(|e| GatewayError::Decode(format!("spotlight_coeff: {e}")))?;
+        let (channels, bytes_dl) = match manifest.encoding {
+            ObjectEncoding::Replicated { block_size, .. } => {
+                // Stage 15.1: fetch only the blocks whose
+                // coefficients affect the ROI. Positions outside
+                // the touched set stay at 0 → decode-mask
+                // semantics fall out for free (haar_inverse of
+                // zeros is zeros; only ROI pixels get non-zero
+                // reconstruction).
+                let ids = roi_to_block_ids_with_stride(
+                    x0,
+                    y0,
+                    x1 - x0,
+                    y1 - y0,
+                    w,
+                    h,
+                    &manifest.layer_positions,
+                    block_size as usize,
+                );
+                get_object_blocks(&manifest, &live, &ids)
+                    .await
+                    .map_err(|e| {
+                        GatewayError::Decode(format!("spotlight_coeff blocks: {e}"))
+                    })?
+            }
+            ObjectEncoding::Rlnc => {
+                let positions = holofs_core::transform::spatial_to_dwt_positions(
+                    x0,
+                    y0,
+                    x1 - x0,
+                    y1 - y0,
+                    w,
+                    h,
+                    levels,
+                );
+                let allowed: std::collections::HashSet<usize> =
+                    positions.into_iter().collect();
+                get_object_with_coeff_mask(&self.gf, &manifest, &live, &allowed)
+                    .await
+                    .map_err(|e| GatewayError::Decode(format!("spotlight_coeff: {e}")))?
+            }
+        };
         let decode_ms = t0.elapsed().as_millis();
         let png = encode_png(&channels, manifest.width, manifest.height);
         Ok(SpotlightImage {
