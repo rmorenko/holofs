@@ -37,7 +37,17 @@ members = [
 # fail-loud persist_catalog, persistent Reputation across restarts,
 # admin bearer-token auth, per-route handler timeouts, six new
 # /metrics counters). 491-test coverage.
-version = "0.6.0"
+# 0.6.0 → 0.7.0 — Phase R2 holofs-web decomposition (lib.rs 2487 → 253,
+# handlers.rs 1857 → 64, ~10 new sibling modules under
+# `handlers/`, `catalog_types`, `filter`, `server_fns`,
+# `catalog_ui`) + v0.7 operational + security series (TOML config,
+# streaming PUT, per-IP rate limit, at-rest AES-256-GCM shard
+# encryption, holofs-mcp 1245 → 7 sibling modules) + reactive-
+# context i18n fix + epoch-based GC (removes gc_barrier from PUT
+# path) + Stage 15.1 per-block replicated encoding
+# (ObjectEncoding::Replicated { R, block_size }, bandwidth-aware
+# /spotlight, 512×512 smoke). ~540-test coverage.
+version = "0.7.0"
 edition = "2021"
 # Leptos 0.7 itself only needs Rust 1.76, but several transitive deps
 # (tokio 1.41+, tracing-subscriber 0.3.19+, hyper 1.5+) have moved to
@@ -121,18 +131,18 @@ web-sys = "0.3"
 js-sys = "0.3"
 
 # Internal crates (path-deps)
-holofs-core      = { path = "crates/holofs-core",      version = "0.6.0" }
-holofs-model     = { path = "crates/holofs-model",     version = "0.6.0" }
-holofs-wire      = { path = "crates/holofs-wire",      version = "0.6.0" }
-holofs-codec     = { path = "crates/holofs-codec",     version = "0.6.0" }
-holofs-storage   = { path = "crates/holofs-storage",   version = "0.6.0" }
-holofs-client    = { path = "crates/holofs-client",    version = "0.6.0" }
-holofs-cluster   = { path = "crates/holofs-cluster",   version = "0.6.0" }
-holofs-analytics = { path = "crates/holofs-analytics", version = "0.6.0" }
-holofs-gateway   = { path = "crates/holofs-gateway",   version = "0.6.0" }
-holofs-mcp       = { path = "crates/holofs-mcp",       version = "0.6.0" }
-holofs-embed     = { path = "crates/holofs-embed",     version = "0.6.0" }
-holofs-testutils = { path = "crates/holofs-testutils", version = "0.6.0" }
+holofs-core      = { path = "crates/holofs-core",      version = "0.7.0" }
+holofs-model     = { path = "crates/holofs-model",     version = "0.7.0" }
+holofs-wire      = { path = "crates/holofs-wire",      version = "0.7.0" }
+holofs-codec     = { path = "crates/holofs-codec",     version = "0.7.0" }
+holofs-storage   = { path = "crates/holofs-storage",   version = "0.7.0" }
+holofs-client    = { path = "crates/holofs-client",    version = "0.7.0" }
+holofs-cluster   = { path = "crates/holofs-cluster",   version = "0.7.0" }
+holofs-analytics = { path = "crates/holofs-analytics", version = "0.7.0" }
+holofs-gateway   = { path = "crates/holofs-gateway",   version = "0.7.0" }
+holofs-mcp       = { path = "crates/holofs-mcp",       version = "0.7.0" }
+holofs-embed     = { path = "crates/holofs-embed",     version = "0.7.0" }
+holofs-testutils = { path = "crates/holofs-testutils", version = "0.7.0" }
 
 [profile.release]
 opt-level = 3

@@ -7,6 +7,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-03
+
+### Added — Stage 15.1: per-block replicated encoding (marquee)
+
+- **`ObjectEncoding::Replicated { replication, block_size }`** in
+  `holofs-model::manifest`. Grew a `block_size: u32` alongside the
+  existing `replication` byte; no magic bump required — the
+  discriminant was reserved (and never used by a producer) since
+  Stage 15.0. Each layer's DWT coefficients are grouped into
+  `block_size`-wide blocks and each block is replicated to R
+  cluster nodes chosen by HRW.
+
+- **`holofs-core::transform::roi_to_block_ids_with_stride`** — the
+  ROI → block-id primitive. Same "touched DWT positions" test as
+  `roi_to_block_ids` but returns *block* ids (contiguous slices of
+  `layer_positions[l]` of length `block_size`), which is what the
+  gateway hands to `get_object_blocks` for a bandwidth-aware ROI
+  decode.
+
+- **`holofs-model::placement::place_replicas`** — top-R nodes by
+  HRW score. Deterministic in
+  `(object_id, channel, layer, block_id)`; deliberately not
+  zone-aware (R already spreads per block; forcing zone-diversity
+  on top doubles the fault budget).
+
+- **`holofs-client::put_object_replicated_blocks(manifest, live,
+  channels, block_size, replication)`** — image encoder. Stamps
+  the manifest's `encoding`, `n_per_layer`, `sym_len`; dispatches
+  one `PutBatch` per `(channel, layer, node)` group.
+
+- **`holofs-client::get_object_blocks(manifest, live,
+  layer_block_ids)`** — fetch by explicit per-layer block-id
+  list. Walks the R replicas in HRW order via `Request::Audit`;
+  first hit wins.
+
+- **`Gateway::ingest_bytes_replicated`** and **`Gateway::spotlight_coeff`
+  branch** — the gateway now stamps `Replicated` on the image PUT
+  path (image-only; audio / text / opaque still ride RLNC) and
+  routes `spotlight_coeff` through `get_object_blocks` when the
+  manifest carries `Replicated`, saving proportional bandwidth to
+  the ROI area.
+
+- **Smoke:** 512×512 RGB, `block_size=64`, `R=3` on 8 real
+  in-memory nodes over TCP → 36 864 shards, `< 600 ms` PUT +
+  decode in release, corner ROI fetches `< 10 %` of full-image
+  bytes. Guardrail against another Stage-15.0-style rollback.
+
+### Added — Epoch-based garbage collection
+
+- **`Request::CurrentEpoch` / `Response::Epoch { epoch }`** and
+  **`Request::PurgeByHashUpTo { hashes, max_epoch }`** in the wire
+  protocol. `epoch = wall-clock milliseconds since UNIX_EPOCH`.
+
+- **`Store::WriteEpoch`** — every shard the store holds now
+  carries a per-write epoch, seeded from filesystem `mtime` at
+  `open()` and refreshed on every `put()` (including dedup
+  no-op — a re-PUT is a "still live" signal, so the epoch
+  advances).
+
+- **`Store::current_epoch()` / `Store::purge_by_hashes_up_to()`**
+  and **`Store::epoch_of()`** — the store methods the gateway GC
+  pass and the tests call. The old `Store::purge_by_hashes` is a
+  thin wrapper with `max_epoch = u64::MAX` (unchanged semantics for
+  non-GC callers).
+
+- **`Gateway::gc_orphaned_shards`** no longer takes
+  `gc_barrier.write()` — the write path (PUT / restore_version /
+  scrub_tick / delete_version) is now fully concurrent with the
+  GC pass. Fresh writes carry an epoch strictly greater than the
+  pass's snapshot cutoff and the node-side `PurgeByHashUpTo`
+  refuses to delete them. Clock skew is handled by taking
+  `min(gateway_snapshot, node_current_epoch)` per node before
+  purge.
+
+- **`gc_barrier`** narrows to just the embed.bin rewrite step at
+  the tail of GC. The `search::embed_object` append is the only
+  remaining read-lock site (shard-side embed rewrite races the
+  append; there is no epoch analogue for a monolithic file).
+
+### Added — v0.7 operational + security series
+
+- **v0.7 #1: TOML config file.** `--config /path/to/holofs.toml`
+  or `HOLOFS_CONFIG=/path`. Priority ladder: CLI flag > env var >
+  config file > compile-time default. Every existing `HOLOFS_*` /
+  `LEPTOS_SITE_ADDR` env knob has a TOML equivalent; the config
+  loader writes them into the process env before clap parses.
+  `deny_unknown_fields` per section for typo protection. Reference
+  config at `deploy/holofs.example.toml`.
+
+- **v0.7 #2: streaming PUT.** `PUT /*path` now streams the body to
+  `<storage>/uploads/upload-<pid>-<counter>.tmp` via
+  `Request::into_data_stream()` instead of buffering it into RAM
+  as `Bytes`. New knob `HOLOFS_UPLOAD_MAX_SIZE` (default 1 GiB)
+  enforced while streaming; 413 on breach, tempfile cleaned on
+  every exit path.
+
+- **v0.7 #3: per-IP token-bucket rate limiter.** Hand-rolled
+  (no `governor` dep). Extracts client IP from
+  `X-Forwarded-For` → `ConnectInfo<SocketAddr>` → `0.0.0.0`
+  fallback. Layered above the MEDIUM + LONG backpressure buckets;
+  SHORT + streaming endpoints stay uncapped. New env knobs:
+  `HOLOFS_RATE_LIMIT_RPS_PER_IP`, `HOLOFS_RATE_LIMIT_BURST`,
+  `HOLOFS_RATE_LIMIT_IDLE_SECS`. New `/metrics` counter
+  `holofs_rate_limit_rejected_total`.
+
+- **v0.7 #4: at-rest shard encryption.** AES-256-GCM sealing of
+  the coeffs + payload blob. Key derived from
+  `NodeIdentity::to_bytes()` via HKDF-SHA256 (`salt =
+  "holofs-shard-salt-v1"`, `info = "holofs-shard-key-v1"`) — no
+  new secret to rotate. Opt-in via `HOLOFS_AT_REST_ENC=1` or
+  `[security] at_rest_encryption = true`. Two shard magics coexist
+  on disk (`HOLOFSS1` plaintext + `HOLOFSS2` sealed) so a rolling
+  upgrade doesn't touch existing shards; new writes become v2 only
+  when the flag is on. 18-byte header is AAD to the GCM tag → any
+  post-hoc header rewrite invalidates the shard.
+
+- **v0.7 #5: holofs-mcp refactor.** `crates/holofs-mcp/src/lib.rs`
+  1245 → 332 lines. Sibling modules under the crate:
+  `views.rs`, `util.rs`, `tools_read.rs`, `tools_write.rs`,
+  `tools_transform.rs`, `resources.rs`. Every `#[tool]` method in
+  `lib.rs` delegates one line to a free function in the matching
+  module. Same public surface, same MCP schemas.
+
+### Fixed
+
+- **`t!` macro no longer spams the browser console.** `i18n::current_locale()`
+  now calls `Signal::get_untracked()` — the previous `.get()` fired
+  Leptos's "reactive value accessed outside a tracking context"
+  warning on every translation site during WASM hydration. Locale
+  switching is a full page reload (see the module doc), so a
+  live reactive value would never fire an update anyway.
+
 ### Changed — Phase R2: holofs-web module decomposition
 
 - **`crates/holofs-web/src/lib.rs` shrunk from 2487 → 253 lines
