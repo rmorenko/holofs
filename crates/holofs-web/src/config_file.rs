@@ -106,6 +106,8 @@ pub struct ReliabilitySection {
     pub audit_interval_secs: Option<u64>,
     pub rpc_timeout_ms: Option<u64>,
     pub versions_keep_last: Option<usize>,
+    /// v0.7 streaming-PUT max body size, in bytes.
+    pub upload_max_size: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -226,6 +228,9 @@ impl ConfigFile {
         }
         if let Some(v) = self.reliability.versions_keep_last {
             set_if_missing_string("HOLOFS_VERSIONS_KEEP_LAST", &v.to_string());
+        }
+        if let Some(v) = self.reliability.upload_max_size {
+            set_if_missing_string("HOLOFS_UPLOAD_MAX_SIZE", &v.to_string());
         }
 
         // admin

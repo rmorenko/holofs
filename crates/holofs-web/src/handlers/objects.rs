@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Extension, Path};
+use axum::extract::{Extension, Path, Request};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
@@ -30,6 +30,44 @@ use super::util::{
     bad_request, error_to_response, is_reserved_name, is_valid_put_name, not_found,
     render_shard_as_png,
 };
+
+/// v0.7: hard cap on the streaming PUT body size, in bytes. Enforced
+/// per-request by [`put_object`] while the body streams to a
+/// tempfile. Distinct from `DefaultBodyLimit` (that layer caps the
+/// axum-side buffered body — which we bypass here since the body
+/// goes straight to disk).
+///
+/// Configurable via `HOLOFS_UPLOAD_MAX_SIZE=<bytes>` — default 1 GiB
+/// (four times the pre-v0.7 in-RAM cap since disk is cheap).
+fn upload_max_size() -> u64 {
+    std::env::var("HOLOFS_UPLOAD_MAX_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(1024 * 1024 * 1024)
+}
+
+/// v0.7: monotonically-increasing counter for tempfile names inside
+/// the same process. Combined with `std::process::id()` this avoids
+/// tmp-name collisions under concurrent PUTs to the same target.
+fn upload_tmp_path(gw: &Arc<Gateway>) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    // Uploads live next to the catalog file so they land on the
+    // same filesystem — a rename would need same-mount atomicity if
+    // we ever start converting the tempfile into the final on-disk
+    // artifact, but for now we just read + delete.
+    let storage_root = gw
+        .cluster()
+        .node_addrs
+        .first()
+        .map(|_| std::env::var("HOLOFS_STORAGE_DIR").unwrap_or_else(|_| "./holofs-data".into()))
+        .unwrap_or_else(|| "./holofs-data".into());
+    let dir = std::path::PathBuf::from(storage_root).join("uploads");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(format!("upload-{pid}-{n}.tmp"))
+}
 
 /// `GET /<name>` — full-quality decode. Honours the `Range:` header per
 /// RFC 9110 §14.2 — see [`serve_with_range`] for the slicing logic.
@@ -157,12 +195,31 @@ pub async fn preview_stream(
     resp
 }
 
-/// `PUT /<name>` — auto-detect kind and ingest. Returns the JSON IngestResult.
+/// `PUT /<name>` — auto-detect kind and ingest. Returns the JSON
+/// `IngestResult`.
+///
+/// **v0.7 streaming path.** Pre-v0.7 this handler took `body: Bytes`,
+/// which forced axum to buffer the entire request body into memory
+/// before the handler even ran — a 200 MiB upload from a slow
+/// client held 200 MiB of RSS for the duration of the transfer.
+///
+/// Now the body streams straight to a tempfile under
+/// `<storage>/uploads/upload-<pid>-<counter>.tmp`, enforcing
+/// `HOLOFS_UPLOAD_MAX_SIZE` (default 1 GiB) per request. Once the
+/// last byte lands the tempfile is read into a `Vec<u8>` and handed
+/// to [`Gateway::ingest_bytes`] — the RLNC + DWT codec still needs
+/// a `&[u8]` slice, so peak RSS at ingest is the payload size, but
+/// only for the short ingest window rather than the full slow-loris
+/// upload duration. The tempfile is deleted on every exit path
+/// (success, error, over-limit).
 pub async fn put_object(
     Path(name): Path<String>,
     Extension(gw): Extension<Arc<Gateway>>,
-    body: Bytes,
+    req: Request<Body>,
 ) -> Response {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
     if !is_valid_put_name(&name) {
         return (
             StatusCode::BAD_REQUEST,
@@ -170,7 +227,83 @@ pub async fn put_object(
         )
             .into_response();
     }
-    match gw.ingest_bytes(&name, &body).await {
+
+    let max = upload_max_size();
+    let tmp_path = upload_tmp_path(&gw);
+
+    // Open the tempfile with `create_new` so a stale file from a
+    // crashed previous PUT doesn't get silently reused.
+    let mut file = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .await
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return error_to_response(GatewayError::Decode(format!(
+                "streaming upload: create tmpfile {}: {e}",
+                tmp_path.display()
+            )));
+        }
+    };
+
+    let mut stream = req.into_body().into_data_stream();
+    let mut written: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return error_to_response(GatewayError::Decode(format!(
+                    "streaming upload: read body: {e}"
+                )));
+            }
+        };
+        let n = chunk.len() as u64;
+        if written.saturating_add(n) > max {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "upload exceeds cap of {max} bytes (HOLOFS_UPLOAD_MAX_SIZE)"
+                ),
+            )
+                .into_response();
+        }
+        if let Err(e) = file.write_all(&chunk).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return error_to_response(GatewayError::Decode(format!(
+                "streaming upload: write tmpfile: {e}"
+            )));
+        }
+        written += n;
+    }
+    if let Err(e) = file.flush().await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return error_to_response(GatewayError::Decode(format!(
+            "streaming upload: flush tmpfile: {e}"
+        )));
+    }
+    drop(file); // release the write handle before we read back.
+
+    // Read the tempfile back into a Vec so the existing codec path
+    // (`ingest_bytes(&[u8])`) works unchanged. Full streaming ingest
+    // would require an RLNC/DWT codec pass that operates on chunks
+    // — out of scope for v0.7.
+    let body_bytes = match tokio::fs::read(&tmp_path).await {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return error_to_response(GatewayError::Decode(format!(
+                "streaming upload: read-back {}: {e}",
+                tmp_path.display()
+            )));
+        }
+    };
+    let _ = tokio::fs::remove_file(&tmp_path).await;
+
+    match gw.ingest_bytes(&name, &body_bytes).await {
         Ok(res) => {
             gw.embed_object_in_background(name.clone());
             ingest_to_response(res)

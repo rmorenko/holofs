@@ -283,9 +283,15 @@ async fn main() {
         )
         .route("/preview/*path", get(handlers::get_preview))
         .route("/*path", get(handlers::get_object))
+        // v0.7 streaming PUT: no DefaultBodyLimit — the handler
+        // streams the body to a tempfile under `<storage>/uploads/`
+        // and enforces `HOLOFS_UPLOAD_MAX_SIZE` (default 1 GiB) per
+        // request. `DefaultBodyLimit::disable()` overrides the
+        // 2 MiB axum default so the streaming path sees the full
+        // body.
         .route(
             "/*path",
-            put(handlers::put_object).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
+            put(handlers::put_object).layer(DefaultBodyLimit::disable()),
         )
         .route("/*path", delete(handlers::delete_object))
         .route_layer(from_fn(move |req, next| {

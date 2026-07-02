@@ -296,6 +296,21 @@ Every variable has a matching CLI flag (`--storage`, `--log`, etc.) — run
 | `HOLOFS_POOL_IDLE_SECS`     | `60`    | Drop pooled entries idle longer than this on `acquire`. |
 | `HOLOFS_POOL_DISABLE`       | `false` | Bypass the keepalive pool — every RPC dials fresh. Useful when chasing wire-level bugs. |
 
+### 5.5.b. Streaming PUT (v0.7)
+
+| Variable                    | Default   | Description                                              |
+|-----------------------------|-----------|----------------------------------------------------------|
+| `HOLOFS_UPLOAD_MAX_SIZE`    | `1 GiB`   | Per-request body cap for `PUT /*path`. The body streams straight to `<storage>/uploads/upload-<pid>-<counter>.tmp` (constant RAM regardless of client speed / body size) and is read back into a `Vec<u8>` right before `Gateway::ingest_bytes`. Bodies exceeding the cap return 413 Payload Too Large; the tempfile is deleted on every exit path. |
+
+Pre-v0.7 the PUT route wore axum's `DefaultBodyLimit::max(256 MiB)`
+which forced the entire body to buffer in RAM before the handler
+even ran. A slow client on a 200 MiB upload held 200 MiB of gateway
+RSS for the whole transfer. Post-v0.7 the RSS delta while
+streaming is bounded by the copy buffer (~64 KiB); RSS spikes to
+body size only briefly at ingest time (RLNC / DWT still expects
+`&[u8]`). Full streaming ingest (chunked RLNC) is out of scope
+until the codec supports it.
+
 ### 5.6. Reliability layer (v0.6.0 — N1-N8)
 
 Every knob below has a safe default; the gateway boots successfully

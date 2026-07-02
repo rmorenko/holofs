@@ -56,6 +56,11 @@
 # Per-object version history cap. `0` = unbounded.
 # versions_keep_last = 3
 
+# v0.7: streaming-PUT body cap in bytes. Body streams to a tempfile
+# under `<storage>/uploads/` — never buffered in RAM — and the
+# handler enforces this cap while streaming. Default 1 GiB.
+# upload_max_size = 1073741824
+
 [admin]
 # N6 admin bearer-token auth for /admin/* and /api/gc.
 #
