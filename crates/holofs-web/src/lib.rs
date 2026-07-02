@@ -26,6 +26,8 @@ pub mod catalog_types;
 pub mod catalog_ui;
 #[cfg(feature = "ssr")]
 pub mod cli;
+#[cfg(feature = "ssr")]
+pub mod config_file;
 pub mod diff;
 pub mod escrow;
 #[cfg(feature = "ssr")]

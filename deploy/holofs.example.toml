@@ -1,0 +1,75 @@
+# holofs-web reference configuration.
+#
+# Load with `holofs-web --config /path/to/holofs.toml` or via
+# `HOLOFS_CONFIG=/path/to/holofs.toml`. Priority ladder — highest wins:
+#   1. CLI flag                     (`--medium-concurrency 128`)
+#   2. Env var                      (`HOLOFS_MEDIUM_CONCURRENCY=128`)
+#   3. Value from THIS file         (`[reliability] medium_concurrency = 128`)
+#   4. Compile-time default
+#
+# Every field is optional. Unknown fields are rejected (typo protection).
+# TOML uses snake_case; env vars are the same names in `HOLOFS_*` uppercase.
+
+[server]
+# HTTP listen — also settable via LEPTOS_SITE_ADDR.
+# addr = "127.0.0.1:8787"
+# storage = "/var/lib/holofs"
+# catalog = "/var/lib/holofs/custom-catalog.bin"
+# log = "info,holofs_web=debug"
+# log_format = "text"                              # or "json" for prod
+# metrics_listen = "127.0.0.1:9100"                # separate scrape port (planned)
+
+[tls]
+# enabled = true
+# mtls = false                                     # implies enabled
+# cert = "/etc/holofs/node.crt"                    # PEM leaf cert
+# key = "/etc/holofs/node.key"                     # PEM private key
+# ca_cert = "/etc/holofs/ca.crt"                   # PEM trust root
+
+[cluster]
+# whitelist = "/etc/holofs/whitelist.holofs"       # switches to distributed mode
+# admin_pubkey = "0000...0000"                     # 64-char hex admin pubkey
+# embed_base_port = 9100                           # embedded-mode base port
+# seed_photo = "assets/sample.png"                 # override the seed image
+# no_seed = true                                   # skip the demo objects
+
+[features]
+# embed = true                                     # semantic search (--enable-embed)
+# versions = true                                  # version history (--enable-versions)
+
+[reliability]
+# N3 backpressure semaphore caps.
+# medium_concurrency = 64                          # decodes, PUT, dir ops
+# long_concurrency = 8                             # search, spotlight, GC
+
+# N5 reputation persistence cadence.
+# reputation_persist_interval_secs = 30
+
+# Background loops.
+# monitor_interval_secs = 15
+# audit_interval_secs = 30
+# scrub_interval_secs = 600                        # `0` disables
+
+# Per-RPC timeout inside holofs-client.
+# rpc_timeout_ms = 8000
+
+# Per-object version history cap. `0` = unbounded.
+# versions_keep_last = 3
+
+[admin]
+# N6 admin bearer-token auth for /admin/* and /api/gc.
+#
+# Two forms — pick one:
+# token = "insecure-inline-token"                  # convenient for dev
+# token_file = "/etc/holofs/admin.token"           # first non-empty line = token
+
+# Dev override: leaves /admin + /api/gc open when no token is
+# configured. WARN at boot; do NOT set in production.
+# unauthenticated = false
+
+[mcp]
+# HOLOFS_MCP_TOKEN equivalent for the Streamable-HTTP MCP endpoint.
+# When set the MCP write tools are enabled and the endpoint requires
+# `Authorization: Bearer <token>`.
+# token = "..."
+# token_file = "/etc/holofs/mcp.token"

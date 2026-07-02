@@ -86,6 +86,9 @@ serde_json = "1"
 
 # Stage 5: operational concerns — CLI parser, structured logging.
 clap = { version = "4", features = ["derive", "env"] }
+# v0.7 — TOML config file support. `toml` needs serde derive.
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi", "tracing-log"] }
 

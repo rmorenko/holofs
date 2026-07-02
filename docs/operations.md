@@ -324,6 +324,57 @@ LONG 300 s); streaming endpoints (SSE, multipart/x-mixed-replace) +
 | `HOLOFS_ENABLE_EMBED`       | `false` | Mirror of `--enable-embed`. Loads the CLIP-multilingual model on first PUT or first `/api/search`, then maintains `embeddings.bin`. |
 | `HOLOFS_MCP_TOKEN`          | —       | When set, the `/mcp` endpoint requires `Authorization: Bearer <token>` AND flips write tools on. Without the variable the endpoint stays open + read-only. |
 
+### 5.8. TOML configuration file (v0.7)
+
+Every env var above (`HOLOFS_*` and `LEPTOS_SITE_ADDR`) is also
+settable through a single TOML config file passed via
+`--config /path/to/holofs.toml` or the `HOLOFS_CONFIG` env var.
+A commented reference config lives at
+[`deploy/holofs.example.toml`](../deploy/holofs.example.toml).
+
+Priority ladder (highest wins):
+
+1. CLI flag (`--medium-concurrency 128`)
+2. Env var (`HOLOFS_MEDIUM_CONCURRENCY=128`)
+3. Value from the TOML file (`[reliability] medium_concurrency = 128`)
+4. Compile-time default
+
+**Example**:
+
+```toml
+[server]
+addr = "0.0.0.0:8787"
+storage = "/var/lib/holofs"
+log_format = "json"
+
+[tls]
+enabled = true
+mtls = true
+cert = "/etc/holofs/node.crt"
+key = "/etc/holofs/node.key"
+ca_cert = "/etc/holofs/ca.crt"
+
+[reliability]
+medium_concurrency = 128
+long_concurrency = 16
+scrub_interval_secs = 300
+
+[admin]
+# Inline token OR reference a file (recommended for secrets).
+token_file = "/etc/holofs/admin.token"
+```
+
+**Secrets.** `[admin] token` and `[mcp] token` accept either an inline
+string or a `token_file` path pointing at a file whose first
+non-empty line is the token. For production, prefer `token_file`
+with mode `0400` and root ownership so the token isn't visible in
+the config file's git history / bundled Helm chart.
+
+**Unknown fields**. TOML uses `deny_unknown_fields` at parse time —
+a typo in `medium_concurency` (missing 'r') fails loud at boot
+with the exact key name in the error. This is intentional; a
+silent fallback would defeat the purpose of the file.
+
 ---
 
 ## 6. Monitoring & alerting

@@ -35,6 +35,7 @@ ssr = [
     "dep:async-stream",
     "dep:futures-util",
     "dep:clap",
+    "dep:toml",
     "dep:tracing",
     "dep:tracing-subscriber",
     "dep:rustls",
@@ -96,6 +97,7 @@ png              = { workspace = true, optional = true }
 async-stream     = { workspace = true, optional = true }
 futures-util     = { workspace = true, optional = true }
 clap             = { workspace = true, optional = true }
+toml             = { workspace = true, optional = true }
 tracing          = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 rustls           = { workspace = true, optional = true }

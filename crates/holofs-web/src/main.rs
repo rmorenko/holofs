@@ -51,8 +51,41 @@ const UPLOAD_BODY_LIMIT: usize = 256 * 1024 * 1024;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
+    // v0.7: TOML config file. Runs before clap so the config's
+    // values populate HOLOFS_* env vars, which then feed into
+    // clap's normal env-fallback resolution. See
+    // `holofs_web::config_file` for the priority ladder + safety
+    // note about std::env::set_var being pre-runtime.
+    let config_source = if let Some(path) = holofs_web::config_file::detect_config_path() {
+        match holofs_web::config_file::ConfigFile::load(&path) {
+            Ok(Some(cfg)) => {
+                cfg.apply_to_env();
+                Some(path)
+            }
+            Ok(None) => {
+                eprintln!(
+                    "warning: --config {} does not exist; continuing with env + defaults",
+                    path.display()
+                );
+                None
+            }
+            Err(e) => {
+                eprintln!("error: reading {} failed: {e}", path.display());
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     let cli = Cli::parse();
     init_tracing(&cli);
+    if let Some(path) = &config_source {
+        info!(
+            config = %path.display(),
+            "loaded TOML config (values shadowed by env + CLI as normal)"
+        );
+    }
 
     info!(
         version = env!("CARGO_PKG_VERSION"),

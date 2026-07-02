@@ -35,6 +35,13 @@ serves the HTTP gateway on --addr (default 127.0.0.1:8787) and an optional Prome
 endpoint on --metrics-listen. All flags have HOLOFS_* env-var fallbacks."
 )]
 pub struct Cli {
+    /// Path to a TOML configuration file (see `docs/operations.md §
+    /// 5.8`). Priority ladder: CLI flag > env var > config file >
+    /// default. Handled before clap parses the flag surface — clap
+    /// only stores the path for `--help` display.
+    #[arg(long, env = "HOLOFS_CONFIG")]
+    pub config: Option<PathBuf>,
+
     /// HTTP listen address (`host:port`).
     #[arg(long, env = "LEPTOS_SITE_ADDR", default_value = "127.0.0.1:8787")]
     pub addr: SocketAddr,
