@@ -296,7 +296,27 @@ Every variable has a matching CLI flag (`--storage`, `--log`, etc.) — run
 | `HOLOFS_POOL_IDLE_SECS`     | `60`    | Drop pooled entries idle longer than this on `acquire`. |
 | `HOLOFS_POOL_DISABLE`       | `false` | Bypass the keepalive pool — every RPC dials fresh. Useful when chasing wire-level bugs. |
 
-### 5.6. Optional features
+### 5.6. Reliability layer (v0.6.0 — N1-N8)
+
+Every knob below has a safe default; the gateway boots successfully
+with none of them set. See [CHANGELOG.md](../CHANGELOG.md#060---2026-07-02)
+for the full behaviour matrix.
+
+| Variable                              | Default | Description                                              |
+|---------------------------------------|---------|----------------------------------------------------------|
+| `HOLOFS_MEDIUM_CONCURRENCY`           | `64`    | **N3** — permits for the MEDIUM route bucket (decodes, PUT, dir ops). On saturation the handler middleware returns 503 with a diagnostic body instead of piling axum tasks. Tune against `holofs_backpressure_permits_available{bucket="medium"}`. |
+| `HOLOFS_LONG_CONCURRENCY`             | `8`     | **N3** — permits for the LONG bucket (semantic search, spotlight, `/api/gc`, `/api/embed_all`, fingerprint scans). |
+| `HOLOFS_REPUTATION_PERSIST_INTERVAL`  | `30`    | **N5** — how often the shared `Reputation` state is snapshotted to `<storage>/reputation.bin`. The bootstrap loads it back next start; a `n_nodes` mismatch or corrupt file silently falls back to a fresh table. A final snapshot is also written on SIGTERM. |
+| `HOLOFS_ADMIN_TOKEN`                  | _(unset)_ | **N6** — when set, `POST /admin/node` and `POST /api/gc` require `Authorization: Bearer <token>`. Missing/wrong → 401. |
+| `HOLOFS_ADMIN_UNAUTHENTICATED`        | _(unset)_ | **N6 dev override** — set to `1` to leave the admin surface open when `HOLOFS_ADMIN_TOKEN` is unset. Logs a WARN at boot. If neither var is set the admin surface is disabled (403). |
+
+Timeouts are hard-coded per bucket by design (SHORT 10 s, MEDIUM 60 s,
+LONG 300 s); streaming endpoints (SSE, multipart/x-mixed-replace) +
+`/mcp` are intentionally unbudgeted. Elapsed handlers surface as
+`504 Gateway Timeout` and increment
+`holofs_handler_timeouts_total{bucket=…}`.
+
+### 5.7. Optional features
 
 | Variable                    | Default | Description                                              |
 |-----------------------------|---------|----------------------------------------------------------|
@@ -312,32 +332,42 @@ Every variable has a matching CLI flag (`--storage`, `--log`, etc.) — run
 
 The gateway exposes `GET /metrics` in Prometheus text exposition format
 (`text/plain; version=0.0.4`). Pull-based gauges sourced from
-`Gateway::api_stats` + admin-kill snapshot — no counters/histograms in the
-initial release.
+`Gateway::api_stats` + admin-kill snapshot plus the v0.6.0 N-series
+counters.
 
-| Metric                              | Type  | Labels                       | Meaning |
-|-------------------------------------|-------|------------------------------|---------|
-| `holofs_nodes_total`                | gauge | —                            | nodes in topology |
-| `holofs_nodes_live`                 | gauge | —                            | nodes not admin-disabled |
-| `holofs_objects_total`              | gauge | `kind` (image/audio/text/opaque/directory) | catalog size by kind |
-| `holofs_shards_total`               | gauge | —                            | planned shards across catalog |
-| `holofs_shards_unique`              | gauge | —                            | distinct shard hashes |
-| `holofs_dedup_savings_pct`          | gauge | —                            | `(1 − unique/total) × 100` |
-| `holofs_bytes_total`                | gauge | —                            | approximate stored bytes |
-| `holofs_node_admin_killed`          | gauge | `node`, `addr`, `zone`       | per-node admin-kill flag |
-| `holofs_auto_repairs_total`         | gauge | —                            | GETs that triggered `decode_with_autorepair`'s retry arm (Stage 14.3) |
-| `holofs_auto_repair_failures_total` | gauge | —                            | auto-repair passes that themselves failed |
-| `holofs_scrub_runs_total`           | gauge | —                            | background scrub ticks completed (`HOLOFS_SCRUB_INTERVAL`) |
-| `holofs_scrub_repairs_total`        | gauge | —                            | objects the scrub repaired *before* any user hit them |
+| Metric                                       | Type    | Labels                       | Meaning |
+|----------------------------------------------|---------|------------------------------|---------|
+| `holofs_nodes_total`                         | gauge   | —                            | nodes in topology |
+| `holofs_nodes_live`                          | gauge   | —                            | nodes not admin-disabled |
+| `holofs_objects_total`                       | gauge   | `kind` (image/audio/text/opaque/directory) | catalog size by kind |
+| `holofs_shards_total`                        | gauge   | —                            | planned shards across catalog |
+| `holofs_shards_unique`                       | gauge   | —                            | distinct shard hashes |
+| `holofs_dedup_savings_pct`                   | gauge   | —                            | `(1 − unique/total) × 100` |
+| `holofs_bytes_total`                         | gauge   | —                            | approximate stored bytes |
+| `holofs_node_admin_killed`                   | gauge   | `node`, `addr`, `zone`       | per-node admin-kill flag |
+| `holofs_auto_repairs_total`                  | counter | —                            | GETs that triggered `decode_with_autorepair`'s retry arm (Stage 14.3) |
+| `holofs_auto_repair_failures_total`          | counter | —                            | auto-repair passes that themselves failed |
+| `holofs_scrub_runs_total`                    | counter | —                            | background scrub ticks completed (`HOLOFS_SCRUB_INTERVAL`) |
+| `holofs_scrub_repairs_total`                 | counter | —                            | objects the scrub repaired *before* any user hit them |
+| `holofs_catalog_persist_failures_total`      | counter | —                            | **N4** — atomic catalog save-to-disk errors. Non-zero = on-disk state is behind memory; next restart loses writes. Alert immediately. |
+| `holofs_handler_timeouts_total`              | counter | `bucket` (short/medium/long) | **N7** — 504 responses caused by the per-bucket deadline. |
+| `holofs_backpressure_rejected_total`         | counter | `bucket` (medium/long)       | **N3** — 503 responses caused by the semaphore being at capacity. |
+| `holofs_backpressure_permits_available`      | gauge   | `bucket` (medium/long)       | **N3** — permits still free. Constantly at 0 = under-provisioned bucket; constantly at max = idle. |
+| `holofs_supervised_task_restarts_total`      | counter | `task` (monitor/auditor/scrub) | **N2** — supervised loop panics + unexpected exits. Any non-zero flags a repeated crash the operator should investigate. |
+| `holofs_admin_auth_failures_total`           | counter | `outcome` (missing/bad/disabled) | **N6** — admin bearer-token rejections split by reason. `disabled` = surface refused because neither `HOLOFS_ADMIN_TOKEN` nor `HOLOFS_ADMIN_UNAUTHENTICATED` is set. |
 
 A healthy cluster keeps the four self-healing counters at zero or
 near-zero; sustained non-zero rate on `auto_repair_failures_total`
 is the operator alert signal that placement / disk loss has gone
 beyond what the K threshold can absorb.
 
-Future releases will add counters and histograms for wire RTT,
-repair throughput, decode latency, and reputation (currently
-logged via `tracing` only).
+The N4/N7/N3/N2/N6 counters together form the "reliability alert
+dashboard" — every one of them should be flat at zero on a
+well-provisioned cluster with a token configured. See the reference
+alert rules below.
+
+Future releases will add histograms for wire RTT, decode latency,
+and per-object reputation (currently logged via `tracing` only).
 
 ### 6.2. Reference alert rules
 
@@ -372,6 +402,60 @@ groups:
     for: 1h
     annotations:
       summary: "node {{ $labels.node }} reputation collapsed (audit mismatches)"
+
+  # v0.6.0 — N-series reliability alerts.
+
+  - alert: HolofsCatalogPersistFailing
+    expr: rate(holofs_catalog_persist_failures_total[10m]) > 0
+    for: 5m
+    annotations:
+      summary: "gateway is failing to persist the catalog to disk"
+      description: |
+        holofs_catalog_persist_failures_total is climbing.
+        Every increment = one 500 on a PUT/mkdir/rmdir/rename and one
+        write that in-memory succeeded but on-disk didn't. Next
+        restart will drop those changes. Check disk space + FS mount
+        options on the gateway host.
+
+  - alert: HolofsHandlerTimeouts
+    expr: rate(holofs_handler_timeouts_total[15m]) > 0.05
+    for: 15m
+    annotations:
+      summary: "handler bucket {{ $labels.bucket }} exceeding deadline"
+      description: |
+        More than one 504 every ~20 seconds. Slow cluster, slow disk,
+        or the deadline is too tight for the traffic pattern.
+
+  - alert: HolofsBackpressureSaturated
+    expr: holofs_backpressure_permits_available == 0
+    for: 5m
+    annotations:
+      summary: "bucket {{ $labels.bucket }} has zero permits available"
+      description: |
+        The MEDIUM/LONG semaphore is at 0 for 5 minutes straight.
+        Either the cluster is genuinely overloaded (scale up nodes)
+        or the cap is too low for the workload — bump the matching
+        HOLOFS_*_CONCURRENCY env var.
+
+  - alert: HolofsSupervisedTaskRestarting
+    expr: rate(holofs_supervised_task_restarts_total[30m]) > 0
+    for: 15m
+    annotations:
+      summary: "{{ $labels.task }} is crashing repeatedly"
+      description: |
+        The supervised background loop is panicking + being restarted
+        by supervised_spawn. Read the gateway logs for the panic
+        payload and file a bug.
+
+  - alert: HolofsAdminAuthAttempts
+    expr: rate(holofs_admin_auth_failures_total{outcome=~"missing|bad"}[10m]) > 0.1
+    for: 10m
+    annotations:
+      summary: "admin surface seeing sustained 401s (possible probe)"
+      description: |
+        Someone is hitting /admin/node or /api/gc without a valid
+        bearer. Missing = no Authorization header at all; bad = wrong
+        token. If unexpected, treat as a probe.
 ```
 
 ### 6.3. Tracing

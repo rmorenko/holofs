@@ -10,7 +10,8 @@ holographic-degradation property?".
 git clone https://github.com/holofs/holofs
 cd holofs
 cargo build --workspace --release
-cargo test --workspace --exclude holofs-e2e            # 320 unit + integration tests
+cargo test --workspace --exclude holofs-e2e            # 329 unit + integration tests
+cargo test -p holofs-web --features ssr --lib          # 56 SSR-only lib tests
 cargo leptos build --release                           # builds SSR binary + WASM bundle
 ./target/release/holofs-web                            # http://127.0.0.1:8787/
 ```
@@ -31,6 +32,8 @@ crates/
   holofs-embed/     CLIP-multilingual embeddings + HNSW ANN index for /search
   holofs-analytics/ perceptual hash, MinHash, chunk diff, escrow
   holofs-gateway/   catalog, decode pipeline, auto-repair-on-read, background scrub
+                    (18-module fan-out post v0.6.0; see docs/architecture.md § 1.1)
+  holofs-testutils/ shared DisablePool + spawn_mock_node helpers (dev-only)
   holofs-mcp/       Streamable-HTTP Model Context Protocol server
   holofs-web/       axum + Leptos 0.7 SSR frontend (binary: holofs-web)
   holofs-cli/       binaries (holofs-admin, holofs-bench, holofs-inspect, ...)
@@ -82,7 +85,11 @@ Three layers:
 
 Run [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) to
 verify your change doesn't regress the line-coverage on the measurable
-surface (currently 91 %):
+surface. The v0.5.0 baseline was 91 %; the v0.6.0 R1 refactor moved
+a lot of code around without changing behaviour, so the number is
+approximately preserved. Watch for regressions in the newly added
+reliability modules (`supervised`, `timeout`, `backpressure`,
+`admin_auth`):
 
 ```sh
 cargo install cargo-llvm-cov
@@ -106,11 +113,38 @@ preferably at the level closest to the bug:
   `holofs-client` / `holofs-cluster`
 - HTTP-handler / UI bug → e2e test under `holofs-e2e/tests/`
 
+## Reliability layer (v0.6.0)
+
+Post-v0.6.0 every long-running background task in `holofs-web`
+goes through the `supervised` wrapper, and every `axum` route
+lives in one of four buckets (short / medium / long / streaming)
+with its own timeout + backpressure policy. Before touching any
+of the following, please read the module-level docs and the
+sibling unit tests:
+
+| Concern | Module | See also |
+|---|---|---|
+| SIGTERM / SIGINT drain | `holofs_web::bootstrap` + `holofs_web::main` | `CHANGELOG.md § N1` |
+| Panic-safe background loops | `holofs_web::supervised::supervised_spawn` | tests in the same module |
+| Per-route timeouts | `holofs_web::timeout` | `docs/api.md § /metrics`, tests in the module |
+| Per-bucket backpressure | `holofs_web::backpressure` | `docs/operations.md § 5.6` |
+| Admin bearer-token auth | `holofs_web::admin_auth` | `docs/api.md § Admin auth` |
+| Fail-loud catalog persist | `holofs_gateway::Gateway::persist_catalog` | tests in `holofs_gateway::http_gateway::tests` |
+| Persistent reputation | `holofs_cluster::reputation` (`save_atomic` / `load_or_new`) | tests in the same module |
+| Prometheus counters | `holofs_gateway::Gateway::observability_counters()` + `holofs_web::handlers::metrics` | `docs/operations.md § 6.1` |
+
+New `Gateway` methods belong to their concern's sibling module
+(`ingest`, `decode`, `search`, `versions`, ...) — see
+`docs/architecture.md § 1.1` for the map. Nothing should grow
+back into `http_gateway.rs`.
+
 ## PR checklist
 
 - [ ] `cargo fmt --all --check` passes
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes
-- [ ] `cargo test --workspace --exclude holofs-e2e` passes (320 tests)
+- [ ] `cargo test --workspace --exclude holofs-e2e` passes (329 tests)
+- [ ] `cargo test -p holofs-web --features ssr --lib` passes (56 SSR tests)
+       when the change touches middleware / bootstrap in holofs-web
 - [ ] `cargo test -p holofs-e2e -- --test-threads=1` passes when the
        change touches HTTP / UI surfaces (106 tests + 10 `#[ignore]`'d)
 - [ ] `cargo doc --no-deps --workspace` builds with no warnings

@@ -1675,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "holofs-analytics"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "holofs-core",
  "holofs-model",
@@ -1683,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "holofs-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "holofs-analytics",
  "holofs-client",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "holofs-client"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "holofs-analytics",
  "holofs-codec",
@@ -1716,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "holofs-cluster"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "holofs-client",
  "holofs-core",
@@ -1730,7 +1730,7 @@ dependencies = [
 
 [[package]]
 name = "holofs-codec"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "holofs-core",
  "image",
@@ -1740,11 +1740,11 @@ dependencies = [
 
 [[package]]
 name = "holofs-core"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "holofs-e2e"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "holofs-embed"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -1776,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "holofs-gateway"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "holofs-analytics",
  "holofs-client",
@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "holofs-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "holofs-cluster",
@@ -1809,14 +1809,14 @@ dependencies = [
 
 [[package]]
 name = "holofs-model"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "holofs-core",
 ]
 
 [[package]]
 name = "holofs-storage"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ed25519-dalek",
  "holofs-core",
@@ -1831,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "holofs-testutils"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "holofs-wire",
  "tokio",
@@ -1839,7 +1839,7 @@ dependencies = [
 
 [[package]]
 name = "holofs-web"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -1880,7 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "holofs-wire"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "holofs-core",
  "tokio",

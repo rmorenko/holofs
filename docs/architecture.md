@@ -31,7 +31,7 @@ graph BT
     cluster["holofs-cluster<br/>health, monitor, audit, repair, reputation"]
     embed["holofs-embed<br/>CLIP-multilingual + HNSW ANN"]
     analytics["holofs-analytics<br/>fingerprint, MinHash, escrow"]
-    gateway["holofs-gateway<br/>catalog, decode, auto-repair, scrub"]
+    gateway["holofs-gateway<br/>catalog, decode, auto-repair, scrub<br/>(18-module fan-out post v0.6.0)"]
     mcp["holofs-mcp<br/>Streamable-HTTP MCP server"]
     web["holofs-web<br/>axum + Leptos 0.7 SSR + WASM hydrate"]
     cli["holofs-cli<br/>holofs-admin, -bench, -inspect, ..."]
@@ -75,6 +75,65 @@ graph BT
 **Rule of thumb.** A pull request that adds an upward edge in this graph
 needs a separate discussion — it almost always means a type or function is
 in the wrong crate.
+
+### 1.1. Gateway module layout (post v0.6.0)
+
+The `holofs-gateway` crate ships one type — `Gateway` — but its
+implementation is split across 18 sibling modules, each owning one
+`impl Gateway { ... }` block. Everything remaining in
+`http_gateway.rs` (288 lines) is state + accessors + the two shared
+helpers `persist_catalog` and `invalidate_cache`. Public API is
+preserved via crate-root `pub use`; consumers still write
+`holofs_gateway::GatewayError`, `holofs_gateway::SimilarReport`,
+etc. without touching the module path.
+
+| Module | Purpose |
+|---|---|
+| `http_gateway` | `Gateway` struct, constructors, accessors, `persist_catalog`, `invalidate_cache`. |
+| `error` | `GatewayError` enum + `Display` + `From<NoLiveNodes>`. |
+| `util` | Small helpers: `now_unix`, `directory_object_id`, content-type sniffers, `encode_png`. |
+| `decode` | HTTP-facing decode dispatch — `decode_object`, `get_or_decode` (PNG cache). |
+| `ingest` | Universal PUT — `ingest_bytes`, `put_any`, per-kind blank-manifest helpers. |
+| `repair` | `decode_with_autorepair`, `repair_object_inplace`, `purge_orphans_of`. |
+| `dirops` | `remove_object`, `mkdir`, `rmdir`, `rename`, `list_dir`. |
+| `versions` | Per-object version history: archive / list / restore / delete + retention. |
+| `search` | CLIP-multilingual embed pipeline + HNSW-backed semantic search. |
+| `similarity` | `SimilarScope` / `SimilarMatch` / `ShardOverlap` types + scope helpers. |
+| `fingerprint` | Perceptual FP + `similar_to`. |
+| `mix` | Wavelet mix + audio band filter. |
+| `diff` | Byte-perfect chunk-diff analyzer. |
+| `spotlight` | Stage 13.2 + 14.1 ROI composites. |
+| `inspect` | `/inspect` view-model + shard payload extraction. |
+| `metrics` | `file_metrics` — storage/dedup + originality + layer energy in one pass. |
+| `health` | Cluster stats, admin toggles, `scrub_tick`, `object_health`. |
+| `escrow` | Shamir-style RLNC key escrow. |
+| `gc` | Orphan-shard garbage collector. |
+
+**Rule of thumb.** New `Gateway` methods belong to the module whose
+concern they extend, not to `http_gateway.rs`. If a new module is
+needed, it goes alongside the others and gets its own `impl Gateway`
+block; nothing in `http_gateway.rs` should grow again.
+
+### 1.2. Reliability layer (v0.6.0 — N1-N8)
+
+The reliability primitives live in `holofs-web` because they
+compose the HTTP surface, not the gateway state. See
+[operations.md § 5.6](operations.md#56-reliability-layer-v060--n1-n8)
+for the env-var reference and [CHANGELOG.md](../CHANGELOG.md#060---2026-07-02)
+for the full behaviour matrix.
+
+| Module | Purpose |
+|---|---|
+| `holofs_web::supervised` | `supervised_spawn(name, shutdown, counter, f)` — panic-catching + exp-backoff restart wrapper around `tokio::spawn`. Powers **N2**. |
+| `holofs_web::timeout` | `run_with_deadline` middleware + `SHORT`/`MEDIUM`/`LONG` duration buckets. Powers **N7**. |
+| `holofs_web::backpressure` | `with_permit` middleware — `Arc<Semaphore>::try_acquire_owned` per bucket, 503 on saturation. Powers **N3**. |
+| `holofs_web::admin_auth` | `AdminAuth::from_env` + `require_admin_token` middleware — bearer-token gate for `/admin/*` + `/api/gc`. Powers **N6**. |
+| `holofs_web::bootstrap` | Reads env, wires the shared `CancellationToken` into every long-running task (**N1**), builds the `Bootstrap` handle main.rs joins on shutdown, plumbs the reputation-persist supervised task (**N5**). |
+
+**Fail-loud persistence (N4)** is a gateway-side change, not a
+holofs-web one: `Gateway::persist_catalog` returns
+`Result<(), GatewayError::Persist>` and every writer path (`ingest`,
+`dirops`, `versions`) propagates via `?`.
 
 ---
 
@@ -297,14 +356,19 @@ trust class as Backblaze B2 or AWS S3, not Filecoin or Storj. See
 
 ### Background tasks in the gateway
 
-| Task               | Cadence | Crate           |
-|--------------------|---------|------------------|
-| Health monitor     | `HOLOFS_MONITOR_INTERVAL` (15 s default) | holofs-cluster |
-| PoR auditor        | `HOLOFS_AUDIT_INTERVAL` (30 s default)   | holofs-cluster |
-| **Shard scrub**    | `HOLOFS_SCRUB_INTERVAL` (600 s default)  | holofs-gateway |
-| Catalog autosave   | on every catalog mutation (inline)       | holofs-gateway |
+| Task                 | Cadence | Crate           |
+|----------------------|---------|------------------|
+| Health monitor       | `HOLOFS_MONITOR_INTERVAL` (15 s default) | holofs-cluster |
+| PoR auditor          | `HOLOFS_AUDIT_INTERVAL` (30 s default)   | holofs-cluster |
+| Shard scrub          | `HOLOFS_SCRUB_INTERVAL` (600 s default)  | holofs-gateway |
+| Reputation persist   | `HOLOFS_REPUTATION_PERSIST_INTERVAL` (30 s default; **N5**) | holofs-web |
+| Catalog autosave     | on every catalog mutation (inline)       | holofs-gateway |
 
-All three background loops are aborted on SIGINT via `tokio::select!`.
+All four background loops run under
+[`holofs_web::supervised::supervised_spawn`](#12-reliability-layer-v060--n1-n8):
+a panic → ERROR log + exponential-backoff (1 → 30 s cap) + restart.
+They also honour a shared `tokio_util::sync::CancellationToken` and
+drain cleanly on SIGTERM / SIGINT (see **N1**).
 
 ### Auto-repair-on-read + scrub (Stage 14.3 + 15.x)
 

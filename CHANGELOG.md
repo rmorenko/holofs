@@ -7,7 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet; the slate is clean after the 0.5.0 cut._
+_Nothing yet; the slate is clean after the 0.6.0 cut._
+
+## [0.6.0] - 2026-07-02
+
+### Changed — Phase R1: gateway monolith decomposition
+
+- **`http_gateway.rs` shrunk from 4477 → 288 lines (~93.6%).** The
+  historical god-module split into 18 single-purpose siblings under
+  `crates/holofs-gateway/src/`:
+  `decode`, `diff`, `dirops`, `error`, `escrow`, `fingerprint`, `gc`,
+  `health`, `ingest`, `inspect`, `metrics`, `mix`, `repair`, `search`,
+  `similarity`, `spotlight`, `util`, `versions`. Each module owns one
+  `impl Gateway { ... }` block. The `Gateway` struct + accessors +
+  `persist_catalog` / `invalidate_cache` are all that remain in
+  `http_gateway.rs`. Public API preserved via `pub use` at the crate
+  root, so `holofs_gateway::GatewayError`, `SimilarReport`,
+  `FileMetrics`, etc. still resolve without touching the module path.
+- **`holofs-testutils` crate** extracted from three copies of the
+  same `DisablePool` + `spawn_mock_node` helper across the client,
+  transport, and audit test suites. Consumed as `[dev-dependencies]`.
+
+### Added — Phase N1-N8: reliability layer
+
+- **N1 — graceful shutdown.** SIGTERM / SIGINT (Ctrl-C on Windows)
+  now drains axum + the three long-running loops + the 40 embedded
+  node listeners in under a second. Coordinated via a shared
+  `tokio_util::sync::CancellationToken`. `axum::serve.with_graceful_shutdown`
+  stops accepting new connections when the token fires and waits
+  for in-flight requests; the background loops honour the token
+  inside `tokio::select!` around every tick and every sleep.
+- **N2 — supervised background tasks.** New
+  `holofs_web::supervised::supervised_spawn(name, shutdown, counter, f)`
+  spawns the inner future as a child `tokio::task` and joins on it.
+  A panic → ERROR log + exponential backoff (1 → 2 → 4 → 8 → 16 → 30 s
+  cap) + restart. Wired into the monitor / auditor / scrub loops in
+  bootstrap. Pre-N2 those loops advertised "suppresses per-tick
+  panics" in their docs but never actually caught anything — a bug
+  under `tick_once` silently killed the whole loop until an operator
+  noticed a metric had stopped moving.
+- **N3 — bounded-concurrency backpressure.** Two semaphores per
+  route bucket:
+  - **MEDIUM** (default cap 64, `HOLOFS_MEDIUM_CONCURRENCY`) — decodes,
+    PUT, directory ops.
+  - **LONG** (default cap 8, `HOLOFS_LONG_CONCURRENCY`) — semantic
+    search, spotlight, `POST /api/gc`.
+  On saturation the middleware returns `503 Service Unavailable`
+  with a diagnostic body instead of piling axum tasks onto the
+  runtime. SHORT bucket (`/api/stats`, `/metrics`) and streaming
+  endpoints (SSE, `/preview/stream/*`) intentionally unbudgeted.
+- **N4 — fail-loud catalog persistence.** `Gateway::persist_catalog`
+  used to swallow IO errors via `eprintln!` and let the caller
+  succeed anyway; a disk-full incident only surfaced hours later at
+  the next restart. Now returns `Result<(), GatewayError::Persist>`
+  which maps to `500 Internal Server Error`. Every writer path
+  (`ingest_bytes`, `mkdir`, `rmdir`, `rename`, `remove_object`,
+  `restore_version`) propagates. `Directory::save_atomic` also gained
+  a race-free unique-tmp path (`.tmp.<pid>.<counter>`) so parallel
+  writers no longer collide on a shared tmp filename.
+- **N5 — persistent node reputation.** `Reputation` gained
+  `encode` / `decode` / `save_atomic` / `load_or_new`. Wire format:
+  `MAGIC | u32 n | f32 alpha | f32*n scores`. Bootstrap loads
+  `<storage>/reputation.bin` if present (falling back to a fresh
+  table on missing / corrupt / `n_nodes`-mismatched file). New
+  supervised task `reputation-persist` snapshots the shared state
+  every `HOLOFS_REPUTATION_PERSIST_INTERVAL` seconds (default 30)
+  and once more on shutdown so the last observations survive a
+  restart.
+- **N6 — admin bearer-token auth.** `POST /admin/node` and
+  `POST /api/gc` are gated by
+  `Authorization: Bearer $HOLOFS_ADMIN_TOKEN` when the env var is
+  set. Missing header → 401 (missing). Wrong token → 401 (bad).
+  Env var unset → 403 (disabled) — safe-by-default; dev override
+  via `HOLOFS_ADMIN_UNAUTHENTICATED=1` at the cost of a WARN at
+  boot. Split by rejection reason in
+  `holofs_admin_auth_failures_total{outcome=…}`.
+- **N7 — per-route HTTP handler timeouts.** Three buckets:
+  - **SHORT** (10 s) — `/api/stats`, `/metrics`, `/admin/node`.
+  - **MEDIUM** (60 s) — decodes, PUT, dir ops, mix, diff, inspect,
+    escrow.
+  - **LONG** (5 min) — `/api/search`, `/api/spotlight.png`,
+    `/api/gc`, `/api/embed_all`, `/api/fingerprint/*`.
+  Streaming endpoints (SSE, multipart/x-mixed-replace) + MCP
+  intentionally unbudgeted (the timer would start on the first byte
+  and kill an SSE stream at the deadline). Elapsed → 504 Gateway
+  Timeout with a diagnostic body.
+- **N8 — observability metrics.** `/metrics` extended with the
+  N-series counters:
+  ```
+  holofs_catalog_persist_failures_total
+  holofs_handler_timeouts_total{bucket="short|medium|long"}
+  holofs_backpressure_rejected_total{bucket="medium|long"}
+  holofs_backpressure_permits_available{bucket="medium|long"}   (gauge)
+  holofs_supervised_task_restarts_total{task="monitor|auditor|scrub"}
+  holofs_admin_auth_failures_total{outcome="missing|bad|disabled"}
+  ```
+
+### Env vars added in v0.6.0
+
+| Var | Default | Effect |
+|---|---|---|
+| `HOLOFS_MEDIUM_CONCURRENCY` | 64 | N3 permits for the MEDIUM bucket. |
+| `HOLOFS_LONG_CONCURRENCY` | 8 | N3 permits for the LONG bucket. |
+| `HOLOFS_REPUTATION_PERSIST_INTERVAL` | 30 (s) | N5 save cadence. |
+| `HOLOFS_ADMIN_TOKEN` | _(unset)_ | N6 bearer token; sets the required `Authorization: Bearer …` value. |
+| `HOLOFS_ADMIN_UNAUTHENTICATED` | _(unset)_ | N6 dev override — set to `1` to leave /admin + /api/gc open. |
+
+### Tests
+
+- 329 workspace + 56 SSR-only (holofs-web features=ssr) + 106 e2e =
+  **491 tests, all green.** Adds ~90 new unit tests covering the
+  reliability primitives and the module refactor.
 
 ## [0.5.0] - 2026-06-30
 

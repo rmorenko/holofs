@@ -91,7 +91,7 @@ Status-code mapping for the dir ops:
 | `GET`  | `/health`             | Per-node table, kill/revive buttons          |
 | `GET`  | `/health/<name>`      | Margin per (channel, layer), Monte-Carlo loss simulation, zone-failure table |
 | `GET`  | `/api/stats`          | JSON: object counts by kind, shards, dedup % |
-| `POST` | `/admin/node` (`i=N`) | Toggle node N (admin-side excluded/restored) |
+| `POST` | `/admin/node` (`i=N`) | Toggle node N (admin-side excluded/restored). **Admin-auth gated (v0.6.0 N6)** — requires `Authorization: Bearer $HOLOFS_ADMIN_TOKEN` when the env var is set. |
 
 `/api/stats` returns:
 
@@ -134,9 +134,27 @@ signal.
 
 #### `GET /metrics` — Prometheus exposition
 
-`text/plain; version=0.0.4` body, one gauge per `/api/stats` field,
-each with `# HELP` + `# TYPE` lines. Drop-in compatible with the
-default scrape config; no labels except `holofs_objects_total{kind}`.
+`text/plain; version=0.0.4` body — every gauge / counter emits
+`# HELP` + `# TYPE` lines. See
+[`docs/operations.md § 6.1`](operations.md#61-metrics-endpoint) for
+the full metric catalog, labels, and interpretation. v0.6.0
+introduced the N-series reliability counters:
+
+- `holofs_catalog_persist_failures_total` — **N4**, disk-write errors
+  on the atomic catalog save.
+- `holofs_handler_timeouts_total{bucket="short|medium|long"}` —
+  **N7**, 504 responses.
+- `holofs_backpressure_rejected_total{bucket="medium|long"}` — **N3**,
+  503 responses on semaphore saturation.
+- `holofs_backpressure_permits_available{bucket="medium|long"}` —
+  **N3**, gauge of permits still free.
+- `holofs_supervised_task_restarts_total{task="monitor|auditor|scrub"}`
+  — **N2**, supervised-loop restarts on panic.
+- `holofs_admin_auth_failures_total{outcome="missing|bad|disabled"}` —
+  **N6**, admin bearer-token rejections split by reason.
+
+`/metrics` lives in the SHORT route bucket and inherits the 10 s
+deadline; a slow `/metrics` response is itself an alert signal.
 
 ### Search and analytics
 
@@ -228,7 +246,7 @@ gateway (no `--enable-embed`) → 503 + hint about the missing flag.
 
 | Method | Path                          | Description |
 |--------|-------------------------------|-------------|
-| `POST` | `/api/gc`                     | Orphan-shard collector. Walks catalog + version archives, lists every node's hashes, asks each to `PurgeByHash` the residue |
+| `POST` | `/api/gc`                     | Orphan-shard collector. Walks catalog + version archives, lists every node's hashes, asks each to `PurgeByHash` the residue. **Admin-auth gated (v0.6.0 N6)** — see below. |
 | `POST` | `/api/upload` (multipart)     | Form-friendly upload. Fields: `parent` (string, may be empty), `file` (binary), optional `name` rename, `return_to` |
 | `POST` | `/api/mv`                     | Rename / move. Form fields `from=…&to=…`. 4xx on clobber attempts. |
 
@@ -255,17 +273,22 @@ Idempotent — running twice on a healthy cluster reports zero on the
 second pass. `embeddings_kept` / `embeddings_dropped` are `null`
 when `--enable-embed` is off.
 
-### Reliability env knobs (Stage 15.x)
+### Reliability env knobs (Stage 15.x + v0.6.0)
 
-| Variable                       | Default | Effect                                                  |
-|--------------------------------|---------|---------------------------------------------------------|
-| `HOLOFS_RPC_TIMEOUT_MS`        | `8000`  | Per-RPC timeout (`tokio::time::timeout` wrapper). `0` disables. |
-| `HOLOFS_SCRUB_INTERVAL`        | `600`   | Background scrub interval in seconds. `0` disables.    |
-| `HOLOFS_VERSIONS_KEEP_LAST`    | `0`     | Per-name history cap. Drops oldest on each PUT. `0` = unbounded. |
-| `HOLOFS_NO_SEED`               | `false` | Skip the embedded-mode demo PNG seed on an empty catalog. |
-| `HOLOFS_POOL_PER_NODE`         | `8`     | Max idle pooled connections per node addr.             |
-| `HOLOFS_POOL_IDLE_SECS`        | `60`    | Drop pooled entries idle longer than this on `acquire`. |
-| `HOLOFS_POOL_DISABLE`          | `false` | Bypass the keepalive pool — every RPC dials fresh.     |
+| Variable                              | Default | Effect                                                  |
+|---------------------------------------|---------|---------------------------------------------------------|
+| `HOLOFS_RPC_TIMEOUT_MS`               | `8000`  | Per-RPC timeout (`tokio::time::timeout` wrapper). `0` disables. |
+| `HOLOFS_SCRUB_INTERVAL`               | `600`   | Background scrub interval in seconds. `0` disables.    |
+| `HOLOFS_VERSIONS_KEEP_LAST`           | `0`     | Per-name history cap. Drops oldest on each PUT. `0` = unbounded. |
+| `HOLOFS_NO_SEED`                      | `false` | Skip the embedded-mode demo PNG seed on an empty catalog. |
+| `HOLOFS_POOL_PER_NODE`                | `8`     | Max idle pooled connections per node addr.             |
+| `HOLOFS_POOL_IDLE_SECS`               | `60`    | Drop pooled entries idle longer than this on `acquire`. |
+| `HOLOFS_POOL_DISABLE`                 | `false` | Bypass the keepalive pool — every RPC dials fresh.     |
+| `HOLOFS_MEDIUM_CONCURRENCY`           | `64`    | **N3** MEDIUM-bucket permits (decodes, PUT, dir ops).  |
+| `HOLOFS_LONG_CONCURRENCY`             | `8`     | **N3** LONG-bucket permits (search, spotlight, GC).    |
+| `HOLOFS_REPUTATION_PERSIST_INTERVAL`  | `30`    | **N5** — how often the shared `Reputation` state is snapshotted to `<storage>/reputation.bin`. |
+| `HOLOFS_ADMIN_TOKEN`                  | _(unset)_ | **N6** — bearer token for `/admin/*` + `/api/gc`. When set, the `Authorization: Bearer $TOKEN` header is mandatory. |
+| `HOLOFS_ADMIN_UNAUTHENTICATED`        | _(unset)_ | **N6 dev override** — set to `1` to leave the admin surface open when no token is configured (logs a WARN). |
 
 #### Cluster-degraded errors
 
@@ -282,6 +305,32 @@ When every node is admin-killed or unreachable, the typed
 `/admin/node?i=N` (form POST) toggles node `N` between
 admin-disabled and admin-restored. `nodes_live` in `/api/stats`
 reflects the effective set immediately.
+
+#### Admin auth (v0.6.0 — N6)
+
+`/admin/node` and `/api/gc` are gated by the following matrix,
+resolved once at process startup:
+
+| `HOLOFS_ADMIN_TOKEN` | `HOLOFS_ADMIN_UNAUTHENTICATED` | Header check | Rejection status |
+|----------------------|-------------------------------|--------------|------------------|
+| set                  | any                           | `Authorization: Bearer $TOKEN` required | 401 (missing / bad) |
+| unset                | `"1"`                         | skipped (dev override, WARN at boot) | — |
+| unset                | unset                         | skipped                | 403 Forbidden — the surface is **disabled**, not open |
+
+Every rejection increments
+`holofs_admin_auth_failures_total{outcome=missing|bad|disabled}`.
+Missing = no `Authorization` header at all; bad = wrong token;
+disabled = no token configured and no dev override.
+
+Example calls with a configured token:
+
+```sh
+export HOLOFS_ADMIN_TOKEN=$(openssl rand -hex 32)
+curl -H "Authorization: Bearer $HOLOFS_ADMIN_TOKEN" \
+     -X POST 'http://127.0.0.1:8787/admin/node?i=5'
+curl -H "Authorization: Bearer $HOLOFS_ADMIN_TOKEN" \
+     -X POST http://127.0.0.1:8787/api/gc
+```
 
 ---
 

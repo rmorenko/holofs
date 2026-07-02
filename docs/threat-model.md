@@ -157,6 +157,9 @@ mitigations in this document target it.
 | D5 | Slow-loris on TCP                                  | Per-RPC `tokio::time::timeout` budget (`HOLOFS_RPC_TIMEOUT_MS`, default 8 s, `0` disables). A timed-out RPC poisons the pooled stream and retries once on a fresh socket via `is_likely_transient`. Caps user-visible latency at 8 s + one retry instead of the OS-level 60-75 s TCP timeout. |
 | D6 | Memory exhaustion via huge frame                   | Frames > `MAX_FRAME` are rejected before allocation. |
 | D7 | All nodes simultaneously dark (e.g. boot race, fleet-wide deploy) | Stage 15.x: `placement::place` returns `Result<_, NoLiveNodes>` instead of asserting; gateway surfaces a clean `503 ServiceUnavailable` (`GatewayError::ClusterDegraded`) instead of panicking. Previously a single un-typed `assert!` in `place_shard` could crash the gateway process via a single PUT during a fleet outage. |
+| D8 | Concurrent-request flood exhausts axum runtime     | **v0.6.0 N3** — MEDIUM (default cap 64) and LONG (default cap 8) route buckets carry a `tokio::sync::Semaphore` guard. On saturation the middleware returns `503 Service Unavailable` immediately (rather than piling tasks onto the runtime). Configurable via `HOLOFS_MEDIUM_CONCURRENCY` / `HOLOFS_LONG_CONCURRENCY`. Rejections count toward `holofs_backpressure_rejected_total{bucket}`. |
+| D9 | Slow handler ties up the axum task queue          | **v0.6.0 N7** — per-bucket deadlines (SHORT 10 s / MEDIUM 60 s / LONG 5 min) enforced by a `tokio::time::timeout` middleware. Elapsed → `504 Gateway Timeout`; `holofs_handler_timeouts_total{bucket}` bumped. Streaming endpoints + MCP intentionally unbudgeted. |
+| D10 | Silent kill of a background loop by panic         | **v0.6.0 N2** — every long-running loop (monitor / auditor / scrub / reputation-persist) is spawned inside `supervised_spawn`, which catches panics via `JoinError` and restarts with exponential backoff (1 → 30 s). Restarts count toward `holofs_supervised_task_restarts_total{task}`. |
 
 ### 4.6. Elevation of privilege
 
@@ -167,6 +170,7 @@ mitigations in this document target it.
 | E3 | Compromised admin key                              | This is total compromise. Mitigation: keep admin key offline (HSM / paper backup), rotate via dual-control procedure. |
 | E4 | Privilege escalation inside container              | Container runs as `uid 10001`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`. |
 | E5 | Path traversal in object names                     | Object names are stored in catalog only; on-disk paths are content-addressed (`<hex2>/<hex62>.shard`). Object name never reaches the filesystem. |
+| E6 | Unauthenticated caller kills nodes / triggers full-cluster GC | **v0.6.0 N6** — `POST /admin/node` (kill/revive) and `POST /api/gc` require `Authorization: Bearer $HOLOFS_ADMIN_TOKEN` when the env var is set. Missing → 401, wrong → 401, env unset → **403 (surface disabled)** as safe-by-default. Dev override `HOLOFS_ADMIN_UNAUTHENTICATED=1` re-opens the endpoints and logs a WARN at boot. Rejections split by reason in `holofs_admin_auth_failures_total{outcome}`. |
 
 ---
 

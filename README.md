@@ -8,9 +8,23 @@ sufficient handful of shards reconstructs the data exactly; an insufficient
 handful still yields the same data, just at a lower resolution. Like a piece
 of a hologram: cut it in half and the picture remains whole, just blurrier.
 
-> Status: working prototype, **v0.5.0**, **426 tests** green (320
-> workspace + 106 e2e; **91% line coverage** on measurable code). Not
-> for production. Fifteen implementation stages closed: axum + Leptos
+> Status: working prototype, **v0.6.0**, **491 tests** green (329
+> workspace + 56 SSR-only + 106 e2e). Not for production. Post-v0.5.0
+> the gateway monolith was decomposed (R1: `http_gateway.rs`
+> 4477 → 288 lines across 18 sibling modules) and a reliability layer
+> was added (N1-N8): SIGTERM/SIGINT graceful shutdown, supervised
+> background tasks with panic-catching + exponential-backoff restart,
+> bounded-concurrency backpressure per route bucket, fail-loud
+> `persist_catalog`, persistent node reputation across restarts,
+> admin bearer-token auth, per-route handler timeouts, and six new
+> `/metrics` counters (`holofs_catalog_persist_failures_total`,
+> `holofs_handler_timeouts_total{bucket}`,
+> `holofs_backpressure_rejected_total{bucket}`,
+> `holofs_backpressure_permits_available{bucket}`,
+> `holofs_supervised_task_restarts_total{task}`,
+> `holofs_admin_auth_failures_total{outcome}`).
+>
+> Earlier fifteen implementation stages remain in effect: axum + Leptos
 > SSR web UI, persistent multi-process cluster with Ed25519 identity,
 > signed admin-whitelist, opt-in rustls + mTLS on the wire, hierarchical
 > catalog with directory objects, per-object version history with
@@ -260,10 +274,11 @@ Top-level: `Cargo.toml` (workspace), `Cargo.lock`, `Dockerfile`,
 ## Tests
 
 ```sh
-cargo test --workspace --exclude holofs-e2e  # 320 workspace tests
-cargo test -p holofs-e2e -- --test-threads=1 # 106 e2e tests (needs chromedriver)
-cargo deny check                              # advisories + licenses + bans + sources
-cargo clippy --workspace                      # workspace lints (pedantic-leaning)
+cargo test --workspace --exclude holofs-e2e         # 329 workspace tests
+cargo test -p holofs-web --features ssr --lib       # 56 SSR-only lib tests
+cargo test -p holofs-e2e -- --test-threads=1        # 106 e2e tests (needs chromedriver)
+cargo deny check                                    # advisories + licenses + bans + sources
+cargo clippy --workspace                            # workspace lints (pedantic-leaning)
 ```
 
 The e2e suite spawns a fresh `holofs-web` gateway against a `TempDir`
@@ -280,7 +295,9 @@ cargo install cargo-llvm-cov
 cargo llvm-cov --workspace --exclude holofs-e2e --summary-only \
   --ignore-filename-regex \
   'tests/|holofs-e2e/|holofs-web/|holofs-cli/src/bin/|holofs-gateway/src/http_gateway\.rs|holofs-mcp/src/lib\.rs|holofs-embed/src/(model|text)\.rs|holofs-codec/src/image_io\.rs'
-# TOTAL ≈ 91% line coverage across the measurable surface.
+# TOTAL ≈ 91% line coverage across the measurable surface (v0.5.0
+# baseline; v0.6.0 refactor moved a lot of code around without
+# changing behaviour, so the number is approximately preserved).
 ```
 
 The CI matrix runs the same set on stable + beta on Linux / macOS /
