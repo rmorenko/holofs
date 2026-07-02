@@ -6,6 +6,7 @@ use std::net::Ipv4Addr;
 use holofs_client::{
     auth_check, discover_live, discover_live_with_whitelist, gather_layer, get_object,
     get_object_blocks, put_object, put_object_replicated_blocks, repair_node,
+    repair_node_replicated,
 };
 use holofs_core::transform::roi_to_block_ids_with_stride;
 use holofs_cluster::audit::{audit_shard, AuditOutcome};
@@ -421,6 +422,94 @@ async fn smoke_512x512_shard_budget_and_roundtrip() {
         bytes_corner * 10 < bytes_full,
         "corner ROI bytes {bytes_corner} not <10% of full {bytes_full}"
     );
+}
+
+#[tokio::test]
+async fn repair_node_replicated_restores_wiped_replicas() {
+    // Stage 15.1 repair path: put a Replicated object, wipe a
+    // node's store completely, run repair_node_replicated, verify
+    // the node now holds exactly the block hashes its R-placement
+    // says it should. Full get_object_blocks roundtrip after the
+    // repair must still reconstruct the original.
+    let (addrs, stores) = spawn_cluster(N_NODES).await;
+    let n_nodes = addrs.len();
+    let mut manifest = build_manifest(addrs);
+    let channels = synth_channels();
+    let live = discover_live(&manifest).await;
+    let block_size: u32 = 8;
+    let replication: u8 = 3;
+    put_object_replicated_blocks(&mut manifest, &live, &channels, block_size, replication)
+        .await
+        .unwrap();
+
+    // Pick a node that actually holds blocks.
+    let victim: usize = 2;
+    let held_before = stores[victim].lock().await.total();
+    assert!(
+        held_before > 0,
+        "victim node should hold some blocks before wipe"
+    );
+    stores[victim].lock().await.wipe();
+    assert_eq!(stores[victim].lock().await.total(), 0);
+
+    let stats = repair_node_replicated(&mut manifest, &live, victim)
+        .await
+        .unwrap();
+    assert_eq!(stats.layers_unrecoverable, 0);
+    assert!(stats.shards_generated > 0);
+    // The victim now holds exactly as many blocks as it did
+    // before wipe — repair is byte-identical, no over- or
+    // under-shooting.
+    let held_after = stores[victim].lock().await.total();
+    assert_eq!(
+        held_after, held_before,
+        "victim should hold same count post-repair"
+    );
+
+    // Full get_object_blocks roundtrip must still reconstruct.
+    let all_ids: Vec<Vec<u32>> = manifest
+        .n_per_layer
+        .iter()
+        .map(|&n| (0..n).collect())
+        .collect();
+    let (recon, _) = get_object_blocks(&manifest, &live, &all_ids).await.unwrap();
+    let p = psnr(&channels, &recon);
+    assert!(p > 90.0, "post-repair PSNR {p:.1} dB");
+
+    // Manifest.shard_hashes and merkle_root must be UNCHANGED
+    // (block content is byte-identical across replicas, so no
+    // hash re-write is needed — this is the key contrast with the
+    // RLNC repair path).
+    let n_hashes: usize = manifest
+        .shard_hashes
+        .iter()
+        .flat_map(|c| c.iter())
+        .map(|l| l.len())
+        .sum();
+    let expected_hashes: usize =
+        manifest.channels as usize
+            * manifest.n_per_layer.iter().map(|&n| n as usize).sum::<usize>();
+    assert_eq!(n_hashes, expected_hashes);
+    // Silence n_nodes unused warning when 0.
+    let _ = n_nodes;
+}
+
+#[tokio::test]
+async fn repair_node_replicated_refuses_rlnc_object() {
+    // Guard rail: calling the Replicated repair on a RLNC object
+    // must fail loudly with Incompatible so a fork bug doesn't
+    // silently drop shards.
+    let (addrs, _stores) = spawn_cluster(N_NODES).await;
+    let mut manifest = build_manifest(addrs);
+    let channels = synth_channels();
+    let live = discover_live(&manifest).await;
+    // Plain put_object → manifest.encoding stays Rlnc.
+    let gf = Gf::new();
+    put_object(&gf, &mut manifest, &live, &channels).await.unwrap();
+    let err = repair_node_replicated(&mut manifest, &live, 0)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, holofs_client::ClientError::Incompatible(_)));
 }
 
 #[tokio::test]

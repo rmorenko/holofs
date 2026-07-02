@@ -1378,6 +1378,155 @@ pub async fn repair_node(
     Ok(stats)
 }
 
+/// Stage 15.1 repair path for `ObjectEncoding::Replicated` objects.
+///
+/// For every `(channel, layer, block_id)` whose HRW-computed
+/// R-placement contains `replacement`, fetch a byte-identical copy
+/// from any of the other R-1 replicas via `Request::Audit` and
+/// re-put it on the replacement node. No new hashes are generated
+/// (block content is byte-identical across replicas → Merkle root
+/// stays put), so the manifest's `shard_hashes` and `merkle_root`
+/// are read-only here.
+///
+/// Stats fields (repurposed from the RLNC-shaped `RepairStats`):
+///   * `shards_generated` — blocks actually re-planted.
+///   * `bytes_downloaded` — total fetched from surviving replicas.
+///   * `layers_repaired` — layers that had at least one block
+///     touched (loose "layer touched" count).
+///   * `layers_unrecoverable` — blocks whose every OTHER replica
+///     was also dead.
+///
+/// Assumes `manifest.encoding` is `Replicated`; returns
+/// `Incompatible` otherwise so a caller that forked incorrectly
+/// fails loud instead of silently dropping shards.
+pub async fn repair_node_replicated(
+    manifest: &mut Manifest,
+    live: &LiveNodes,
+    replacement: usize,
+) -> Result<RepairStats, ClientError> {
+    assert!(
+        live.contains(&replacement),
+        "replacement node must be live"
+    );
+    let (replication, _block_size) = match manifest.encoding {
+        ObjectEncoding::Replicated {
+            replication,
+            block_size,
+        } => (replication, block_size),
+        ObjectEncoding::Rlnc => {
+            return Err(ClientError::Incompatible(
+                "repair_node_replicated called on an Rlnc-encoded object; \
+                 use repair_node instead"
+                    .into(),
+            ))
+        }
+    };
+    let mut stats = RepairStats::default();
+    // Purge the replacement's object bucket first — clears any
+    // stale shards from a previous incarnation (matches the RLNC
+    // repair's Purge step). Idempotent on a fresh node.
+    match rpc(
+        &manifest.nodes[replacement],
+        Request::Purge {
+            object_id: manifest.object_id,
+        },
+    )
+    .await?
+    {
+        Response::Ack => {}
+        Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
+        other => {
+            return Err(ClientError::UnexpectedResponse {
+                expected: "Ack from Purge",
+                got: format!("{other:?}"),
+            })
+        }
+    }
+
+    let live_others: Vec<usize> = live.iter().copied().filter(|&n| n != replacement).collect();
+    for c in 0..manifest.channels {
+        for l in 0..manifest.nlayers {
+            let n_blocks = manifest.n_per_layer[l as usize] as usize;
+            let mut layer_touched = false;
+            for b in 0..n_blocks as u32 {
+                let key = ShardKey {
+                    object_id: manifest.object_id,
+                    channel: c,
+                    layer: l,
+                    shard_idx: b,
+                };
+                let placement = place_replicas(key, replication, live)?;
+                if !placement.contains(&replacement) {
+                    continue;
+                }
+                let expected_hash = manifest.shard_hashes[c as usize][l as usize][b as usize];
+                // Fetch from any live OTHER replica first, then
+                // any live OTHER node — HRW-favoured order.
+                let other_replicas: Vec<usize> = placement
+                    .iter()
+                    .copied()
+                    .filter(|&n| n != replacement && live_others.contains(&n))
+                    .collect();
+                let mut sources: Vec<usize> = other_replicas.clone();
+                for &n in &live_others {
+                    if !sources.contains(&n) {
+                        sources.push(n);
+                    }
+                }
+                let mut fetched: Option<Shard> = None;
+                for &node in &sources {
+                    let req = Request::Audit {
+                        object_id: manifest.object_id,
+                        channel: c,
+                        layer: l,
+                        shard_hash: expected_hash,
+                    };
+                    match rpc(&manifest.nodes[node], req).await {
+                        Ok(Response::AuditResp { shard: Some(s) })
+                            if shard_hash(&s) == expected_hash =>
+                        {
+                            fetched = Some(s);
+                            break;
+                        }
+                        Ok(_) => continue,
+                        Err(_) => continue,
+                    }
+                }
+                let Some(shard) = fetched else {
+                    stats.layers_unrecoverable += 1;
+                    continue;
+                };
+                stats.bytes_downloaded += shard.payload.len() as u64;
+                let put_req = Request::Put {
+                    object_id: manifest.object_id,
+                    channel: c,
+                    layer: l,
+                    shard,
+                };
+                match rpc(&manifest.nodes[replacement], put_req).await? {
+                    Response::Ack => {
+                        stats.shards_generated += 1;
+                        layer_touched = true;
+                    }
+                    Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
+                    other => {
+                        return Err(ClientError::UnexpectedResponse {
+                            expected: "Ack from Put",
+                            got: format!("{other:?}"),
+                        })
+                    }
+                }
+            }
+            if layer_touched {
+                stats.layers_repaired += 1;
+            }
+        }
+    }
+    // Manifest merkle_root + shard_hashes unchanged for Replicated
+    // (block content is byte-identical across replicas).
+    Ok(stats)
+}
+
 /// Erase every shard of the object on each `live` node. Invoked from
 /// `DELETE /<name>` in the gateway. Returns Ok only when ALL nodes acknowledge
 /// the Purge; the first refusal yields Err.

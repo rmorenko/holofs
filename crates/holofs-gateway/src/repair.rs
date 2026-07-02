@@ -16,8 +16,11 @@
 //!
 //! Moved out of `http_gateway.rs` in Phase R1b.13.
 
-use holofs_client::{get_object_up_to_layer, repair_node, ClientError, LiveNodes};
-use holofs_model::manifest::{Manifest, ObjectKind};
+use holofs_client::{
+    get_object_up_to_layer, repair_node, repair_node_replicated, ClientError, LiveNodes,
+};
+use holofs_model::manifest::{Manifest, ObjectEncoding, ObjectKind};
+use holofs_model::placement::{place_replicas, ShardKey};
 
 use crate::error::GatewayError;
 use crate::Gateway;
@@ -125,22 +128,57 @@ impl Gateway {
         let d = manifest.k as usize;
 
         // For each live node, compute the set of hashes that
-        // *should* live on it per `place_shard`, then query the
-        // node's actual hash inventory and diff.
+        // *should* live on it. The placement math differs by
+        // encoding (RLNC = 1 node per shard; Replicated = R
+        // nodes per block), so fork on `manifest.encoding` up
+        // front.
         for &node in live.iter() {
             let mut expected_on_node: HashSet<[u8; 32]> = HashSet::new();
-            for c in 0..manifest.channels {
-                for l in 0..manifest.nlayers {
-                    let n = manifest.n_per_layer[l as usize];
-                    for idx in 0..n {
-                        if manifest.place_shard(c, l, idx, &live) == Ok(node) {
-                            if let Some(h) = manifest
-                                .shard_hashes
-                                .get(c as usize)
-                                .and_then(|chan| chan.get(l as usize))
-                                .and_then(|per_l| per_l.get(idx as usize))
-                            {
-                                expected_on_node.insert(*h);
+            match manifest.encoding {
+                ObjectEncoding::Rlnc => {
+                    for c in 0..manifest.channels {
+                        for l in 0..manifest.nlayers {
+                            let n = manifest.n_per_layer[l as usize];
+                            for idx in 0..n {
+                                if manifest.place_shard(c, l, idx, &live) == Ok(node) {
+                                    if let Some(h) = manifest
+                                        .shard_hashes
+                                        .get(c as usize)
+                                        .and_then(|chan| chan.get(l as usize))
+                                        .and_then(|per_l| per_l.get(idx as usize))
+                                    {
+                                        expected_on_node.insert(*h);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ObjectEncoding::Replicated { replication, .. } => {
+                    for c in 0..manifest.channels {
+                        for l in 0..manifest.nlayers {
+                            let n = manifest.n_per_layer[l as usize];
+                            for idx in 0..n {
+                                let key = ShardKey {
+                                    object_id: manifest.object_id,
+                                    channel: c,
+                                    layer: l,
+                                    shard_idx: idx,
+                                };
+                                let Ok(replicas) = place_replicas(key, replication, &live) else {
+                                    continue;
+                                };
+                                if !replicas.contains(&node) {
+                                    continue;
+                                }
+                                if let Some(h) = manifest
+                                    .shard_hashes
+                                    .get(c as usize)
+                                    .and_then(|chan| chan.get(l as usize))
+                                    .and_then(|per_l| per_l.get(idx as usize))
+                                {
+                                    expected_on_node.insert(*h);
+                                }
                             }
                         }
                     }
@@ -160,8 +198,8 @@ impl Gateway {
                 }
             };
             // If the node already holds every expected hash,
-            // leave it alone — running repair_node would purge
-            // its bucket needlessly.
+            // leave it alone — running the per-node repair would
+            // purge its bucket needlessly.
             if expected_on_node.is_subset(&held) {
                 continue;
             }
@@ -170,11 +208,22 @@ impl Gateway {
                 expected_on_node.difference(&held).count(),
                 expected_on_node.len()
             );
-            if let Err(e) = repair_node(
-                &self.gf, &mut rng, &mut manifest, &live, node, d,
-            )
-            .await
-            {
+            let repair_res = match manifest.encoding {
+                ObjectEncoding::Rlnc => {
+                    repair_node(&self.gf, &mut rng, &mut manifest, &live, node, d).await
+                }
+                ObjectEncoding::Replicated { .. } => {
+                    repair_node_replicated(&mut manifest, &live, node)
+                        .await
+                        .map(|s| {
+                            // Repurpose stats into RLNC-shaped
+                            // RepairStats so callers reading
+                            // metrics see uniform fields.
+                            s
+                        })
+                }
+            };
+            if let Err(e) = repair_res {
                 eprintln!("repair_object_inplace: {name} node {node}: {e}");
             }
         }
