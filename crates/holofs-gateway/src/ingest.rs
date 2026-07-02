@@ -273,11 +273,12 @@ impl Gateway {
         name: &str,
         body: &[u8],
     ) -> Result<IngestResult, GatewayError> {
-        // Stage 14.4: hold the GC barrier for the full PUT. GC
-        // upgrades to a write guard and waits for us; any
-        // concurrent GC blocks new PUTs until it's done. Released
-        // automatically on function return.
-        let _gc_guard = self.gc_barrier.read().await;
+        // v0.7 epoch-GC: no `gc_barrier` here anymore. Concurrent
+        // GC snapshots its cutoff epoch before it starts and every
+        // shard we're about to write gets a fresh (higher) epoch
+        // from `Store::put`, so the node-side `PurgeByHashUpTo`
+        // gate will refuse to purge our writes even if they land
+        // between the GC's held-list snapshot and its purge RPC.
         if body.is_empty() {
             return Err(GatewayError::BadRequest("empty body".into()));
         }

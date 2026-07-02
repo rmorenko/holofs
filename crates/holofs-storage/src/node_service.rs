@@ -41,6 +41,22 @@ use holofs_core::rlnc::Shard;
 use holofs_wire::{read_frame, write_frame, Request, Response};
 
 type Key = (u64, u8, u8);
+/// Milliseconds since UNIX_EPOCH. Assigned by `Store::put` at
+/// write-time (or reconstructed from filesystem mtime on
+/// [`Store::open`]). Feeds the epoch-based GC pass — see
+/// [`Store::current_epoch`] and [`Store::purge_by_hashes_up_to`].
+pub type WriteEpoch = u64;
+
+/// Current wall-clock as a [`WriteEpoch`]. Free-standing so callers
+/// (gateway GC pass, tests) can snapshot the boundary without going
+/// through a Store instance.
+pub fn now_epoch() -> WriteEpoch {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 const SHARD_MAGIC_V1: &[u8; 8] = b"HOLOFSS1";
 /// v0.7: same file layout as v1 but the `coeffs || payload` blob is
@@ -51,14 +67,18 @@ const SHARD_MAGIC_V2: &[u8; 8] = b"HOLOFSS2";
 #[allow(dead_code)]
 const SHARD_MAGIC: &[u8; 8] = SHARD_MAGIC_V1;
 
-/// Store: for each (object_id, channel, layer) — `HashMap<shard_hash, Shard>`.
-/// Using the hash as the key gives O(1) dedup: a repeated PUT of the same
-/// shard is a no-op.
+/// Store: for each (object_id, channel, layer) — `HashMap<shard_hash,
+/// (Shard, WriteEpoch)>`. Using the hash as the key gives O(1) dedup;
+/// the epoch (v0.7) tags each entry with its wall-clock write time so
+/// concurrent GC can protect fresh writes. A repeated PUT of the same
+/// shard is a no-op *for the payload* but bumps the epoch to the
+/// current time — the effect is "this shard is still live", so a GC
+/// snapshot taken before the re-PUT can't purge it either.
 ///
 /// If `dir` is set, every mutation (`put`/`purge`/`wipe`) is mirrored to disk.
 #[derive(Default)]
 pub struct Store {
-    shards: HashMap<Key, HashMap<Hash, Shard>>,
+    shards: HashMap<Key, HashMap<Hash, (Shard, WriteEpoch)>>,
     dir: Option<PathBuf>,
     /// v0.7: per-node AES-256-GCM key derived from
     /// `NodeIdentity::to_bytes()` via HKDF-SHA256. `None` = plaintext
@@ -100,11 +120,22 @@ impl Store {
     ) -> io::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
-        let mut shards: HashMap<Key, HashMap<Hash, Shard>> = HashMap::new();
+        let mut shards: HashMap<Key, HashMap<Hash, (Shard, WriteEpoch)>> = HashMap::new();
         for entry in walk_shard_files(&dir)? {
+            // Grab mtime as the epoch. Cheap `stat` call; if it
+            // fails or predates UNIX_EPOCH we fall back to 0, which
+            // is safe (a "very old" epoch just means this shard is
+            // eligible for any future GC — the orphan set is what
+            // gates whether it actually gets purged).
+            let epoch = fs::metadata(&entry)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
             match read_shard_file(&entry, enc_key.as_ref()) {
                 Ok((k, h, shard)) => {
-                    shards.entry(k).or_default().insert(h, shard);
+                    shards.entry(k).or_default().insert(h, (shard, epoch));
                 }
                 Err(e) => {
                     eprintln!("Store::open: skipping broken file {entry:?}: {e}");
@@ -118,11 +149,22 @@ impl Store {
         })
     }
 
-    /// Returns `true` if the shard was actually added (false → duplicate).
+    /// Returns `true` if the shard was actually added (false →
+    /// duplicate). Either way the entry's write-epoch is bumped to
+    /// [`now_epoch`]: a re-PUT of an existing hash is a "still-live"
+    /// signal, and bumping keeps a concurrent GC snapshot from
+    /// purging it just because its original epoch predated the
+    /// snapshot.
     pub fn put(&mut self, k: Key, shard: Shard) -> bool {
         let h = shard_hash(&shard);
+        let epoch = now_epoch();
         let bucket = self.shards.entry(k).or_default();
-        if bucket.contains_key(&h) {
+        if let Some((_, e)) = bucket.get_mut(&h) {
+            // Dedup path: refresh epoch. Disk file is left alone —
+            // mtime is only used at open time to seed the in-memory
+            // epoch; touching it here would double the syscall
+            // budget on the common case of repeated PUTs.
+            *e = epoch;
             return false;
         }
         if let Some(dir) = &self.dir {
@@ -131,21 +173,24 @@ impl Store {
                 return false;
             }
         }
-        bucket.insert(h, shard);
+        bucket.insert(h, (shard, epoch));
         true
     }
 
     pub fn get(&self, k: Key) -> Vec<Shard> {
         self.shards
             .get(&k)
-            .map(|m| m.values().cloned().collect())
+            .map(|m| m.values().map(|(s, _)| s.clone()).collect())
             .unwrap_or_default()
     }
 
     /// Point lookup by shard hash. Used by the Stage 7 audit: a client checks
     /// that the node actually stores **exactly that** shard.
     pub fn get_by_hash(&self, k: Key, hash: &Hash) -> Option<Shard> {
-        self.shards.get(&k).and_then(|m| m.get(hash)).cloned()
+        self.shards
+            .get(&k)
+            .and_then(|m| m.get(hash))
+            .map(|(s, _)| s.clone())
     }
 
     pub fn purge(&mut self, object_id: u64) -> usize {
@@ -182,16 +227,29 @@ impl Store {
         out
     }
 
-    /// Stage 14.0: delete every shard whose hash is in `targets`,
-    /// regardless of which `(object_id, channel, layer)` bucket it
-    /// lived in. Returns the count actually removed. Buckets that
-    /// become empty are pruned to reclaim the outer HashMap slot.
+    /// Stage 14.0: delete every shard whose hash is in `targets`.
+    /// Kept for tests and non-GC internal callers; production GC
+    /// uses [`Self::purge_by_hashes_up_to`] with the pass's snapshot
+    /// epoch so concurrent PUTs are safe.
     pub fn purge_by_hashes(&mut self, targets: &std::collections::HashSet<Hash>) -> usize {
+        self.purge_by_hashes_up_to(targets, WriteEpoch::MAX)
+    }
+
+    /// v0.7 epoch-GC: delete every shard whose hash is in `targets`
+    /// AND whose stored write-epoch is `<= max_epoch`. Shards with a
+    /// higher epoch survive — they were written after the caller's
+    /// snapshot, so the caller's "orphan" verdict is stale for them.
+    /// Returns the count actually removed.
+    pub fn purge_by_hashes_up_to(
+        &mut self,
+        targets: &std::collections::HashSet<Hash>,
+        max_epoch: WriteEpoch,
+    ) -> usize {
         let mut removed = 0usize;
         let mut removed_files: Vec<Hash> = Vec::new();
         self.shards.retain(|_, bucket| {
-            bucket.retain(|h, _| {
-                if targets.contains(h) {
+            bucket.retain(|h, (_, epoch)| {
+                if targets.contains(h) && *epoch <= max_epoch {
                     removed += 1;
                     removed_files.push(*h);
                     false
@@ -208,6 +266,20 @@ impl Store {
             }
         }
         removed
+    }
+
+    /// v0.7 epoch-GC: current wall-clock. Snapshotted by the gateway
+    /// GC pass before it starts walking the catalog / node held
+    /// lists, then passed as `max_epoch` to
+    /// [`Self::purge_by_hashes_up_to`].
+    pub fn current_epoch(&self) -> WriteEpoch {
+        now_epoch()
+    }
+
+    /// v0.7 epoch-GC: peek at a shard's stored write-epoch. Used by
+    /// tests + diagnostic paths; there is no wire op for this.
+    pub fn epoch_of(&self, k: Key, hash: &Hash) -> Option<WriteEpoch> {
+        self.shards.get(&k).and_then(|m| m.get(hash)).map(|(_, e)| *e)
     }
 
     /// Drop everything (used on "node death + replacement").
@@ -231,7 +303,7 @@ impl Store {
     /// Override a shard by key + hash (test-only path for corruption testing).
     pub fn inject_corrupt(&mut self, k: Key, shard: Shard) {
         let h = shard_hash(&shard);
-        self.shards.entry(k).or_default().insert(h, shard);
+        self.shards.entry(k).or_default().insert(h, (shard, now_epoch()));
     }
 
     /// Storage directory if persistent; otherwise `None`.
@@ -583,6 +655,18 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
             }
             Response::Ack
         }
+        Request::CurrentEpoch => {
+            // Wall-clock: independent of what's in the store.
+            // Answering without acquiring the mutex keeps GC pass
+            // startup off the critical path of any concurrent PUT.
+            Response::Epoch { epoch: now_epoch() }
+        }
+        Request::PurgeByHashUpTo { hashes, max_epoch } => {
+            let set: std::collections::HashSet<Hash> = hashes.into_iter().collect();
+            let mut s = store.lock().await;
+            s.purge_by_hashes_up_to(&set, max_epoch);
+            Response::Ack
+        }
     }
 }
 
@@ -862,6 +946,65 @@ mod tests {
         assert_eq!(walk_shard_files(&dir).unwrap().len(), 1);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn purge_up_to_skips_shards_written_after_snapshot() {
+        // v0.7 epoch-GC: a shard whose stored epoch is strictly
+        // greater than the caller's `max_epoch` must NOT be purged
+        // even when its hash is in the target set. Simulates a
+        // concurrent PUT that lands between the GC's held-list
+        // snapshot and its purge RPC.
+        let mut s = Store::new();
+        let sh_old = make_shard(1);
+        let h_old = shard_hash(&sh_old);
+        s.put((1, 0, 0), sh_old);
+        // Force a strictly greater epoch on the "fresh" write so
+        // the test is time-independent (`now_epoch()` may not tick
+        // between two very-fast calls on some clocks).
+        let snapshot = s.epoch_of((1, 0, 0), &h_old).unwrap();
+        let sh_new = make_shard(2);
+        let h_new = shard_hash(&sh_new);
+        s.put((1, 0, 0), sh_new);
+        // Overwrite the fresh entry's epoch to a known value > snapshot.
+        s.shards
+            .get_mut(&(1, 0, 0))
+            .unwrap()
+            .get_mut(&h_new)
+            .unwrap()
+            .1 = snapshot + 1000;
+        let mut targets = std::collections::HashSet::new();
+        targets.insert(h_old);
+        targets.insert(h_new);
+        // Snapshot only covers the old shard.
+        let removed = s.purge_by_hashes_up_to(&targets, snapshot);
+        assert_eq!(removed, 1, "only old shard should be purged");
+        assert!(s.get_by_hash((1, 0, 0), &h_new).is_some());
+        assert!(s.get_by_hash((1, 0, 0), &h_old).is_none());
+    }
+
+    #[test]
+    fn re_put_bumps_epoch() {
+        // Dedup-path re-PUT is a "still live" signal — the entry's
+        // epoch must move forward so a GC snapshot taken between the
+        // two PUTs can't purge it.
+        let mut s = Store::new();
+        let sh = make_shard(1);
+        let h = shard_hash(&sh);
+        assert!(s.put((0, 0, 0), sh.clone()));
+        let e1 = s.epoch_of((0, 0, 0), &h).unwrap();
+        // Simulate a slow clock — pin e1 down artificially, then
+        // re-PUT and confirm the epoch updates.
+        s.shards
+            .get_mut(&(0, 0, 0))
+            .unwrap()
+            .get_mut(&h)
+            .unwrap()
+            .1 = e1.saturating_sub(1_000);
+        let pinned = s.epoch_of((0, 0, 0), &h).unwrap();
+        assert!(!s.put((0, 0, 0), sh));
+        let e2 = s.epoch_of((0, 0, 0), &h).unwrap();
+        assert!(e2 > pinned, "re-PUT should bump epoch: {pinned} -> {e2}");
     }
 
     #[test]

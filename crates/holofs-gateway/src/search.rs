@@ -133,9 +133,11 @@ impl Gateway {
     ///     wrong kind),
     ///   * `Err(...)` — decode / inference failure.
     pub async fn embed_object(&self, name: &str) -> Result<bool, GatewayError> {
-        // Stage 14.4: hold the GC barrier so the embeddings.bin
-        // rewrite (also a writer) doesn't race our append. The
-        // guard outlives the whole decode + CLIP + index.append.
+        // v0.7 epoch-GC: `gc_barrier` was narrowed to just the
+        // embeddings.bin path. GC's tail rewrites embeddings.bin
+        // under `gc_barrier.write`; our append (also a write to
+        // that file) takes the read guard so the two never
+        // interleave.
         let _gc_guard = self.gc_barrier.read().await;
         let Some(embedder) = self.ensure_embedder().await? else {
             return Ok(false);

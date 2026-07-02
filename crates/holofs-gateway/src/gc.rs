@@ -13,7 +13,7 @@
 
 use std::time::Instant;
 
-use holofs_client::{list_node_hashes, purge_node_by_hash};
+use holofs_client::{list_node_hashes, node_current_epoch, purge_node_by_hash_up_to};
 use holofs_model::manifest::{Manifest, ObjectKind};
 
 use crate::error::GatewayError;
@@ -74,29 +74,36 @@ impl Gateway {
     /// Held set = `ListHashes` from each node. Orphans = held - live.
     /// One `PurgeByHash` round per node deletes the orphans.
     ///
-    /// **Concurrency (Stage 14.4):** the pass takes an exclusive
-    /// `gc_barrier.write()` guard, so it waits for every in-flight
-    /// PUT / restore / embed-append AND blocks new ones until it's
-    /// done. Trade-off: PUTs are queued behind GC for the duration
-    /// of one pass (≈40 ms on the dev catalog). That's fine for a
-    /// manually-triggered `/api/gc`; a scheduled GC would want a
-    /// smarter epoch-based scheme instead.
+    /// **Concurrency (v0.7 epoch-GC):** the pass no longer takes an
+    /// exclusive `gc_barrier.write()` guard against writers. Shard
+    /// safety comes from the epoch tag: every `Store::put` records a
+    /// wall-clock write-epoch, and the pass gates each per-node
+    /// purge with the pre-snapshot epoch it took at the very top of
+    /// the run. Any shard whose stored epoch is `>` the snapshot
+    /// was written *after* the GC pass started, so the node refuses
+    /// to purge it even if it's in the "orphan" target set (the
+    /// catalog snapshot froze before the write and so doesn't
+    /// mention that hash).
+    ///
+    /// PUTs, restore_version, delete, scrub_tick now all run
+    /// concurrently with GC. The one remaining serialisation point
+    /// is the embed.bin rewrite at the tail of this pass — that one
+    /// still takes the `gc_barrier` write guard to coordinate with
+    /// `embed_object` (search.rs) whose append also holds the read
+    /// guard.
     ///
     /// Returns a [`GcReport`] with per-node breakdown.
     pub async fn gc_orphaned_shards(&self) -> Result<GcReport, GatewayError> {
         use std::collections::HashSet;
-        // Stage 14.4: serialise against catalog-mutating writers
-        // (PUTs, restore_version, embed_object). Waits for every
-        // in-flight writer; blocks new ones until we're done.
-        // Without this exclusive guard a fresh PUT during the GC
-        // pass could land shards on a node *after* we snapshotted
-        // its held list AND *before* we snapshotted the catalog
-        // for the live set — the next node's held list would then
-        // include `h_new` while our `live` set wouldn't, and the
-        // subsequent PurgeByHash would silently delete the fresh
-        // shard.
-        let _gc_guard = self.gc_barrier.write().await;
         let t0 = Instant::now();
+        // Snapshot the pass's cutoff epoch FIRST. Every subsequent
+        // read (catalog, node held lists) may race concurrent PUTs;
+        // those PUTs land with epoch > snapshot and are protected
+        // by the node-side `PurgeByHashUpTo` gate below.
+        let snapshot_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
 
         // 1. Snapshot the live catalog hashes.
         //
@@ -181,7 +188,15 @@ impl Gateway {
         let mut purged_total: u64 = 0;
         for node_idx in live_nodes {
             let addr = self.cluster.node_addrs[node_idx].clone();
-            let held = match holofs_client::list_node_hashes(&addr).await {
+            // v0.7 epoch-GC: pick the tighter of {gateway snapshot,
+            // node-reported current epoch}. Using the node's own
+            // clock as an upper bound sidesteps clock skew: if the
+            // node's wall clock lags the gateway's, the gateway's
+            // snapshot could otherwise flag a legitimate concurrent
+            // PUT (stamped with the lower node clock) as purgeable.
+            let node_epoch_now = node_current_epoch(&addr).await.unwrap_or(u64::MAX);
+            let cutoff = snapshot_epoch.min(node_epoch_now);
+            let held = match list_node_hashes(&addr).await {
                 Ok(h) => h,
                 Err(e) => {
                     nodes.push(GcNodeReport {
@@ -205,7 +220,7 @@ impl Gateway {
             let (ok, err) = if orphans.is_empty() {
                 (true, None)
             } else {
-                match holofs_client::purge_node_by_hash(&addr, orphans).await {
+                match purge_node_by_hash_up_to(&addr, orphans, cutoff).await {
                     Ok(()) => (true, None),
                     Err(e) => (false, Some(e.to_string())),
                 }
@@ -229,6 +244,13 @@ impl Gateway {
         // records unconditionally). Bumps ann_generation so the next
         // semantic_search rebuilds the in-memory ANN index without
         // stale hits.
+        //
+        // v0.7 epoch-GC: this is the ONLY thing still under the
+        // `gc_barrier` write guard — the rewrite walks the file
+        // whole-hog, so a concurrent `search::embed_object` append
+        // would race it. The shard-GC block above no longer needs
+        // the guard (see method-level doc).
+        let _emb_guard = self.gc_barrier.write().await;
         let (emb_kept, emb_dropped) = {
             let state = self.embed.lock().await;
             if !state.enabled {

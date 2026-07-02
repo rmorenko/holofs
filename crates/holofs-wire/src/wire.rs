@@ -95,6 +95,20 @@ pub enum Request {
         layer: u8,
         shards: Vec<Shard>,
     },
+    /// v0.7 epoch-GC: ask the node for its current write-epoch (wall
+    /// clock, milliseconds since UNIX_EPOCH). The gateway snapshots
+    /// this once at the start of a GC pass and uses it to gate
+    /// [`Request::PurgeByHashUpTo`] — shards written after the
+    /// snapshot are protected from concurrent purge.
+    CurrentEpoch,
+    /// v0.7 epoch-GC: same semantics as [`Request::PurgeByHash`] but
+    /// the node only removes hashes whose stored write-epoch is
+    /// ≤ `max_epoch`. Fresh writes that landed after the snapshot
+    /// (epoch > max_epoch) survive.
+    PurgeByHashUpTo {
+        hashes: Vec<Hash>,
+        max_epoch: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +130,10 @@ pub enum Response {
     /// Stage 14.0: enumeration response — every shard hash this node
     /// currently holds, no ordering guarantees.
     Hashes(Vec<Hash>),
+    /// v0.7 epoch-GC: reply to [`Request::CurrentEpoch`].
+    Epoch {
+        epoch: u64,
+    },
     Error(String),
 }
 
@@ -129,6 +147,9 @@ const OP_AUTH: u8 = 0x06;
 const OP_LIST_HASHES: u8 = 0x07;
 const OP_PURGE_BY_HASH: u8 = 0x08;
 const OP_PUT_BATCH: u8 = 0x09;
+// v0.7 epoch-GC ops.
+const OP_CURRENT_EPOCH: u8 = 0x0a;
+const OP_PURGE_BY_HASH_UP_TO: u8 = 0x0b;
 
 const RSP_PONG: u8 = 0x00;
 const RSP_ACK: u8 = 0x01;
@@ -137,6 +158,8 @@ const RSP_STAT: u8 = 0x03;
 const RSP_AUDIT: u8 = 0x04;
 const RSP_AUTH: u8 = 0x05;
 const RSP_HASHES: u8 = 0x06;
+// v0.7 epoch-GC: raw u64 write-epoch (ms since UNIX_EPOCH).
+const RSP_EPOCH: u8 = 0x07;
 const RSP_ERR: u8 = 0xff;
 
 impl Request {
@@ -208,6 +231,15 @@ impl Request {
                 b.extend_from_slice(&(shards.len() as u32).to_be_bytes());
                 for s in shards {
                     encode_shard(&mut b, s);
+                }
+            }
+            Request::CurrentEpoch => b.push(OP_CURRENT_EPOCH),
+            Request::PurgeByHashUpTo { hashes, max_epoch } => {
+                b.push(OP_PURGE_BY_HASH_UP_TO);
+                b.extend_from_slice(&max_epoch.to_be_bytes());
+                b.extend_from_slice(&(hashes.len() as u32).to_be_bytes());
+                for h in hashes {
+                    b.extend_from_slice(h);
                 }
             }
         }
@@ -282,6 +314,19 @@ impl Request {
                     shards,
                 })
             }
+            OP_CURRENT_EPOCH => Ok(Request::CurrentEpoch),
+            OP_PURGE_BY_HASH_UP_TO => {
+                let max_epoch = c.u64()?;
+                let n = c.u32()? as usize;
+                let mut hashes = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let raw = c.take(32)?;
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(raw);
+                    hashes.push(h);
+                }
+                Ok(Request::PurgeByHashUpTo { hashes, max_epoch })
+            }
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unknown op: {other:#x}"),
@@ -327,6 +372,10 @@ impl Response {
                 for h in hashes {
                     b.extend_from_slice(h);
                 }
+            }
+            Response::Epoch { epoch } => {
+                b.push(RSP_EPOCH);
+                b.extend_from_slice(&epoch.to_be_bytes());
             }
             Response::Error(msg) => {
                 b.push(RSP_ERR);
@@ -381,6 +430,7 @@ impl Response {
                 }
                 Ok(Response::Hashes(hashes))
             }
+            RSP_EPOCH => Ok(Response::Epoch { epoch: c.u64()? }),
             RSP_ERR => {
                 let n = c.u32()? as usize;
                 let bytes = c.take(n)?;
@@ -603,6 +653,36 @@ mod tests {
         let r2 = Response::Hashes(vec![[0xA5; 32], [0x5A; 32]]);
         assert_eq!(Response::decode(&r1.encode()).unwrap(), r1);
         assert_eq!(Response::decode(&r2.encode()).unwrap(), r2);
+    }
+
+    #[test]
+    fn request_current_epoch_roundtrip() {
+        let r = Request::CurrentEpoch;
+        assert_eq!(Request::decode(&r.encode()).unwrap(), r);
+    }
+
+    #[test]
+    fn request_purge_by_hash_up_to_roundtrip() {
+        let r = Request::PurgeByHashUpTo {
+            hashes: vec![[0x11; 32], [0x22; 32]],
+            max_epoch: 0x0123_4567_89AB_CDEF,
+        };
+        assert_eq!(Request::decode(&r.encode()).unwrap(), r);
+        // Empty hash list must roundtrip too — a purge with no
+        // targets is legal (protocol-level no-op).
+        let r_empty = Request::PurgeByHashUpTo {
+            hashes: vec![],
+            max_epoch: 42,
+        };
+        assert_eq!(Request::decode(&r_empty.encode()).unwrap(), r_empty);
+    }
+
+    #[test]
+    fn response_epoch_roundtrip() {
+        let r = Response::Epoch {
+            epoch: 1_700_000_000_000,
+        };
+        assert_eq!(Response::decode(&r.encode()).unwrap(), r);
     }
 
     // --- Decode error paths. These weigh heavily on coverage because

@@ -1160,6 +1160,40 @@ pub async fn purge_node_by_hash(
     }
 }
 
+/// v0.7 epoch-GC: read a node's current wall-clock (ms since
+/// UNIX_EPOCH). Snapshotted by the gateway GC pass to gate the
+/// subsequent [`purge_node_by_hash_up_to`] — shards with an epoch
+/// greater than the snapshot are protected from purge.
+pub async fn node_current_epoch(addr: &str) -> Result<u64, ClientError> {
+    match rpc(addr, Request::CurrentEpoch).await? {
+        Response::Epoch { epoch } => Ok(epoch),
+        Response::Error(msg) => Err(ClientError::RemoteError(msg)),
+        other => Err(ClientError::UnexpectedResponse {
+            expected: "Epoch from CurrentEpoch",
+            got: format!("{other:?}"),
+        }),
+    }
+}
+
+/// v0.7 epoch-GC: same as [`purge_node_by_hash`] but the node only
+/// removes shards whose stored write-epoch is `<= max_epoch`. Purges
+/// that would otherwise race a concurrent PUT are safely no-op'd on
+/// the fresh shard.
+pub async fn purge_node_by_hash_up_to(
+    addr: &str,
+    hashes: Vec<Hash>,
+    max_epoch: u64,
+) -> Result<(), ClientError> {
+    match rpc(addr, Request::PurgeByHashUpTo { hashes, max_epoch }).await? {
+        Response::Ack => Ok(()),
+        Response::Error(msg) => Err(ClientError::RemoteError(msg)),
+        other => Err(ClientError::UnexpectedResponse {
+            expected: "Ack from PurgeByHashUpTo",
+            got: format!("{other:?}"),
+        }),
+    }
+}
+
 /// Ping every node in `manifest`. Returns the indices of those that replied Pong.
 pub async fn discover_live(manifest: &Manifest) -> LiveNodes {
     let mut live = Vec::new();

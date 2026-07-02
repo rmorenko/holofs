@@ -142,11 +142,12 @@ impl Gateway {
     /// repair cost diffuse, while still catching damage well before
     /// a user notices.
     ///
-    /// Skips runs while the GC barrier is held (no need to fight the
-    /// snapshotter for shard inventory).
+    /// v0.7 epoch-GC: no longer takes `gc_barrier`. Any shards this
+    /// pass writes via `repair_object_inplace` get a fresh epoch
+    /// from `Store::put`, so a concurrent full-GC pass can't purge
+    /// them mid-flight.
     pub async fn scrub_tick(self: &Arc<Self>) -> ScrubReport {
         use std::collections::{HashMap, HashSet};
-        let _scrub_guard = self.gc_barrier.read().await;
         self.scrub_runs_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -223,8 +224,10 @@ impl Gateway {
         }
 
         // Repair the affected objects one at a time. `repair_object_inplace`
-        // re-snapshots `live` inside, persists the mutated manifest, and
-        // is safe under the gc_barrier read guard we hold.
+        // re-snapshots `live` inside and persists the mutated manifest.
+        // Under v0.7 epoch-GC any fresh shard it writes carries a
+        // post-snapshot epoch, so a concurrent full-GC pass can't
+        // purge it even if the orphan diff briefly thinks it should.
         let mut repaired_ok = 0u64;
         let mut repaired_failed = 0u64;
         for name in &to_repair {

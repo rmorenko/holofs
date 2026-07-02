@@ -90,11 +90,12 @@ impl Gateway {
         let bytes = manifest.encode();
         std::fs::write(&path, &bytes)
             .map_err(|e| GatewayError::BadRequest(format!("versions write: {e}")))?;
-        // Trim oldest archives if a retention cap is configured. The
-        // prune runs under the same gc_barrier read guard the caller
-        // holds (archive_version is invoked from ingest_bytes /
-        // restore_version, both of which take the guard), so the
-        // purge_orphans_of inside delete_version sees a stable view.
+        // Trim oldest archives if a retention cap is configured. No
+        // gc_barrier needed anymore (v0.7 epoch-GC) — the shards
+        // referenced by any archive still live in the store; if
+        // concurrent full GC's snapshot froze before the archive
+        // write, its per-node PurgeByHashUpTo won't touch our new
+        // shards (they carry post-snapshot epochs).
         self.prune_versions_to_cap(name).await;
         Ok(())
     }
@@ -166,13 +167,15 @@ impl Gateway {
         name: &str,
         id: &str,
     ) -> Result<RestoreResult, GatewayError> {
-        // Stage 14.4: hold the GC barrier — restore mutates the
-        // catalog AND relies on the prior version's shards still
-        // being live on the cluster. If GC ran between our archive
-        // step and the catalog swap it could purge those shards
-        // (they're not in the old catalog's manifest at the moment
-        // GC snapshots).
-        let _gc_guard = self.gc_barrier.read().await;
+        // v0.7 epoch-GC: no gc_barrier here. Any shards the target
+        // manifest references are already on the cluster — GC's
+        // orphan-set computation is a snapshot, and the shards it
+        // references trace back to a live catalog or archived
+        // manifest. If a concurrent GC pass purges anything, it
+        // won't be ours: the archived shards' epochs predate the
+        // GC snapshot only if THEIR objects were dropped from the
+        // catalog + archive before the snapshot, which is exactly
+        // the definition of orphan.
         let s = self.versions.lock().await;
         let Some(root) = s.root.clone() else {
             return Err(GatewayError::BadRequest(
@@ -224,20 +227,20 @@ impl Gateway {
         name: &str,
         id: &str,
     ) -> Result<DeleteVersionResult, GatewayError> {
-        // Hold the GC barrier read guard — we mutate the on-disk
-        // archive AND call purge_orphans_of, which walks catalog +
-        // remaining archives. If a full GC ran in the middle it
-        // could double-purge or race the orphan diff.
-        let _gc_guard = self.gc_barrier.read().await;
+        // v0.7 epoch-GC: no gc_barrier here. Double-purge with a
+        // concurrent full-GC pass is idempotent (purge_orphans_of
+        // and PurgeByHashUpTo both no-op on missing hashes); the
+        // orphan-diff race isn't observable to callers because
+        // `delete_version_inner` computes its orphan set from a
+        // fresh catalog+archive snapshot inside its own critical
+        // section.
         self.delete_version_inner(name, id).await
     }
 
-    /// Same as `delete_version` but assumes the caller already holds
-    /// the `gc_barrier` read guard. Used internally by
-    /// `prune_versions_to_cap`, which runs underneath the writer's
-    /// barrier in `ingest_bytes` / `restore_version`. Re-acquiring
-    /// `gc_barrier.read()` while a writer is queued can deadlock on
-    /// tokio's RwLock — hence the split.
+    /// Same as `delete_version` — kept as a distinct entry point
+    /// only because `prune_versions_to_cap` used to need a "no
+    /// barrier acquire" version. Now they're identical but the
+    /// two-name pattern documents the two call paths.
     async fn delete_version_inner(
         &self,
         name: &str,
