@@ -1404,6 +1404,16 @@ pub async fn repair_node_replicated(
     live: &LiveNodes,
     replacement: usize,
 ) -> Result<RepairStats, ClientError> {
+    // Directory-manifest guard. `Manifest::directory` produces a
+    // no-shard marker whose `nodes` vec is empty; the monitor path
+    // (`Gateway::repair_object_inplace`) walks every catalog entry
+    // including directories, and without this guard would panic
+    // on `manifest.nodes[replacement]` below. Matches the same
+    // guard the RLNC `repair_node` gets via `place_shard`'s
+    // empty-set branch.
+    if manifest.nodes.is_empty() {
+        return Ok(RepairStats::default());
+    }
     assert!(
         live.contains(&replacement),
         "replacement node must be live"

@@ -495,6 +495,26 @@ async fn repair_node_replicated_restores_wiped_replicas() {
 }
 
 #[tokio::test]
+async fn repair_node_replicated_noop_on_directory_manifest() {
+    // Directory manifests carry an empty `nodes` vec (they're
+    // catalog markers, no shards). Monitor / scrub walk every
+    // manifest including directories; without the empty-nodes
+    // guard, `manifest.nodes[replacement]` panics.
+    //
+    // Reproduces the panic seen in the field:
+    //   thread panicked at .../client.rs:1263:
+    //   index out of bounds: the len is 0 but the index is 4
+    let dir_manifest = holofs_model::manifest::Manifest::directory(0xC0FFEE, 0);
+    assert!(dir_manifest.nodes.is_empty());
+    let live: Vec<usize> = vec![0, 1, 2, 3, 4];
+    let mut m = dir_manifest;
+    // MUST NOT panic. Returns default (all-zero) stats.
+    let stats = repair_node_replicated(&mut m, &live, 4).await.unwrap();
+    assert_eq!(stats.shards_generated, 0);
+    assert_eq!(stats.layers_repaired, 0);
+}
+
+#[tokio::test]
 async fn repair_node_replicated_refuses_rlnc_object() {
     // Guard rail: calling the Replicated repair on a RLNC object
     // must fail loudly with Incompatible so a fork bug doesn't
