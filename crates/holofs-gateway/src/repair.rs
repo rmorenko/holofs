@@ -17,7 +17,8 @@
 //! Moved out of `http_gateway.rs` in Phase R1b.13.
 
 use holofs_client::{
-    get_object_up_to_layer, repair_node, repair_node_replicated, ClientError, LiveNodes,
+    get_object_blocks, get_object_up_to_layer, repair_node, repair_node_replicated, ClientError,
+    LiveNodes,
 };
 use holofs_model::manifest::{Manifest, ObjectEncoding, ObjectKind};
 use holofs_model::placement::{place_replicas, ShardKey};
@@ -52,6 +53,7 @@ impl Gateway {
         name: &str,
         max_layer: u8,
     ) -> Result<(Vec<Vec<f32>>, u64), ClientError> {
+        use holofs_model::manifest::ObjectEncoding;
         let live = self.effective_live().await;
         let manifest = {
             let cat = self.catalog.lock().await;
@@ -59,6 +61,59 @@ impl Gateway {
                 ClientError::RemoteError(format!("decode_with_autorepair: {name} not in catalog"))
             })?
         };
+        // Fork on encoding: RLNC uses gather+decode with an
+        // auto-repair retry on LayerLost. Replicated uses the
+        // block-fetch decoder — auto-repair for it lives at
+        // shard-drop granularity (a block whose R replicas are
+        // all dead is unrecoverable in this pass; a scheduled
+        // repair heals it before the next GET).
+        if let ObjectEncoding::Replicated { .. } = manifest.encoding {
+            // Ask for every block up to `max_layer`; layers past
+            // that stay zero, matching get_object_up_to_layer's
+            // progressive-decode contract.
+            let all_ids: Vec<Vec<u32>> = manifest
+                .n_per_layer
+                .iter()
+                .enumerate()
+                .map(|(l, &n)| {
+                    if l as u8 > max_layer {
+                        Vec::new()
+                    } else {
+                        (0..n).collect()
+                    }
+                })
+                .collect();
+            match get_object_blocks(&manifest, &live, &all_ids).await {
+                Ok(v) => return Ok(v),
+                Err(ClientError::LayerLost { channel, layer }) => {
+                    self.auto_repairs_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Err(e) = self.repair_object_inplace(name).await {
+                        self.auto_repair_failures_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!("auto-repair: {name}: {e}");
+                        return Err(ClientError::LayerLost { channel, layer });
+                    }
+                    let repaired = {
+                        let cat = self.catalog.lock().await;
+                        cat.get(name).cloned().ok_or_else(|| {
+                            ClientError::RemoteError(format!(
+                                "decode_with_autorepair: {name} disappeared mid-repair"
+                            ))
+                        })?
+                    };
+                    return match get_object_blocks(&repaired, &live, &all_ids).await {
+                        Ok(v) => Ok(v),
+                        Err(e) => {
+                            self.auto_repair_failures_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            Err(e)
+                        }
+                    };
+                }
+                Err(e) => return Err(e),
+            }
+        }
         match get_object_up_to_layer(&self.gf, &manifest, &live, max_layer).await {
             Ok(v) => Ok(v),
             Err(ClientError::LayerLost { channel, layer }) => {

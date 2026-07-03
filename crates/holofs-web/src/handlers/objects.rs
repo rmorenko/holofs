@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Extension, Path, Request};
+use axum::extract::{Extension, Path, RawQuery, Request};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
@@ -212,11 +212,23 @@ pub async fn preview_stream(
 /// only for the short ingest window rather than the full slow-loris
 /// upload duration. The tempfile is deleted on every exit path
 /// (success, error, over-limit).
+///
+/// **Stage 15.1 knob.** `?encoding=replicated&block_size=64&r=3`
+/// routes the request through
+/// [`Gateway::ingest_bytes_replicated`] instead of the default
+/// RLNC path. Image-only — non-image bodies land as 400 (the
+/// encoder rejects them explicitly). `block_size` defaults to
+/// 64, `r` to 3 when omitted. Any other `encoding` value is 400.
 pub async fn put_object(
     Path(name): Path<String>,
+    RawQuery(raw_query): RawQuery,
     Extension(gw): Extension<Arc<Gateway>>,
     req: Request<Body>,
 ) -> Response {
+    let q = match parse_put_query(raw_query.as_deref()) {
+        Ok(q) => q,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
 
@@ -303,13 +315,79 @@ pub async fn put_object(
     };
     let _ = tokio::fs::remove_file(&tmp_path).await;
 
-    match gw.ingest_bytes(&name, &body_bytes).await {
+    // Fork on the optional `?encoding=…` query param. Default =
+    // RLNC via ingest_bytes; replicated goes through
+    // ingest_bytes_replicated.
+    let ingest_result = match q.encoding.as_deref() {
+        None | Some("rlnc") => gw.ingest_bytes(&name, &body_bytes).await,
+        Some("replicated") => {
+            let block_size = q.block_size.unwrap_or(64);
+            let replication = q.r.unwrap_or(3);
+            gw.ingest_bytes_replicated(&name, &body_bytes, block_size, replication)
+                .await
+        }
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unknown ?encoding={other} — expected rlnc (default) or replicated"
+                ),
+            )
+                .into_response();
+        }
+    };
+    match ingest_result {
         Ok(res) => {
             gw.embed_object_in_background(name.clone());
             ingest_to_response(res)
         }
         Err(e) => error_to_response(e),
     }
+}
+
+/// Query params for [`put_object`]. All optional — an empty query
+/// string yields the historical RLNC behaviour verbatim.
+///
+/// Stage 15.1: `?encoding=replicated&block_size=64&r=3` routes the
+/// image through the per-block Replicated encoder, unlocking the
+/// bandwidth-aware `/spotlight` fetch for that object.
+#[derive(Debug, Default)]
+struct PutQuery {
+    encoding: Option<String>,
+    block_size: Option<u32>,
+    r: Option<u8>,
+}
+
+/// Hand-rolled `application/x-www-form-urlencoded` parse for the
+/// three keys [`put_object`] cares about. The rest of the crate
+/// uses `RawQuery` (axum's `Query` extractor needs a feature we
+/// don't pull in), so this stays consistent.
+fn parse_put_query(raw: Option<&str>) -> Result<PutQuery, String> {
+    let mut out = PutQuery::default();
+    let Some(s) = raw else { return Ok(out) };
+    for kv in s.split('&').filter(|p| !p.is_empty()) {
+        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+        match k {
+            "encoding" => out.encoding = Some(v.to_string()),
+            "block_size" => {
+                out.block_size = Some(
+                    v.parse::<u32>()
+                        .map_err(|e| format!("bad ?block_size={v}: {e}"))?,
+                );
+            }
+            "r" => {
+                out.r = Some(
+                    v.parse::<u8>()
+                        .map_err(|e| format!("bad ?r={v}: {e}"))?,
+                );
+            }
+            // Unknown keys are ignored — future-proof for
+            // additional PUT knobs without breaking clients that
+            // already emit them.
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 /// `DELETE /<name>` — remove from catalog + Purge.
@@ -392,5 +470,55 @@ pub async fn serve_wasm_alias() -> Response {
             resp
         }
         Err(_) => not_found(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn put_query_parses_empty() {
+        let q = parse_put_query(None).unwrap();
+        assert!(q.encoding.is_none());
+        assert!(q.block_size.is_none());
+        assert!(q.r.is_none());
+
+        let q = parse_put_query(Some("")).unwrap();
+        assert!(q.encoding.is_none());
+    }
+
+    #[test]
+    fn put_query_parses_replicated_with_defaults_left_empty() {
+        // Present-but-empty semantics — the handler applies its
+        // own defaults (block_size=64, r=3) later.
+        let q = parse_put_query(Some("encoding=replicated")).unwrap();
+        assert_eq!(q.encoding.as_deref(), Some("replicated"));
+        assert!(q.block_size.is_none());
+        assert!(q.r.is_none());
+    }
+
+    #[test]
+    fn put_query_parses_replicated_with_knobs() {
+        let q = parse_put_query(Some("encoding=replicated&block_size=32&r=5")).unwrap();
+        assert_eq!(q.encoding.as_deref(), Some("replicated"));
+        assert_eq!(q.block_size, Some(32));
+        assert_eq!(q.r, Some(5));
+    }
+
+    #[test]
+    fn put_query_ignores_unknown_keys() {
+        // Future-proof: unknown keys shouldn't break existing
+        // clients that add e.g. request-id tracking params.
+        let q = parse_put_query(Some("encoding=rlnc&trace_id=abc")).unwrap();
+        assert_eq!(q.encoding.as_deref(), Some("rlnc"));
+    }
+
+    #[test]
+    fn put_query_rejects_bad_numeric() {
+        let e = parse_put_query(Some("block_size=abc")).unwrap_err();
+        assert!(e.contains("block_size"));
+        let e = parse_put_query(Some("r=-1")).unwrap_err();
+        assert!(e.contains("r=-1"));
     }
 }
