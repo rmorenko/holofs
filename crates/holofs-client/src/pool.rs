@@ -138,12 +138,36 @@ fn release(addr: &str, stream: TransportStream) {
     });
 }
 
-/// Returned by [`acquire`]. Wraps a [`TransportStream`] and ferries it
-/// back into the pool on drop unless [`Pooled::poison`] was called.
+/// Returned by [`acquire`]. Wraps a [`TransportStream`].
+///
+/// **Drop semantics** (2026-07-03 rework): the default is to
+/// **discard** the underlying stream, NOT recycle it. A caller
+/// that has completed a clean, on-frame-boundary exchange must
+/// signal that explicitly with [`Pooled::mark_clean`]; only then
+/// does Drop return the stream to the pool.
+///
+/// Rationale: a `Pooled` can be dropped in the middle of a read
+/// or write from any number of async cancellation paths —
+/// `tokio::time::timeout` on the RPC itself, an outer
+/// `tokio::select!` racing another future, a per-handler
+/// deadline in the gateway middleware. All of those leave the
+/// socket at an undefined byte boundary. Making the default
+/// "recycle" turned every such cancellation into pool
+/// contamination: the next borrower would read the tail of some
+/// other caller's response and surface it as
+/// `UnexpectedResponse` (see the 2026-07-03 field bug —
+/// "got Shards([])" on a PUT after a monitor-loop cancellation).
+///
+/// Making the default "discard" flips the safety story: forgetting
+/// to `mark_clean()` only costs one extra TCP dial per RPC, never
+/// data-corrupts the next borrower.
 pub struct Pooled {
     addr: String,
     stream: Option<TransportStream>,
-    poisoned: bool,
+    /// True once the caller confirmed the exchange ended on a
+    /// clean frame boundary. Only clean streams recycle to the
+    /// pool.
+    clean: bool,
     /// True if this stream came out of the pool (i.e. was previously
     /// used). Callers can read this via [`Pooled::was_reused`] to know
     /// whether a retry-on-error is justified.
@@ -160,7 +184,7 @@ impl Pooled {
         Self {
             addr,
             stream: Some(stream),
-            poisoned: false,
+            clean: false,
             reused,
             keep_on_drop: true,
         }
@@ -170,16 +194,28 @@ impl Pooled {
         Self {
             addr,
             stream: Some(stream),
-            poisoned: false,
+            clean: false,
             reused: false,
             keep_on_drop: false,
         }
     }
 
-    /// Mark the connection as broken so it isn't returned to the pool.
-    /// Call this after any IO error on the underlying stream.
+    /// Signal that the RPC exchange finished cleanly on a frame
+    /// boundary. Must be called AFTER a successful write + read +
+    /// decode round-trip; only then will the underlying stream be
+    /// returned to the pool on Drop. Forgetting to call this is
+    /// safe — the connection is simply closed and re-dialled on
+    /// the next `acquire`.
+    pub fn mark_clean(&mut self) {
+        self.clean = true;
+    }
+
+    /// Retained for API compat — makes it explicit that the
+    /// stream is bad. Equivalent to just not calling
+    /// [`Self::mark_clean`], but expresses intent at error sites
+    /// where the caller wants a self-documenting statement.
     pub fn poison(&mut self) {
-        self.poisoned = true;
+        self.clean = false;
     }
 
     /// Whether this connection was reused from the pool (vs. freshly
@@ -193,7 +229,7 @@ impl Pooled {
 
 impl Drop for Pooled {
     fn drop(&mut self) {
-        if self.poisoned || !self.keep_on_drop {
+        if !self.clean || !self.keep_on_drop {
             return;
         }
         if let Some(stream) = self.stream.take() {
@@ -332,6 +368,10 @@ mod tests {
             .expect("write");
         let buf = read_frame(&mut pooled).await.expect("read");
         let resp = Response::decode(&buf).expect("decode");
+        // Explicit opt-in — since 2026-07-03 the pool defaults
+        // to "discard on drop"; only sockets that had a
+        // successful frame exchange should recycle.
+        pooled.mark_clean();
         (resp, local)
     }
 

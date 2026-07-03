@@ -141,20 +141,15 @@ async fn rpc(addr: &str, req: Request) -> io::Result<Response> {
 async fn rpc_attempt(addr: &str, encoded_req: &[u8]) -> io::Result<Response> {
     let mut s = pool::acquire(addr).await?;
     let response = rpc_over_stream(&mut s, addr, encoded_req).await;
-    if response.is_err() {
-        // Every non-Ok path leaves the socket in an undefined
-        // state:
-        //   - write_frame failed mid-frame → TX buffer half-sent
-        //   - read_frame failed mid-frame → RX bytes still pending
-        //   - timeout dropped `inner` mid-await → same as above
-        //   - decode failed → the byte stream may be desynced
-        //     (unknown discriminant leaves the cursor in the
-        //     middle of a field). We can't know without draining.
-        // Poisoning unconditionally-on-error is the only safe
-        // policy: it closes the socket instead of returning it to
-        // the pool with a half-frame that the next borrower would
-        // read as *their* response (2026-07-03 field bug).
-        s.poison();
+    // Only a fully-decoded response on a clean frame boundary is
+    // safe to recycle. `pool::Pooled` defaults to "discard on
+    // drop" — including any cancellation from an outer
+    // `tokio::time::timeout` or `select!` — so all we need to do
+    // here is opt in explicitly on the happy path. Every error
+    // (timeout, mid-frame IO, decode desync) falls through and
+    // the stream is closed.
+    if response.is_ok() {
+        s.mark_clean();
     }
     response
 }

@@ -224,7 +224,20 @@ impl Manifest {
                     live,
                     &self.zones,
                 )?;
-                Ok(layout[shard_idx as usize])
+                // `shard_idx` may exceed `n_per_layer[layer]` when
+                // the caller is walking `shard_hashes[c][l]` after
+                // an auto-repair (repair_node APPENDS fresh hashes
+                // without growing `n_per_layer`). Wrap into the
+                // layout instead of panicking — the extra hashes
+                // land on the same rendezvous slots as the
+                // originals, which is the canonical-node
+                // semantic auditor callers already expect. Guard
+                // for the empty-layout edge (n_per_layer[l] == 0
+                // on a corrupt/empty manifest).
+                if layout.is_empty() {
+                    return Err(NoLiveNodes);
+                }
+                Ok(layout[(shard_idx as usize) % layout.len()])
             }
         }
     }
@@ -722,6 +735,35 @@ mod tests {
                 block_size: 64,
             }
         );
+    }
+
+    #[test]
+    fn place_shard_zone_aware_wraps_shard_idx_past_n_per_layer() {
+        // Reproducer for the 2026-07-03 auditor-panic bug: after
+        // an auto-repair grows `shard_hashes[c][l]` beyond
+        // `n_per_layer[l]`, the auditor picks a random `h_idx`
+        // from the grown array and passes it into
+        // `place_shard(.., h_idx as u32, ..)`. Zone-aware branch
+        // used to `layout[shard_idx]` directly and panicked
+        // with `index out of bounds`.
+        let n_per_layer: u32 = 4;
+        let mut m = Manifest::directory(0xBEEF, 0);
+        m.placement = Placement::RendezvousZoneAware;
+        m.nodes = (0..8u8).map(|i| format!("127.0.0.1:{}", 9000 + i as u16)).collect();
+        m.zones = vec![0, 0, 1, 1, 2, 2, 3, 3];
+        m.channels = 1;
+        m.nlayers = 1;
+        m.n_per_layer = vec![n_per_layer];
+        let live: Vec<usize> = (0..8).collect();
+
+        // In-range idx works.
+        assert!(m.place_shard(0, 0, 0, &live).is_ok());
+        assert!(m.place_shard(0, 0, n_per_layer - 1, &live).is_ok());
+        // Post-repair "extra" idx — must NOT panic; wraps into
+        // the layout.
+        assert!(m.place_shard(0, 0, n_per_layer, &live).is_ok());
+        assert!(m.place_shard(0, 0, n_per_layer + 17, &live).is_ok());
+        assert!(m.place_shard(0, 0, u32::MAX, &live).is_ok());
     }
 
     #[test]
