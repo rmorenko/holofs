@@ -495,6 +495,25 @@ async fn repair_node_replicated_restores_wiped_replicas() {
 }
 
 #[tokio::test]
+async fn repair_node_noop_on_directory_manifest() {
+    // Same reproducer as `repair_node_replicated_noop_on_directory_manifest`
+    // but exercises the RLNC path. Field trace (2026-07-03) showed
+    // monitor walking a directory manifest into the RLNC repair too
+    // once concurrent Replicated PUTs kicked scrub cycles more
+    // frequently. Both variants MUST short-circuit before touching
+    // `manifest.nodes[replacement]`.
+    let dir_manifest = holofs_model::manifest::Manifest::directory(0xCAFEF00D, 0);
+    assert!(dir_manifest.nodes.is_empty());
+    let live: Vec<usize> = vec![0, 1, 2, 3, 4];
+    let gf = Gf::new();
+    let mut rng = Rng::new(0xABCD);
+    let mut m = dir_manifest;
+    let stats = repair_node(&gf, &mut rng, &mut m, &live, 4, K).await.unwrap();
+    assert_eq!(stats.shards_generated, 0);
+    assert_eq!(stats.layers_repaired, 0);
+}
+
+#[tokio::test]
 async fn repair_node_replicated_noop_on_directory_manifest() {
     // Directory manifests carry an empty `nodes` vec (they're
     // catalog markers, no shards). Monitor / scrub walk every

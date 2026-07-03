@@ -140,36 +140,46 @@ async fn rpc(addr: &str, req: Request) -> io::Result<Response> {
 
 async fn rpc_attempt(addr: &str, encoded_req: &[u8]) -> io::Result<Response> {
     let mut s = pool::acquire(addr).await?;
+    let response = rpc_over_stream(&mut s, addr, encoded_req).await;
+    if response.is_err() {
+        // Every non-Ok path leaves the socket in an undefined
+        // state:
+        //   - write_frame failed mid-frame → TX buffer half-sent
+        //   - read_frame failed mid-frame → RX bytes still pending
+        //   - timeout dropped `inner` mid-await → same as above
+        //   - decode failed → the byte stream may be desynced
+        //     (unknown discriminant leaves the cursor in the
+        //     middle of a field). We can't know without draining.
+        // Poisoning unconditionally-on-error is the only safe
+        // policy: it closes the socket instead of returning it to
+        // the pool with a half-frame that the next borrower would
+        // read as *their* response (2026-07-03 field bug).
+        s.poison();
+    }
+    response
+}
+
+/// Framed write + read + decode over an already-acquired pooled
+/// stream. Split out of `rpc_attempt` so the timeout branch can
+/// drop the inner future without leaving `&mut s` borrowed for
+/// the ambient poison-on-Err handling above.
+async fn rpc_over_stream(
+    s: &mut pool::Pooled,
+    addr: &str,
+    encoded_req: &[u8],
+) -> io::Result<Response> {
     let inner = async {
-        if let Err(e) = write_frame(&mut s, encoded_req).await {
-            s.poison();
-            return Err(e);
-        }
-        let buf = match read_frame(&mut s).await {
-            Ok(b) => b,
-            Err(e) => {
-                s.poison();
-                return Err(e);
-            }
-        };
+        write_frame(s, encoded_req).await?;
+        let buf = read_frame(s).await?;
         Response::decode(&buf)
     };
     match rpc_timeout() {
         Some(timeout) => match tokio::time::timeout(timeout, inner).await {
             Ok(r) => r,
-            Err(_) => {
-                // tokio::time::timeout drops the future on expiry —
-                // the in-flight write/read got cancelled mid-frame,
-                // so the pooled stream is at an undefined byte
-                // boundary. Mark it poisoned so it's not returned
-                // to the pool, then surface the timeout to the
-                // caller (rpc() retries on TimedOut via
-                // is_likely_transient).
-                io::Result::Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("rpc to {addr} exceeded {:?}", timeout),
-                ))
-            }
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("rpc to {addr} exceeded {:?}", timeout),
+            )),
         },
         None => inner.await,
     }
@@ -372,15 +382,24 @@ pub async fn put_object_replicated_blocks(
             shard_hashes[c][l] = layer_hashes;
 
             // Dispatch one PutBatch per node covering all blocks
-            // this node holds for (c, l).
-            for (node, shards) in batches {
+            // this node holds for (c, l). Parallel via
+            // `join_all` — on 40 nodes with R=3 this collapses
+            // ~40 sequential RPCs into one round-trip, taking
+            // the 512×512 PUT under the MEDIUM-bucket timeout
+            // (2026-07-03 field bug: sequential dispatch made
+            // large clusters + Replicated encoding 504 out).
+            let dispatches = batches.into_iter().map(|(node, shards)| {
+                let addr = manifest.nodes[node].clone();
                 let req = Request::PutBatch {
                     object_id: manifest.object_id,
                     channel: c as u8,
                     layer: l as u8,
                     shards,
                 };
-                match rpc(&manifest.nodes[node], req).await? {
+                async move { rpc(&addr, req).await }
+            });
+            for result in futures_util::future::join_all(dispatches).await {
+                match result? {
                     Response::Ack => {}
                     Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
                     other => {
@@ -1252,6 +1271,17 @@ pub async fn repair_node(
     replacement: usize,
     d: usize,
 ) -> Result<RepairStats, ClientError> {
+    // Directory-manifest guard (mirrors the one in
+    // `repair_node_replicated`). Monitor / auditor walk every
+    // catalog entry including directories, whose `nodes` vec is
+    // empty. Without this the raw index below panics with
+    // "index out of bounds: the len is 0 but the index is N".
+    // 2026-07-03 field reproducer: parallel Replicated PUTs
+    // triggered monitor scans that eventually landed a
+    // directory manifest here.
+    if manifest.nodes.is_empty() {
+        return Ok(RepairStats::default());
+    }
     assert!(
         live.contains(&replacement),
         "replacement node must be live"
@@ -1765,6 +1795,67 @@ mod rpc_tests {
         let (addr, _h) = spawn_mock_node(Response::Pong).await;
         let err = list_node_hashes(&addr).await.unwrap_err();
         assert!(matches!(err, ClientError::UnexpectedResponse { .. }));
+    }
+
+    /// 2026-07-03 field bug: `tokio::time::timeout` drops the RPC
+    /// future mid-frame, but the pooled socket was returned via
+    /// its normal Drop path — pool then handed a half-read socket
+    /// to the *next* caller who got somebody else's response and
+    /// surfaced it as `UnexpectedResponse`. Fix: poison-on-any-Err
+    /// in `rpc_attempt`. This test pins that behavior: after a
+    /// timeout, the pool must hold ZERO idle entries for the
+    /// timed-out addr.
+    #[tokio::test]
+    async fn rpc_timeout_poisons_socket_instead_of_recycling_to_pool() {
+        // Not using DisablePool — we specifically want the pool
+        // ENABLED so the test can observe whether the socket
+        // came back. Grab the pool test lock manually.
+        let _lock = crate::pool::test_pool_lock();
+        crate::pool::clear();
+
+        // Mock that accepts connections but never writes back.
+        // Every RPC against it stalls forever until the client
+        // times out.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let _stall = tokio::spawn(async move {
+            loop {
+                let (sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                tokio::spawn(async move {
+                    let _keep = sock;
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+
+        // Very short RPC timeout so the test doesn't wait long.
+        let prev = std::env::var("HOLOFS_RPC_TIMEOUT_MS").ok();
+        std::env::set_var("HOLOFS_RPC_TIMEOUT_MS", "80");
+
+        let res = rpc(&addr, Request::Ping).await;
+        assert!(
+            matches!(&res, Err(e) if e.kind() == io::ErrorKind::TimedOut),
+            "expected TimedOut, got {res:?}"
+        );
+
+        // The invariant. Pool must be empty for this addr — both
+        // the initial attempt AND the transient-retry attempt
+        // timed out AND their sockets must have been poisoned
+        // instead of recycled.
+        let (_, total_idle) = crate::pool::stats();
+        assert_eq!(
+            total_idle, 0,
+            "timed-out sockets must be poisoned, not recycled to pool"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("HOLOFS_RPC_TIMEOUT_MS", v),
+            None => std::env::remove_var("HOLOFS_RPC_TIMEOUT_MS"),
+        }
+        crate::pool::clear();
     }
 
     #[tokio::test]
