@@ -1,64 +1,61 @@
 # Modèle de menace
 
-
-
-
-Ce document énumère les **adversaires**, **actifs**, **hypothèses de confiance**,
-et **mesures d'atténuation** pour un déploiement holofs. Il utilise la
-taxonomie STRIDE ([Howard & LeBlanc 2003](https://learn.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats))
-pour classifier les menaces et le prisme [LINDDUN](https://linddun.org/) pour
-les préoccupations de confidentialité.
+Ce document énumère les **adversaires**, **actifs**, **hypothèses de
+confiance** et **mesures d'atténuation** pour un déploiement holofs.
+Il utilise la taxonomie STRIDE ([Howard & LeBlanc 2003](https://learn.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats))
+pour classifier les menaces et le prisme [LINDDUN](https://linddun.org/)
+pour les préoccupations de confidentialité.
 
 ## Sommaire
 
-1. [Portée et actifs](#1-scope-and-assets)
-2. [Frontières de confiance](#2-trust-boundaries)
-3. [Catalogue d'adversaires](#3-adversary-catalogue)
-4. [Analyse STRIDE](#4-stride-analysis)
-5. [Analyse de confidentialité (LINDDUN)](#5-privacy-linddun-analysis)
-6. [Non-objectifs et limites explicites](#6-non-goals-and-explicit-limitations)
-7. [Registre des risques résiduels](#7-residual-risk-register)
+1. [Portée et actifs](#1-portée-et-actifs)
+2. [Frontières de confiance](#2-frontières-de-confiance)
+3. [Catalogue d'adversaires](#3-catalogue-dadversaires)
+4. [Analyse STRIDE](#4-analyse-stride)
+5. [Analyse de confidentialité (LINDDUN)](#5-analyse-de-confidentialité-linddun)
+6. [Non-objectifs et limites explicites](#6-non-objectifs-et-limites-explicites)
+7. [Registre des risques résiduels](#7-registre-des-risques-résiduels)
 
 ---
 
-## 1. Scope and assets
+## 1. Portée et actifs
 
 ### 1.1. Dans la portée
 
 Le système étudié est un cluster holofs tel que décrit dans
 [architecture.md](./architecture.md) :
 
-- Gateway HTTP (binaire `holofs-web`, axum + Leptos SSR).
-- Démons de node (binaire `holofs-node`), 1..N par hôte.
-- Le protocole filaire entre eux (voir [api.md §2](./api.md#2-wire-protocol-tcp)).
-- L'état sur disque (shards, manifests, catalogue, whitelist).
-- La whitelist signée + le matériel d'identité Ed25519.
+- Passerelle HTTP (binaire `holofs-web`, axum + Leptos SSR).
+- Démons de nœud (binaire `holofs-node`), 1..N par hôte.
+- Le protocole filaire entre eux (voir [api.md §2](./api.md#2-protocole-filaire-tcp)).
+- L'état sur disque (shards, manifestes, catalogue, liste blanche).
+- La liste blanche signée + le matériel d'identité Ed25519.
 
 ### 1.2. Hors portée
 
 - Le noyau du système d'exploitation et l'hyperviseur.
-- Le reverse proxy de terminaison TLS (s'il est utilisé en externe).
+- Le proxy inverse terminant le TLS (s'il est utilisé en externe).
 - Le navigateur / l'application cliente de l'utilisateur.
-- Les canaux auxiliaires découlant de caches CPU partagés avec des co-tenants
-  (atténuation : nodes dédiés pour les déploiements sensibles).
+- Les canaux auxiliaires provenant du partage des caches CPU avec des
+  co-locataires (atténuation : nœuds dédiés pour les déploiements sensibles).
 - Les attaques physiques sur les supports de stockage.
 
 ### 1.3. Actifs à protéger
 
-| Actif                          | Confidentialité | Intégrité | Disponibilité |
-|--------------------------------|:---------------:|:---------:|:-------------:|
-| Payload d'objet                | ●               | ●         | ●             |
-| Métadonnées d'objet (nom, kind) | ◐              | ●         | ●             |
-| Catalogue (objet → manifest)   |                 | ●         | ●             |
-| Whitelist + pubkey admin       |                 | ●         | ●             |
-| Clés secrètes Ed25519 par node | ●               | ●         |               |
-| Données de santé / liveness du cluster |          | ●         | ◐             |
+| Actif                              | Confidentialité | Intégrité | Disponibilité |
+|------------------------------------|:---------------:|:---------:|:-------------:|
+| Charge utile de l'objet            | ●               | ●         | ●             |
+| Métadonnées de l'objet (nom, type) | ◐               | ●         | ●             |
+| Catalogue (objet → manifeste)      |                 | ●         | ●             |
+| Liste blanche + clé publique admin |                 | ●         | ●             |
+| Clés secrètes Ed25519 par nœud     | ●               | ●         |               |
+| Santé du cluster / données de vie  |                 | ●         | ◐             |
 
 Légende : ● critique, ◐ modéré.
 
 ---
 
-## 2. Trust boundaries
+## 2. Frontières de confiance
 
 ```mermaid
 flowchart LR
@@ -82,145 +79,156 @@ flowchart LR
     end
 ```
 
-| Frontière          | Authentification                | Chiffrement     | Notes de durcissement |
-|--------------------|---------------------------------|-----------------|-----------------------|
-| Utilisateur → Edge | Niveau application (cookies, JWT) | TLS 1.3       | Hors portée           |
-| Edge → Gateway     | Aucune aujourd'hui (prévu : mTLS) | Aucun / mTLS  | Lier le gateway à un VLAN privé |
-| Gateway ↔ Node     | Challenge-response Ed25519 (+ mTLS optionnel) | TCP en clair, ou TLS rustls via `--tls` (étape 6) | Nonce du protocole filaire + handshake signé ; `--mtls` ajoute la vérification de certificat X.509 |
-| Opérateur → Cluster | L'admin Ed25519 signe la whitelist | Hors-bande   | Garder la clé admin offline / HSM |
+| Frontière              | Authentification                              | Chiffrement                          | Notes de durcissement |
+|------------------------|-----------------------------------------------|--------------------------------------|-----------------------|
+| Utilisateur → Edge     | Niveau applicatif (cookies, JWT)              | TLS 1.3                              | Hors portée           |
+| Edge → Passerelle      | Aucune aujourd'hui (prévu : mTLS)             | Aucun / mTLS                         | Lier la passerelle à un VLAN privé |
+| Passerelle ↔ Nœud     | Défi-réponse Ed25519 (+ mTLS optionnel)       | TCP en clair, ou TLS rustls via `--tls` | Nonce du protocole filaire + poignée de main signée ; `--mtls` ajoute la vérification du certificat X.509 |
+| Opérateur → Cluster    | La clé admin Ed25519 signe la liste blanche   | Hors bande                           | Garder la clé admin hors ligne / HSM |
 
 ---
 
-## 3. Adversary catalogue
+## 3. Catalogue d'adversaires
 
-| Adversaire                 | Position                            | Objectif                          | Capacité       |
-|----------------------------|-------------------------------------|-----------------------------------|----------------|
-| **Anonyme externe**        | Internet public                     | Lire / supprimer des objets, DoS  | Réseau + L7    |
-| **Client compromis**       | Détient une session HTTP valide     | Exfiltrer les données d'autres utilisateurs | L7    |
-| **Observateur réseau**     | Sur le chemin entre gateway/nodes   | Lire le trafic, rejouer, MITM     | L3 / L4        |
-| **Node compromis**         | Détient une clé node valide         | Servir de mauvaises données, refuser l'audit | Protocole filaire |
-| **Node Sybil**             | Ne possède aucune clé mais tente de rejoindre | Polluer placement / dedup | Protocole filaire |
-| **Opérateur compromis**    | A la clé admin                      | Contrôle total du cluster         | Total          |
-| **Lecture interne**        | Lecture du système de fichiers sur un hôte de node | Lire shards / métadonnées | Shell OS |
-| **Coercition / assignation** | Contrainte légale contre les opérateurs | Récupérer un objet spécifique | Légal        |
+| Adversaire                     | Position                                | Objectif                             | Capacité       |
+|--------------------------------|-----------------------------------------|--------------------------------------|----------------|
+| **Anonyme externe**            | Internet public                         | Lire / supprimer des objets, DoS     | Réseau + L7    |
+| **Client compromis**           | Détient une session HTTP valide         | Exfiltrer les données d'autres utilisateurs | L7      |
+| **Observateur réseau**         | Sur le chemin passerelle/nœuds          | Lire le trafic, rejouer, MITM        | L3 / L4        |
+| **Nœud compromis**             | Détient une clé de nœud valide          | Servir de fausses données, refuser un audit | Protocole filaire |
+| **Nœud Sybil**                 | Ne possède aucune clé mais tente de rejoindre | Polluer le placement / la déduplication | Protocole filaire |
+| **Opérateur compromis**        | Détient la clé admin                    | Contrôle total du cluster            | Total          |
+| **Lecture interne**            | Lecture du système de fichiers sur un hôte de nœud | Lire les shards / métadonnées | Shell OS   |
+| **Contrainte / assignation**   | Contrainte légale envers les opérateurs | Récupérer un objet spécifique        | Légale         |
 
-L'adversaire qui justifie le plus d'effort de modélisation est le **node compromis** :
-un pair pleinement authentifié qui se comporte mal de manière sélective. La plupart
-des atténuations de ce document le ciblent.
-
----
-
-## 4. STRIDE analysis
-
-### 4.1. Spoofing
-
-| # | Menace                                              | Atténuation |
-|---|-----------------------------------------------------|-------------|
-| S1 | Un attaquant usurpe l'identité d'un node pour recevoir des shards | Challenge Ed25519 (`AuthChallenge`) — le gateway vérifie la signature avec la pubkey de la whitelist avant de faire confiance à toute réponse. Voir [api.md §2 handshake](./api.md#authentication-handshake). |
-| S2 | Un attaquant usurpe l'identité du gateway auprès d'un node | Exécuter avec `--mtls` : le node refuse tout handshake TLS dont le certificat client n'est pas signé par la CA partagée. Sans `--mtls`, revenir au déploiement sur VLAN privé. |
-| S3 | Mise à jour de whitelist forgée                    | La whitelist est signée avec la clé Ed25519 admin ; les nodes refusent les mises à jour non signées ou à mauvaise signature. |
-| S4 | Rejeu d'une réponse capturée                       | Un nonce par requête dans `AuthChallenge` garantit que les signatures se lient à un challenge frais. Les trames filaires ne portent pas encore de nonce anti-rejeu pour les messages non-handshake — voir [§7](#7-residual-risk-register). |
-
-### 4.2. Tampering
-
-| # | Menace                                              | Atténuation |
-|---|-----------------------------------------------------|-------------|
-| T1 | Un node retourne un payload de shard corrompu      | L'identité de chaque shard est `SHA-256(coeffs ‖ payload)`. Le gateway recalcule ; un mismatch est rejeté et compte contre la `reputation`. |
-| T2 | Un node retourne un shard différent de celui demandé | Le manifest liste `shard_hashes[c][l][idx]` ; le gateway vérifie que le hash correspond à l'entrée attendue. |
-| T3 | Corruption sur disque (bitrot)                     | Les noms de fichiers shard *sont* leurs hashes — le scan au démarrage et la tâche `Audit` en arrière-plan détectent les mismatches et déclenchent une réparation RLNC. |
-| T4 | Modification du fichier catalogue                  | Les écritures du catalogue sont `write-tmp+fsync+rename`. La racine Merkle de chaque manifest cross-vérifie tous les shards ; les entrées de catalogue retournées remontent comme échecs de décodage. |
-| T5 | Un MITM modifie les octets filaires                | Exécuter avec `--tls` : rustls (TLS 1.2/1.3 via le provider `ring`) authentifie le serveur et chiffre chaque trame. La vérification du hash de shard reste un contrôle de défense en profondeur à l'intérieur du tunnel TLS. |
-
-### 4.3. Repudiation
-
-| # | Menace                                              | Atténuation |
-|---|-----------------------------------------------------|-------------|
-| R1 | Un node nie avoir servi une mauvaise réponse       | Le score de réputation est mis à jour côté serveur à partir de mismatches de hash auditables ; le dashboard ops enregistre `audit_fail_total` par node. |
-| R2 | L'opérateur nie une action admin                   | Les mises à jour de whitelist portent la signature Ed25519 de l'admin ; le fichier whitelist *committé* est la piste d'audit. |
-
-### 4.4. Information disclosure
-
-| # | Menace                                              | Atténuation |
-|---|-----------------------------------------------------|-------------|
-| I1 | Un seul node lisant « ses » shards révèle le plaintext | Un shard individuel est `coeffs · chunks` sur GF(2⁸), une combinaison linéaire aléatoire de chunks. Récupérer le plaintext depuis moins de `K` shards indépendants nécessite de résoudre un système linéaire sous-déterminé — théoriquement infaisable **pour un shard aléatoire unique**. |
-| I2 | Un adversaire collecte ≥ K shards d'un objet       | RLNC sur GF(2⁸) public **n'est pas** un schéma de chiffrement. K shards linéairement indépendants reconstruisent le payload. Atténuation : **chiffrement at-rest par node** (prévu étape 7) et **diversité de placement** — sous `RendezvousZoneAware`, K shards s'étendent sur ≥ K nodes différents dans ≥ ⌈K/zone_count⌉ zones, donc les lire nécessite d'en compromettre autant. |
-| I3 | Fuite de métadonnées : nom + kind + taille         | Le manifest stocke le nom de l'objet et le content type en clair. Les déploiements sensibles devraient hasher ou pseudonymiser les noms avant l'upload. |
-| I4 | Canaux auxiliaires (cache, timing réseau)          | Non atténué en 0.1 — utiliser des CPU / réseau dédiés pour les déploiements sensibles. |
-| I5 | Fuite de sauvegarde                                | Les sauvegardes héritent de la même menace : elles doivent être chiffrées au repos (`restic --pass-file`, S3 SSE-KMS). |
-| I6 | Fuite de holoshare                                 | Un fichier `.holoshare` individuel est une part d'un split Shamir-via-RLNC `(k,n)`. En posséder moins de `k` est sûr de manière théorique-information (voir [theory.md §8](./theory.md#8-shamir-via-rlnc-key-escrow)). |
-
-### 4.5. Denial of service
-
-| # | Menace                                              | Atténuation |
-|---|-----------------------------------------------------|-------------|
-| D1 | Inonder le gateway avec des uploads                | Le gateway doit s'exécuter derrière un reverse proxy à limitation de débit. La taille de trame filaire est plafonnée à `MAX_FRAME = 64 MiB` sur chaque node. |
-| D2 | Un seul node refuse les requêtes                   | RLNC a une redondance ≥ K-de-N par couche. La tâche de réparation détecte et ressuscite les shards sur des nodes vivants. |
-| D3 | Panne coordonnée d'une moitié du cluster           | La marge est dimensionnée pour **toute zone unique + défaillances simples dispersées** (voir [theory.md §3](./theory.md#3-priority-layers)). Des pannes plus larges dégradent gracieusement : L3 (détail cosmétique) perdu en premier, puis L2, L1. |
-| D4 | Un node « dormant » accepte les puts mais ne retourne jamais de get | La tâche d'audit émet des probes `Audit(shard_hash)` aléatoires — un node non réactif ou répondant faux voit sa réputation chuter et cesse d'être choisi pour le placement. |
-| D5 | Slow-loris sur TCP                                 | Timeouts I/O tokio à chaque lecture de trame ; configurable via `HOLOFS_WIRE_TIMEOUT`. |
-| D6 | Épuisement mémoire via énorme trame                | Les trames > `MAX_FRAME` sont rejetées avant allocation. |
-
-### 4.6. Elevation of privilege
-
-| # | Menace                                              | Atténuation |
-|---|-----------------------------------------------------|-------------|
-| E1 | Sybil : un attaquant spawn N faux nodes pour absorber les données | Les nodes ne sont joints que si leur pubkey apparaît dans la whitelist signée admin. Générer des clés valides ne sert à rien — il faut être admis. |
-| E2 | Un gateway compromis accède à tout                 | Le gateway n'a pas de clé admin ; il ne peut pas créer de nouvelles entrées de whitelist. Une compromission affecte l'ingress/egress et la fraîcheur du catalogue mais ne peut pas subvertir la racine de confiance. |
-| E3 | Clé admin compromise                               | C'est une compromission totale. Atténuation : garder la clé admin offline (HSM / sauvegarde papier), faire tourner via procédure de dual control. |
-| E4 | Élévation de privilège à l'intérieur du conteneur  | Le conteneur s'exécute en `uid 10001`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`. |
-| E5 | Path traversal dans les noms d'objets              | Les noms d'objets ne sont stockés que dans le catalogue ; les chemins sur disque sont content-addressed (`<hex2>/<hex62>.shard`). Le nom de l'objet n'atteint jamais le système de fichiers. |
+L'adversaire qui mérite le plus d'effort de modélisation est le **nœud
+compromis** : un pair pleinement authentifié qui se comporte mal de
+manière sélective. La plupart des mesures d'atténuation de ce document
+le ciblent.
 
 ---
 
-## 5. Privacy (LINDDUN) analysis
+## 4. Analyse STRIDE
 
-Holofs n'est **pas** un système de fichiers préservant la confidentialité de par sa
-conception — il priorise la durabilité, la déduplication et la résilience. Les
-surfaces suivantes sont à considérer par les opérateurs.
+### 4.1. Usurpation (Spoofing)
 
-| Catégorie LINDDUN  | Préoccupation                            | Action de l'opérateur |
-|--------------------|------------------------------------------|------------------------|
-| **L**inkability    | Les sketches MinHash révèlent la similarité de texte ; les hashes perceptuels lient les images quasi-doublons. | Désactiver les endpoints d'analytics (`/similar`, `/diff`) pour les tenants sensibles à la confidentialité. |
-| **I**dentifiability | Les noms d'objets sont stockés verbatim. | Hasher / pseudonymiser les noms côté client. |
-| **N**on-repudiation | Les logs d'audit identifient les nodes servant le contenu. | Acceptable dans des contextes ops de confiance. |
-| **D**etectability  | L'existence d'un objet est inférable depuis `/api/stats`. | `/api/stats` authentifié uniquement. |
-| **D**isclosure     | Voir §4.4 — I1–I6.                       | Chiffrement at-rest étape 7. |
-| **U**nawareness    | La dédup signifie que l'upload *d'un autre tenant* peut produire le même `data_cid`. | Déploiements mono-tenant uniquement lorsque cela importe. |
-| **N**oncompliance  | RGPD « droit à l'effacement » — `DELETE /<name>` émet `Purge` à tous les nodes ; mais **les shards peuvent avoir été sauvegardés hors site**. | Documenter la rétention des sauvegardes ; exposer `holofs-admin shred` pour un effacement de grade forensique. |
+| # | Menace                                              | Atténuation |
+|---|-----------------------------------------------------|-------------|
+| S1 | Un attaquant se fait passer pour un nœud afin de recevoir des shards | Défi Ed25519 (`AuthChallenge`) — la passerelle vérifie la signature avec la clé publique de la liste blanche avant de faire confiance à toute réponse. Voir [api.md § poignée de main d'authentification](./api.md#authentification-poignée-de-main). |
+| S2 | Un attaquant se fait passer pour la passerelle auprès d'un nœud | Exécuter avec `--mtls` : le nœud refuse toute poignée de main TLS dont le certificat client n'est pas signé par la CA partagée. Sans `--mtls`, se rabattre sur un déploiement en VLAN privé. |
+| S3 | Mise à jour de liste blanche falsifiée              | La liste blanche est signée avec la clé admin Ed25519 ; les nœuds refusent les mises à jour non signées ou de mauvaise signature. |
+| S4 | Rejeu d'une réponse capturée                        | Un nonce par requête dans `AuthChallenge` garantit que les signatures se lient à un défi frais. Les trames filaires n'embarquent pas encore de nonce anti-rejeu pour les messages hors poignée de main — voir [§7](#7-registre-des-risques-résiduels). |
+
+### 4.2. Falsification (Tampering)
+
+| # | Menace                                              | Atténuation |
+|---|-----------------------------------------------------|-------------|
+| T1 | Un nœud renvoie une charge utile de shard corrompue | L'identité de chaque shard est `SHA-256(coeffs ‖ payload)`. La passerelle recalcule ; toute divergence est rejetée et compte contre la `réputation`. |
+| T2 | Un nœud renvoie un shard différent de celui demandé | Le manifeste liste `shard_hashes[c][l][idx]` ; la passerelle vérifie que le hachage correspond à l'entrée attendue. |
+| T3 | Corruption sur disque (bitrot)                      | Les noms de fichiers des shards *sont* leurs hachages — le scan de démarrage et la tâche `Audit` en arrière-plan détectent les divergences et déclenchent la réparation RLNC. |
+| T4 | Modification du fichier catalogue                   | Les écritures du catalogue sont `write-tmp+fsync+rename`. La racine Merkle dans chaque manifeste croise toutes les valeurs de shards ; des entrées de catalogue inversées font surface comme échecs de décodage. |
+| T5 | Le MITM modifie les octets sur le fil               | Exécuter avec `--tls` : rustls (TLS 1.2/1.3 via le fournisseur `ring`) authentifie le serveur et chiffre chaque trame. La vérification du hachage des shards reste un contrôle de défense en profondeur à l'intérieur du tunnel TLS. |
+
+### 4.3. Répudiation
+
+| # | Menace                                              | Atténuation |
+|---|-----------------------------------------------------|-------------|
+| R1 | Un nœud nie avoir servi une mauvaise réponse       | Le score de réputation est mis à jour côté serveur à partir de divergences de hachage auditables ; le tableau de bord ops enregistre `audit_fail_total` par nœud. |
+| R2 | L'opérateur nie une action d'administration        | Les mises à jour de liste blanche portent la signature Ed25519 de l'admin ; le fichier liste blanche *commité* est la trace d'audit. |
+
+### 4.4. Divulgation d'information
+
+| # | Menace                                              | Atténuation |
+|---|-----------------------------------------------------|-------------|
+| I1 | Un seul nœud lisant « ses » shards révèle du texte en clair | Un shard individuel est `coeffs · chunks` sur GF(2⁸), une combinaison linéaire aléatoire de chunks. Récupérer le texte en clair à partir de moins de `K` shards indépendants exige de résoudre un système linéaire sous-déterminé — infaisable au sens de la théorie de l'information **pour un shard aléatoire unique**. |
+| I2 | L'adversaire collecte ≥ K shards d'un objet         | Le RLNC sur GF(2⁸) public **n'est pas** un schéma de chiffrement. Tout ensemble de K shards linéairement indépendants reconstruit la charge utile. Atténuation : **chiffrement au repos par nœud** et **diversité de placement** — sous `RendezvousZoneAware`, K shards s'étendent sur ≥ K nœuds distincts dans ≥ ⌈K/zone_count⌉ zones, de sorte que les lire exige de compromettre autant d'éléments. |
+| I3 | Fuite de métadonnées : nom + type + taille          | Le manifeste stocke le nom de l'objet et le type de contenu en clair. Les déploiements sensibles doivent hacher ou pseudonymiser les noms avant l'envoi. |
+| I4 | Canaux auxiliaires (cache, timing réseau)           | Non atténué dans 0.1 — utiliser des CPUs / réseaux dédiés pour les déploiements sensibles. |
+| I5 | Fuite de sauvegarde                                 | Les sauvegardes héritent de la même menace : elles doivent être chiffrées au repos (`restic --pass-file`, S3 SSE-KMS). |
+| I6 | Fuite de holoshare                                  | Un fichier `.holoshare` individuel est une part d'un partage Shamir-via-RLNC `(k,n)`. Posséder moins de `k` parts est sûr au sens de la théorie de l'information (voir [theory.md §8](./theory.md#8-partage-de-secret-shamir--rlnc)). |
+
+### 4.5. Déni de service
+
+| # | Menace                                              | Atténuation |
+|---|-----------------------------------------------------|-------------|
+| D1 | Inonder la passerelle de téléversements             | La passerelle doit s'exécuter derrière un proxy inverse limitant le débit. La taille des trames filaires est plafonnée à `MAX_FRAME = 64 Mio` sur chaque nœud. |
+| D2 | Un seul nœud refuse les requêtes                    | Le RLNC dispose d'une redondance ≥ K-parmi-N par couche. La réparation automatique à la lecture (3) + le scrub en arrière-plan (x) détectent et ressuscitent les shards sur des nœuds vivants. |
+| D3 | Panne coordonnée de la moitié du cluster            | La marge est dimensionnée pour **toute panne d'une zone entière + pannes uniques éparses** (voir [theory.md §3](./theory.md#3-couches-de-priorité-et-dégradation-holographique)). Des pannes plus larges dégradent gracieusement : L3 (détail cosmétique) perdu en premier, puis L2, L1. |
+| D4 | Nœud « dormant » qui accepte les puts mais ne rend jamais les gets | La tâche d'audit émet des sondes aléatoires `Audit(shard_hash)` — un nœud qui ne répond pas ou répond mal voit sa réputation chuter et cesse d'être choisi pour le placement. Changement x : `MissingShard` est traité comme neutre (pas de baisse de réputation), pour éviter une boucle de rétroaction liée à une collision de déduplication qui, précédemment, sortait des nœuds sains de l'ensemble vivant. |
+| D5 | Slow-loris sur TCP                                  | Budget `tokio::time::timeout` par RPC (`HOLOFS_RPC_TIMEOUT_MS`, 8 s par défaut, `0` désactive). Un RPC expiré empoisonne le flux mis en cache et réessaie une fois sur un socket frais via `is_likely_transient`. Plafonne la latence visible par l'utilisateur à 8 s + un retry au lieu du timeout TCP niveau OS de 60-75 s. |
+| D6 | Épuisement mémoire via une trame géante             | Les trames > `MAX_FRAME` sont rejetées avant allocation. |
+| D7 | Tous les nœuds simultanément muets (p. ex. course au démarrage, déploiement en flotte) | x : `placement::place` retourne `Result<_, NoLiveNodes>` au lieu d'assert ; la passerelle expose un `503 ServiceUnavailable` propre (`GatewayError::ClusterDegraded`) au lieu de paniquer. Précédemment, un seul `assert!` non typé dans `place_shard` pouvait tuer le processus de passerelle via un seul PUT pendant une panne flottante. |
+| D8 | Un flot de requêtes concurrentes épuise le runtime axum | Les seaux de routes MEDIUM (plafond par défaut 64) et LONG (plafond par défaut 8) portent une garde `tokio::sync::Semaphore`. À saturation, le middleware retourne immédiatement `503 Service Unavailable` (plutôt que d'empiler des tâches sur le runtime). Configurable via `HOLOFS_MEDIUM_CONCURRENCY` / `HOLOFS_LONG_CONCURRENCY`. Les rejets sont comptabilisés dans `holofs_backpressure_rejected_total{bucket}`. |
+| D9 | Un handler lent bloque la file de tâches axum       | Deadlines par seau (SHORT 10 s / MEDIUM 60 s / LONG 5 min) appliqués par un middleware `tokio::time::timeout`. Écoulé → `504 Gateway Timeout` ; incrémente `holofs_handler_timeouts_total{bucket}`. Les endpoints de streaming + MCP ne sont intentionnellement pas budgétés. |
+| D10 | Mort silencieuse d'une boucle d'arrière-plan par panique | Chaque boucle longue durée (monitor / auditor / scrub / persistance de réputation) est démarrée à l'intérieur de `supervised_spawn`, qui attrape les paniques via `JoinError` et redémarre avec un backoff exponentiel (1 → 30 s). Les redémarrages comptent vers `holofs_supervised_task_restarts_total{task}`. |
+
+### 4.6. Élévation de privilèges
+
+| # | Menace                                              | Atténuation |
+|---|-----------------------------------------------------|-------------|
+| E1 | Sybil : l'attaquant crée N faux nœuds pour absorber des données | Les nœuds ne sont admis que si leur clé publique apparaît dans la liste blanche signée par l'admin. Générer des clés valides ne sert à rien — elles doivent être admises. |
+| E2 | Une passerelle compromise accède à tout             | La passerelle n'a pas de clé admin ; elle ne peut créer de nouvelles entrées de liste blanche. La compromission affecte l'ingestion/sortie et la fraîcheur du catalogue mais ne peut subvertir la racine de confiance. |
+| E3 | Clé admin compromise                                | C'est une compromission totale. Atténuation : garder la clé admin hors ligne (HSM / sauvegarde papier), rotation via procédure double-contrôle. |
+| E4 | Élévation de privilèges dans le conteneur           | Le conteneur s'exécute en `uid 10001`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`. |
+| E5 | Traversée de chemin dans les noms d'objets          | Les noms d'objets sont stockés uniquement dans le catalogue ; les chemins sur disque sont adressés par contenu (`<hex2>/<hex62>.shard`). Le nom d'objet n'atteint jamais le système de fichiers. |
+| E6 | Un appelant non authentifié tue des nœuds / déclenche un GC de tout le cluster | `POST /admin/node` (kill/revive) et `POST /api/gc` exigent `Authorization: Bearer $HOLOFS_ADMIN_TOKEN` quand la variable d'environnement est définie. Manquant → 401, faux → 401, variable non définie → **403 (surface désactivée)** par défaut sûr. Le dépassement dev `HOLOFS_ADMIN_UNAUTHENTICATED=1` rouvre les endpoints et journalise un WARN au démarrage. Les rejets sont ventilés par raison dans `holofs_admin_auth_failures_total{outcome}`. |
 
 ---
 
-## 6. Non-goals and explicit limitations
+## 5. Analyse de confidentialité (LINDDUN)
 
-Les éléments suivants ne sont **pas** offerts par holofs 0.1 et nécessitent des contrôles
-externes si besoin :
+Holofs n'est **pas** un système de fichiers préservant la
+confidentialité par conception — il privilégie la durabilité, la
+déduplication et la résilience. Ce qui suit sont les surfaces que
+les opérateurs doivent considérer.
 
-1. **Chiffrement de bout en bout.** Les payloads sont stockés encodés mais non
-   chiffrés. Un node avec ≥ K shards d'un objet peut le reconstruire.
-   Les opérateurs doivent classifier holofs comme « données en clair » au repos.
-2. **Isolation entre tenants.** Il n'y a pas de namespace par utilisateur ; tous les objets
-   partagent un catalogue unique. Les déploiements multi-tenants doivent fronter holofs
-   avec un proxy d'autorisation.
-3. **Journal d'audit infalsifiable.** La réputation suit le mauvais comportement des nodes mais
-   ne produit pas de log append-only signé.
-4. **Anti-rejeu cryptographique sur les trames filaires.** Seul `AuthChallenge`
-   porte un nonce. L'étape 7 ajoute un keying par session.
-5. **Résistance quantique.** Ed25519 et SHA-256 sont pré-quantiques. L'étape 8
-   évalue la migration PQ.
+| Catégorie LINDDUN     | Préoccupation                                | Action de l'opérateur |
+|-----------------------|----------------------------------------------|-----------------------|
+| **L**iabilité         | Les esquisses MinHash révèlent la similarité de texte ; les hachages perceptuels lient les quasi-doublons d'images. | Désactiver les endpoints d'analytique (`/similar`, `/diff`) pour les locataires sensibles à la vie privée. |
+| **I**dentifiabilité   | Les noms d'objets sont stockés verbatim.     | Hacher / pseudonymiser les noms côté client. |
+| **N**on-répudiation   | Les journaux d'audit identifient les nœuds servant du contenu. | Acceptable dans des contextes ops de confiance. |
+| **D**étectabilité     | L'existence d'un objet est inférable depuis `/api/stats`. | `/api/stats` authentifié uniquement. |
+| **D**ivulgation       | Voir §4.4 — I1–I6.                           | Chiffrement au repos. |
+| **U**ninformation     | La déduplication signifie que le téléversement *d'un autre locataire* peut produire le même `data_cid`. | Déploiements mono-locataire uniquement quand cela importe. |
+| **N**on-conformité    | RGPD « droit à l'effacement » — `DELETE /<name>` émet `Purge` à tous les nœuds ; mais **des shards peuvent avoir été sauvegardés hors site**. | Documenter la rétention des sauvegardes ; exposer `holofs-admin shred` pour un effacement de niveau forensique. |
 
 ---
 
-## 7. Residual risk register
+## 6. Non-objectifs et limites explicites
 
-| Risque                                              | Sévérité | Probabilité | Contrôle compensatoire |
-|-----------------------------------------------------|:--------:|:-----------:|------------------------|
-| Trafic filaire en clair sur un LAN partagé          | Faible   | Faible      | Atténué par `--tls` (rustls TLS 1.2/1.3, étape 6). Les opérateurs qui ne définissent pas `--tls` devraient se restreindre à un VLAN privé. |
-| Compromission de la clé admin                       | Critique | Faible      | Stockage offline ; exercice de rotation trimestriel |
-| Rejeu de trame filaire (non-handshake)              | Moyenne  | Faible      | La liaison par hash limite les dommages à l'intégrité, pas à la confidentialité |
-| Attaques par canal auxiliaire sur CPU partagé       | Moyenne  | Faible      | Nodes dédiés pour les workloads sensibles |
-| Fuite de sauvegarde                                 | Élevée   | Moyenne     | Chiffrer les sauvegardes (`restic`, SSE-KMS) |
-| Effacement RGPD incomplet à cause des sauvegardes   | Moyenne  | Moyenne     | Politique de rétention documentée + divulgation au client |
-| Compromission de l'opérateur via la supply chain    | Élevée   | Faible      | Builds reproductibles + releases signées (étape 8) |
+Les éléments suivants ne sont **pas** offerts par holofs 0.1 et
+nécessitent des contrôles externes si besoin :
 
-Chaque risque a un propriétaire (`@holofs/security`) et une release d'atténuation
-planifiée. Suivi via les issues GitHub avec le label `security`.
+1. **Chiffrement de bout en bout.** Les charges utiles sont stockées
+   encodées mais non chiffrées. Un nœud avec ≥ K shards d'un objet peut
+   le reconstruire. Les opérateurs doivent classer holofs comme
+   « données en clair » au repos.
+2. **Isolation des locataires.** Il n'y a pas de namespace par
+   utilisateur ; tous les objets partagent un unique catalogue. Les
+   déploiements multi-locataires doivent placer devant holofs un
+   proxy d'autorisation.
+3. **Journal d'audit inviolable.** La réputation suit les
+   comportements fautifs des nœuds mais ne produit pas un journal signé
+   en ajout seul.
+4. **Anti-rejeu cryptographique sur les trames filaires.** Seul
+   `AuthChallenge` porte un nonce. Ajoute la clef par session.
+5. **Résistance quantique.** Ed25519 et SHA-256 sont pré-quantiques.
+   Évalue la migration PQ.
+
+---
+
+## 7. Registre des risques résiduels
+
+| Risque                                                | Sévérité | Vraisemblance | Contrôle compensatoire |
+|-------------------------------------------------------|:--------:|:-------------:|------------------------|
+| Trafic filaire en clair sur un LAN partagé            | Faible   | Faible        | Atténué par `--tls` (rustls TLS 1.2/1.3). Les opérateurs qui n'activent pas `--tls` doivent restreindre à un VLAN privé. |
+| Compromission de la clé admin                         | Critique | Faible        | Stockage hors ligne ; exercice trimestriel de rotation |
+| Rejeu de trame filaire (hors poignée de main)         | Moyen    | Faible        | La liaison de hachage limite les dégâts à l'intégrité, non à la confidentialité |
+| Attaques par canal auxiliaire sur CPU partagé         | Moyen    | Faible        | Nœuds dédiés pour les charges de travail sensibles |
+| Fuite de sauvegarde                                   | Élevé    | Moyen         | Chiffrer les sauvegardes (`restic`, SSE-KMS) |
+| Effacement RGPD incomplet à cause des sauvegardes     | Moyen    | Moyen         | Politique de rétention documentée + divulgation client |
+| Compromission d'opérateur via la chaîne d'approvisionnement | Élevé | Faible     | Constructions reproductibles + releases signées |
+
+Chaque risque a un propriétaire (`@holofs/security`) et une release
+d'atténuation prévue. Suivre via les issues GitHub avec le label
+`security`.
