@@ -10,7 +10,7 @@ Three external interfaces: **HTTP gateway**, **node wire protocol**, and
 3. [On-disk formats](#3-on-disk-formats)
 4. [Response header conventions](#4-response-header-conventions)
 5. [MCP server](#5-mcp-server)
-6. [Wavelet operations (5)](#6-wavelet-operations)
+6. [Wavelet operations](#6-wavelet-operations)
 
 ---
 
@@ -19,13 +19,13 @@ Three external interfaces: **HTTP gateway**, **node wire protocol**, and
 Base URL: `http://<addr>:8787/` (HTTPS via the gateway's own TLS scaffold
 from `HOLOFS_TLS=1`, mTLS via `HOLOFS_MTLS=1`).
 
-> **update.** Paths are slash-separated and addressable as
+> Paths are slash-separated and addressable as
 > wildcards (`/photos/2026/img.jpg`). The reserved top-level segments —
 > `api`, `health`, `escrow`, `preview`, `inspect`, `similar`, `diff`,
 > `admin`, `metrics`, `pkg`, `help`, `inspect-zoom` — cannot be used as
 > the first segment of an object path because they shadow real routes.
 
-> **update.** `GET /<path>` and `GET /preview/<path>` honour
+> `GET /<path>` and `GET /preview/<path>` honour
 > the `Range:` request header per RFC 9110 §14.2. A single satisfiable
 > byte range returns `206 Partial Content` with `Content-Range`. The
 > object is decoded in full server-side and the response is a slice of
@@ -401,12 +401,13 @@ sequenceDiagram
 All multi-byte integers are **big-endian** unless noted. Files are
 identified by an 8-byte magic at offset 0.
 
-### 3.1. Manifest (`HOLOFSM7`, legacy `HOLOFSM6` accepted on read)
+### 3.1. Manifest (`HOLOFSM9`, legacy `HOLOFSM6/M7/M8` accepted on read)
 
-bumped the magic to `HOLOFSM7` to signal that an entry may carry
-the `ObjectKind::Directory` discriminant (tag `4`). The wire layout is
-byte-for-byte identical to `HOLOFSM6`; only the legal set of `kind`
-values grew. Old `HOLOFSM6` files decode cleanly under the new code.
+The manifest carries an `ObjectKind` discriminant (`4 = Directory`) and
+a trailing `encoding` selector (`0 = Rlnc`, `1 = Replicated`). Old
+`HOLOFSM6/M7/M8` files decode cleanly under the new code — missing
+fields fall back to the historical defaults (`encoding = Rlnc`,
+`created_at_unix = 0`).
 
 Directory markers have every numeric field zeroed and every `Vec` field
 empty; their sole carrier is `object_id` (SHA-256-derived from the path,
@@ -680,9 +681,9 @@ each image/audio object in the wavelet (DWT) domain split across
 granularity lets us *transform* an object without ever decoding,
 re-encoding, or storing a second copy of the source data.
 
-Both operations are exposed only through MCP today (5) —
-HTTP routes can be added later, but `claude mcp` + curl already cover
-the same use cases.
+Both operations are exposed only through MCP today — HTTP routes
+can be added later, but `claude mcp` + curl already cover the same
+use cases.
 
 ### 6.1 Wavelet mix
 
@@ -757,17 +758,15 @@ re-encode):
 
 ---
 
-## 7. UI pages added in Stages 12.6 – 15.0
+## 7. UI pages
 
-The surface area below grew well past the original five pages
-(catalog, health, similar, inspect, diff). Every route here is server-
-rendered through Leptos SSR and accepts a `?lang=` query for locale
-override.
+The surface area below covers every server-rendered Leptos page. Each
+route accepts a `?lang=` query for locale override.
 
 ### 7.1 `/mix` — wavelet-mix composer
 
-GET `/mix?a=<image>&b=<image>&split=<u8>`. The leptos page wraps the
-5 MCP tool: a B-picker with native `<datalist>` search, a
+GET `/mix?a=<image>&b=<image>&split=<u8>`. The Leptos page wraps the
+`wavelet_mix` MCP tool: a B-picker with native `<datalist>` search, a
 split-layer number input, a live preview `<img src="/api/mix.png?…">`,
 and a "save as…" form posting to `POST /api/mix-save`. Save lands the
 output through the normal `ingest_bytes` pipeline so the hybrid
@@ -834,10 +833,10 @@ modes:
 * `spatial` (default) — gateway decodes coarse L0 + full quality
   separately and composites per pixel by ROI mask. Outside ROI
   stays blurry-visible.
-* `coeff` (1) — gateway uses the Haar reverse-map to find
-  which DWT coefficient positions touch the ROI and zeros every
-  other coefficient before the inverse Haar. Outside ROI collapses
-  to black with the sharper Haar-block boundary.
+* `coeff` — gateway uses the Haar reverse-map to find which DWT
+  coefficient positions touch the ROI and zeros every other
+  coefficient before the inverse Haar. Outside ROI collapses to
+  black with the sharper Haar-block boundary.
 
 Same backing endpoint for both: `GET /api/spotlight.png` returns
 `image/png` with these response headers:
@@ -846,7 +845,7 @@ Same backing endpoint for both: `GET /api/spotlight.png` returns
 |---------------------------------|---------|
 | `x-holofs-roi-px: x,y,w,h`      | pixel-space ROI after clamping |
 | `x-holofs-decode-ms`            | server-side decode + composite time |
-| `x-holofs-bytes-downloaded`     | shard bytes pulled (informational; doesn't reflect a real bandwidth saving until per-block encoding ships in 1) |
+| `x-holofs-bytes-downloaded`     | shard bytes pulled from the cluster. Under the per-block Replicated encoding this scales linearly with ROI area. |
 
 ### 7.7 `/versions/<name>` — per-object history
 
@@ -861,10 +860,8 @@ page shows an explanatory banner when versioning is off.
 
 Every Leptos page renders the same `<crate::ui::Topbar>` component,
 which carries `rel="external"` on every link so click navigation
-always does a full-page reload (29 introduced this for
-per-file action links; `c33f553` extended it to the topbar nav to
-work around a Leptos SPA-router hijack that was leaving the previous
-page's DOM in place).
+always does a full-page reload. This works around a Leptos SPA-router
+hijack that would otherwise leave the previous page's DOM in place.
 
 ---
 
@@ -940,12 +937,13 @@ Returns:
 }
 ```
 
-Concurrency: the pass takes an exclusive write guard on the
-gateway's `gc_barrier` RwLock. PUTs, restores, and embedding-append
-operations hold the read guard, so GC waits for in-flight writers
-to drain AND blocks new ones until it finishes. Trade-off
-documented inline: PUTs queue behind GC for the duration of one
-pass (~40 ms on dev catalogs).
+Concurrency: the shard-side of the pass runs without a global writer
+lock. Every `Store::put` records a wall-clock write epoch; the pass
+snapshots the epoch first, then walks the catalog / node hash lists,
+then gates each per-node purge with `PurgeByHashUpTo(snapshot)`. A
+PUT that races the pass carries an epoch strictly greater than the
+cutoff and the node refuses to purge it. The one remaining
+serialisation point is the embed.bin rewrite at the tail of GC.
 
 ### 8.6 `POST /api/restore`
 
@@ -970,30 +968,38 @@ pretending no versions exist).
 
 ---
 
-## 9. Wire protocol additions (Stages 14.0, 15.0)
+## 9. Wire protocol additions
 
-The TCP wire format described in section 2 gained three new ops:
+The TCP wire format described in section 2 gained five extra ops
+covering garbage collection, batched PUT, and epoch-based GC
+concurrency:
 
 | OP byte | Request                         | Response       | Purpose |
 |---------|---------------------------------|----------------|---------|
 | `0x07`  | `ListHashes`                    | `Hashes`       | Enumerate every shard hash a node currently holds. Used by `Gateway::gc_orphaned_shards` to compute orphans (held − live). |
 | `0x08`  | `PurgeByHash { hashes: Vec<H> }`| `Ack`          | Idempotent: delete every shard whose hash is in `hashes` from the node's in-memory store + on-disk shard dir. |
-| `0x09`  | `PutBatch { object_id, channel, layer, shards: Vec<Shard> }` | `Ack` | Batched PUT: store every shard in `shards` under the same `(object_id, channel, layer)` bucket. Useful for any high-volume PUT path; the 0 scaffolding sends one PutBatch per (node, channel, layer) instead of one Put per shard. |
+| `0x09`  | `PutBatch { object_id, channel, layer, shards: Vec<Shard> }` | `Ack` | Batched PUT: store every shard in `shards` under the same `(object_id, channel, layer)` bucket. Reduces the RPC count of the per-block Replicated PUT from one per shard to one per (node, channel, layer). |
+| `0x0a`  | `CurrentEpoch`                  | `Epoch`        | Return the node's current wall-clock write epoch (ms since UNIX_EPOCH). Snapshotted by the GC pass to gate purges of shards written after the snapshot. |
+| `0x0b`  | `PurgeByHashUpTo { hashes, max_epoch }` | `Ack`  | Idempotent purge that only deletes shards whose stored epoch is ≤ `max_epoch`. Lets GC run concurrently with fresh PUTs — a race that lands a shard after the snapshot is protected because its epoch is strictly greater than the cutoff. |
 
 Response side gains:
 
 | Tag    | Response                  |
 |--------|---------------------------|
 | `0x06` | `Hashes(Vec<Hash>)`       |
+| `0x07` | `Epoch { epoch: u64 }`    |
 
 Frame layout for the new ops:
 
 ```
-OP_LIST_HASHES: 0x07                              (no payload)
-OP_PURGE_BY_HASH: 0x08 | u32 count | hash[count]
-OP_PUT_BATCH:     0x09 | u64 object_id | u8 channel | u8 layer
-                       | u32 count | shard[count]
-RSP_HASHES:       0x06 | u32 count | hash[count]
+OP_LIST_HASHES:           0x07                              (no payload)
+OP_PURGE_BY_HASH:         0x08 | u32 count | hash[count]
+OP_PUT_BATCH:             0x09 | u64 object_id | u8 channel | u8 layer
+                               | u32 count | shard[count]
+OP_CURRENT_EPOCH:         0x0a                              (no payload)
+OP_PURGE_BY_HASH_UP_TO:   0x0b | u64 max_epoch | u32 count | hash[count]
+RSP_HASHES:               0x06 | u32 count | hash[count]
+RSP_EPOCH:                0x07 | u64 epoch
 ```
 
 Same `MAX_FRAME = 64 MiB` limit as the rest of the protocol.
@@ -1002,26 +1008,27 @@ Same `MAX_FRAME = 64 MiB` limit as the rest of the protocol.
 
 ## 10. Manifest format additions
 
-### 10.1 `HOLOFSM9` magic
+### 10.1 `HOLOFSM9` magic and encoding selector
 
-The on-disk manifest gained one more trailing field — a one-byte
-`encoding` discriminant plus a variant-specific tail.
+The on-disk manifest carries a one-byte `encoding` discriminant plus
+a variant-specific tail:
 
-| Byte | Variant                     | Tail |
-|------|-----------------------------|------|
-| `0`  | `ObjectEncoding::Rlnc`      | (empty) — default for everything produced today |
-| `1`  | `ObjectEncoding::Replicated { replication: u8 }` | one trailing `u8` |
+| Byte | Variant                                                             | Tail |
+|------|---------------------------------------------------------------------|------|
+| `0`  | `ObjectEncoding::Rlnc`                                              | (empty) — the default |
+| `1`  | `ObjectEncoding::Replicated { replication: u8, block_size: u32 }`   | one `u8` + one `u32` BE |
+
+The `Replicated` variant groups each layer's DWT coefficients into
+`block_size`-wide blocks and replicates each block across
+`replication` cluster nodes chosen by HRW. Payload of one shard =
+`block_size * 4` bytes (raw `f32` coefficients). The block layout is
+what lets `/api/spotlight.png` fetch only the blocks whose
+coefficients overlap the requested ROI.
 
 Backwards compatibility: legacy magic bytes `HOLOFSM6`, `HOLOFSM7`,
 and `HOLOFSM8` are still decodable. `HOLOFSM8` records get
 `encoding = Rlnc` on read; `HOLOFSM7` / `HOLOFSM6` additionally fill
 `created_at_unix = 0`.
-
-**Invariant**: every manifest produced by this codebase today has
-`encoding == Rlnc`. The `Replicated` variant exists as 1
-scaffolding so the discriminant byte is locked; the producer ships
-in a later stage with a `block_size` parameter once the storage
-layer's per-shard file count is brought under control.
 
 ---
 
@@ -1029,8 +1036,8 @@ layer's per-shard file count is brought under control.
 
 | Flag                      | Default | Purpose |
 |---------------------------|---------|---------|
-| `--enable-embed`          | off     | 8 semantic search. ViT-B/32 image encoder + multilingual DistilBERT text encoder (50+ languages: ru / en / de / fr / es / zh / ja / …). First-call cost: ~700 MiB weights download (155 MiB CLIP image + 540 MiB DistilBERT text + 1.5 MiB projection). Cached under `~/.cache/huggingface/hub/`. |
-| `--enable-versions`       | off     | 4 per-object versioning. Storage grows monotonically while on; run `/api/gc` to reclaim. |
+| `--enable-embed`          | off     | Enable semantic search. ViT-B/32 image encoder + multilingual DistilBERT text encoder (50+ languages: ru / en / de / fr / es / zh / ja / …). First-call cost: ~700 MiB weights download (155 MiB CLIP image + 540 MiB DistilBERT text + 1.5 MiB projection). Cached under `~/.cache/huggingface/hub/`. |
+| `--enable-versions`       | off     | Enable per-object versioning. Storage grows monotonically while on; run `/api/gc` to reclaim. |
 
 Both have matching env vars (`HOLOFS_ENABLE_EMBED`,
 `HOLOFS_ENABLE_VERSIONS`). They're additive — turning one on
@@ -1059,13 +1066,12 @@ Both pieces are pure axum + tower-http; nothing to configure.
 
 ## 13. Wire connection pool
 
-Client→node RPCs now share a per-address LIFO pool of post-handshake
-[`TransportStream`]s. Without it, every PUT/Audit/Gather opened a fresh
-TCP (plus TLS handshake when enabled), and a full sample-tree seed
-exhausted macOS's ephemeral-port pool by the 28th request — see
-`feedback_workflow.md` rule 7 for the historical workaround. With the
-pool, a 44-file seed at zero throttle and default background-scan
-intervals completes cleanly.
+Client→node RPCs share a per-address LIFO pool of post-handshake
+[`TransportStream`]s. Without it, every PUT/Audit/Gather opens a fresh
+TCP connection (plus TLS handshake when enabled), which quickly
+exhausts the OS's ephemeral-port pool under bulk-ingest workloads.
+With the pool a full sample-tree seed at zero throttle and default
+background-scan intervals completes cleanly.
 
 The pool sits in `holofs_client::pool`. The server side already loops
 over frames per connection, so no protocol change was needed.
