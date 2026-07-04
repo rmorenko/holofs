@@ -1,44 +1,51 @@
 # Testszenarien
 
+Manuelle Ende-zu-Ende-Checkliste für holofs. Deckt jedes große
+Subsystem ab — CRUD, hierarchischer Katalog, HTTP-Range, holografische
+Degradation, perzeptuelle Suche, Escrow, Persistenz und i18n. Jedes
+Szenario listet Kommandos, erwartetes Ergebnis und Erfolgsmarker.
 
-
-
-Manuelle Ende-zu-Ende-Checkliste für holofs. Sie deckt alle wichtigen
-Teilsysteme ab — CRUD, hierarchischen Katalog, HTTP Range, holografische
-Degradation, perzeptuelle Suche, escrow, Persistenz und i18n. Jedes
-Szenario führt die Befehle, das erwartete Ergebnis und die
-Erfolgskriterien auf.
-
-> Bezieht sich auf den Prototyp v0.4.0. CLI-Flags, Umgebungsvariablen und
-> Pfade entsprechen dem Code zum Zeitpunkt der Erstellung; falls etwas
-> abweicht, konsultieren Sie
-> [docs/operations.md](./operations.md) oder `cargo run -p holofs-web -- --help`.
+> Zielt auf Prototyp v0.4.0. CLI-Flags, Env-Vars und Pfade spiegeln
+> den Code zum Zeitpunkt des Verfassens wider; sollte etwas driften,
+> siehe [docs/operations.md](./operations.md) oder
+> `cargo run -p holofs-web -- --help`.
 
 ## Inhalt
 
 1. [Cluster hochfahren](#1-cluster-hochfahren)
 2. [Grundlegendes Objekt-CRUD](#2-grundlegendes-objekt-crud)
-3. [Hierarchischer Katalog (Stufe 9)](#3-hierarchischer-katalog-stufe-9)
-4. [HTTP Range bei GET (Stufe 11.1)](#4-http-range-bei-get-stufe-111)
+3. [Hierarchischer Katalog](#3-hierarchischer-katalog)
+4. [HTTP-Range auf GET](#4-http-range-auf-get)
 5. [Holografische Degradation](#5-holografische-degradation)
 6. [Perzeptuelle Suche und Diff](#6-perzeptuelle-suche-und-diff)
 7. [Inspect: visuelles Shard-Audit](#7-inspect-visuelles-shard-audit)
-8. [Holografisches Schlüssel-Escrow](#8-holografisches-schlüssel-escrow)
-9. [In-App-Dokumentationsanzeige (Stufe 10)](#9-in-app-dokumentationsanzeige-stufe-10)
+8. [Holografische Schlüsselhinterlegung](#8-holografische-schlüsselhinterlegung)
+9. [In-App-Docs-Viewer](#9-in-app-docs-viewer)
 10. [i18n: Sprachumschaltung](#10-i18n-sprachumschaltung)
 11. [Persistenz und Neustart](#11-persistenz-und-neustart)
 12. [Multi-Prozess-Cluster](#12-multi-prozess-cluster)
-13. [TLS / mTLS auf der Leitung](#13-tls--mtls-auf-der-leitung)
+13. [TLS / mTLS auf dem Draht](#13-tls--mtls-auf-dem-draht)
 14. [Metriken, Logs, SSE](#14-metriken-logs-sse)
-15. [Regressionsprüfungen für Stufe 11](#15-regressionsprüfungen-für-stufe-11)
+15. [Regressionsprüfungen](#15-regressionsprüfungen)
+16. [Weitere Regressionsprüfungen](#16-weitere-regressionsprüfungen)
+17. [Wavelet-Operationen](#17-wavelet-operationen)
+18. [Quickstart mit dem Sample-Tree](#18-quickstart-mit-dem-sample-tree)
+19. [Per-Datei-Metrik-Seite](#19-per-datei-metrik-seite)
+20. [CLIP-semantische Suche + Bänder](#20-clip-semantische-suche--bänder)
+21. [Robust-Copy-Spalte auf `/similar`](#21-robust-copy-spalte-auf-similar)
+22. [Streaming-Hologramm](#22-streaming-hologramm)
+23. [Holografische Spotlight-Modi](#23-holografische-spotlight-modi)
+24. [Per-Objekt-Versionierung](#24-per-objekt-versionierung)
+25. [Orphan-Shard-GC + Embedding-GC](#25-orphan-shard-gc--embedding-gc)
+26. [Reliability-Szenarien](#26-reliability-szenarien)
 
 ---
 
 ## 1. Cluster hochfahren
 
-**Ziel.** Einen eingebetteten Cluster (40 nodes in einem Prozess,
-4 Zonen) starten und bestätigen, dass jeder node mit leerem Katalog
-betriebsbereit ist.
+**Ziel.** Einen eingebetteten Cluster (40 Nodes in einem Prozess, 4
+Zonen) hochfahren und bestätigen, dass jeder Node lebt und der Katalog
+leer ist.
 
 ```sh
 rm -rf ./holofs-data    # fresh start
@@ -58,23 +65,25 @@ INFO holofs_web::bootstrap: catalog loaded objects=0
 INFO holofs_web: listening addr=127.0.0.1:8787
 ```
 
-**Erfolgskriterien.**
+**Erfolgsmarker.**
 
-- `GET http://127.0.0.1:8787/` liefert das Katalog-HTML (leeres Raster).
-- `GET /api/stats` liefert `{"nodes_total":40,"nodes_live":40,"objects_total":0,…}`.
-- 40 Ports lauschen auf 9100..9139 (`lsof -nP -iTCP:9100-9139 -sTCP:LISTEN | wc -l` ≥ 40).
+- `GET http://127.0.0.1:8787/` liefert das HTML des Katalogs (leeres
+  Raster).
+- `GET /api/stats` gibt
+  `{"nodes_total":40,"nodes_live":40,"objects_total":0,…}` zurück.
+- 40 Ports lauschen auf 9100..9139
+  (`lsof -nP -iTCP:9100-9139 -sTCP:LISTEN | wc -l` ≥ 40).
 
-Ohne `--no-seed` befüllt sich der Katalog selbst mit zwei Demobildern
-(`photo.png`, `mandala.png`); praktisch für nachgelagerte Szenarien, aber
-unpraktisch für saubere CRUD-Tests.
+Ohne `--no-seed` seedet sich der Katalog selbst mit zwei Demo-Bildern
+(`photo.png`, `mandala.png`); praktisch für nachgelagerte Szenarien,
+aber unpraktisch für saubere CRUD-Tests.
 
 ---
 
 ## 2. Grundlegendes Objekt-CRUD
 
-**Ziel.** Alle vier unterstützten Arten abdecken — Bild / Audio / Text /
-opak — sowie den perzeptuellen Spezialfall der formatübergreifenden
-Deduplikation.
+**Ziel.** Alle vier unterstützten Arten abdecken — image / audio / text
+/ opaque — plus der perzeptuelle Grenzfall des Cross-Format-Dedup.
 
 ```sh
 # image (PNG → image kind, DWT + RLNC across 4 layers)
@@ -93,7 +102,8 @@ curl -X PUT --data-binary @/tmp/blob.bin http://127.0.0.1:8787/blob.bin
 curl -X PUT --data-binary @track.wav http://127.0.0.1:8787/track.wav
 ```
 
-Jedes PUT liefert das JSON `{"name":…,"object_id":…,"shards":…,"put_ms":…}`.
+Jeder PUT liefert JSON `{"name":…,"object_id":…,"shards":…,"put_ms":…}`
+zurück.
 
 ```sh
 # GET — byte-perfect recovery (full-quality decode)
@@ -108,17 +118,17 @@ file /tmp/prev.png   # should be PNG image
 curl -s http://127.0.0.1:8787/api/stats | python3 -m json.tool
 ```
 
-**Erfolgskriterien.**
+**Erfolgsmarker.**
 
-- Jedes PUT liefert `201 Created` mit einer `object_id` ungleich Null.
-- GET liefert die ursprünglichen PNG-/WAV-/Text-Bytes zurück, byte-genau
-  bei Bild und opak (Text erlaubt vollständigen Chunk-Verlust, niemals
-  einzelne Bytes innerhalb eines Chunks).
-- `/api/stats.objects_by_kind` spiegelt die Zählung pro Art wider.
+- Jeder PUT gibt `201 Created` mit einer Nicht-Null-`object_id` zurück.
+- GET gibt die originalen PNG-/WAV-/Text-Bytes zurück, byte-perfekt für
+  image und opaque (text erlaubt Ganz-Chunk-Verlust, niemals Bytes
+  innerhalb eines Chunks).
+- `/api/stats.objects_by_kind` spiegelt die Per-Art-Zählungen wider.
 - `curl -X DELETE http://127.0.0.1:8787/photo.png` liefert
   `200 {"deleted":"photo.png",…}` und `objects_total` sinkt.
 
-### Formatübergreifende Deduplikation
+### Cross-Format-Dedup
 
 ```sh
 # same frame as PNG and BMP — data_cid is identical
@@ -129,14 +139,14 @@ curl -s http://127.0.0.1:8787/api/stats | python3 -m json.tool | grep dedup
 ```
 
 `dedup_savings_pct > 0`, weil verlustfreie Formate dieselbe `data_cid`
-erzeugen → shards auf der Festplatte werden dedupliziert.
+produzieren → Shards auf der Disk werden dedupliziert.
 
 ---
 
-## 3. Hierarchischer Katalog (Stufe 9)
+## 3. Hierarchischer Katalog
 
-**Ziel.** mkdir, Navigation in Unterverzeichnisse, korrekte Ablehnungen
-bei Kollision, Umbenennung und rmdir überprüfen.
+**Ziel.** mkdir, Navigation in Unterverzeichnisse, korrekte
+Zurückweisungen bei Kollision, Umbenennen, rmdir verifizieren.
 
 ```sh
 # build a tree
@@ -172,20 +182,20 @@ curl -X DELETE http://127.0.0.1:8787/api/rmdir/archive/2026
 curl -X DELETE http://127.0.0.1:8787/api/rmdir/archive
 ```
 
-**UI-Prüfung.** Öffnen Sie `http://127.0.0.1:8787/?p=photos/2026/raw` —
-die Breadcrumb sollte `home / photos / 2026 / raw` anzeigen, die
-Kachel img.png ist anklickbar und das Formular "+ folder" funktioniert.
+**UI-Check.** Öffne `http://127.0.0.1:8787/?p=photos/2026/raw` — der
+Breadcrumb sollte `home / photos / 2026 / raw` lauten, das
+img.png-Tile ist klickbar, das „+ folder"-Formular funktioniert.
 
 **Reservierte Segmente.** `PUT /health/foo`, `PUT /api/foo`,
-`PUT /help/foo`, `PUT /inspect-zoom/foo` liefern jeweils `400` — diese
-Routen lassen sich nicht überdecken.
+`PUT /help/foo`, `PUT /inspect-zoom/foo` geben alle `400` zurück —
+diese Routen können nicht überdeckt werden.
 
 ---
 
-## 4. HTTP Range bei GET (Stufe 11.1)
+## 4. HTTP-Range auf GET
 
-**Ziel.** Bestätigen, dass partielle GETs funktionieren — erforderlich
-für Audio-Scrubbing, fortsetzbare große Downloads und künftige Video-Seek.
+**Ziel.** Bestätigen, dass Teil-GETs funktionieren — erforderlich für
+Audio-Scrubbing, fortsetzbare große Downloads, künftiges Video-Seek.
 
 ```sh
 # 1000-byte blob
@@ -216,69 +226,70 @@ curl -i -H "Range: bytes=0-9,20-29" http://127.0.0.1:8787/range-test
 # 200 OK, 1000 bytes
 ```
 
-**Erfolgskriterien.** Statuscodes und `Content-Range` entsprechen der
-obigen Tabelle; die ausgeschnittenen Bytes sind byte-genau (das Muster
-`0..255 × 4` liefert für `bytes=256-259` die Bytes `00 01 02 03`).
+**Erfolgsmarker.** Statuscodes und `Content-Range` stimmen mit der
+Tabelle oben überein; gesliceter Bytes sind byte-exakt (das
+`0..255 × 4`-Muster gibt `00 01 02 03` für `bytes=256-259` zurück).
 
-**Realmedien-Szenario.**
+**Real-Media-Szenario.**
 
 ```html
 <!-- open in a browser, confirm the seek bar works -->
 <audio src="http://127.0.0.1:8787/track.wav" controls></audio>
 ```
 
-Der Browser sendet bei jedem Seek einen `Range`-Header. Das gateway-Log
-zeigt `206 Partial Content`-Antworten.
+Der Browser sendet `Range` bei jedem Seek. Das Gateway-Log zeigt
+`206 Partial Content`-Antworten.
 
 ---
 
 ## 5. Holografische Degradation
 
-**Ziel.** Der Vorzeigetrick — wenn ein großer Teil des Clusters ausfällt,
-lässt sich die Datei trotzdem **in geringerer Auflösung** decodieren.
-Steuern Sie das aus der UI unter `/health/<name>`.
+**Ziel.** Der Flaggschiff-Trick — wenn ein großer Anteil des Clusters
+stirbt, decodiert die Datei immer noch **in geringerer Auflösung**.
+Über die UI unter `/health/<name>` betreiben.
 
-1. Starten Sie mit dem geseedeten `photo.png` (lassen Sie `--no-seed` weg).
-2. Öffnen Sie `http://127.0.0.1:8787/health/photo.png`. Sie erhalten eine
-   Margin-Tabelle pro `(channel, layer)`, Monte-Carlo-Läufe bei 10/25/50/75%
-   Verlust sowie ein Szenario für einen Ganz-Zonen-Ausfall.
-3. Öffnen Sie `http://127.0.0.1:8787/health`. Ein Raster mit 40 nodes und
-   den Schaltflächen **kill** / **revive**.
-4. Beenden Sie nodes nacheinander und beobachten Sie `/health/photo.png`:
-   - 10–20% Verlust: Margin überall positiv, PSNR ~99 dB.
-   - 30–40% Verlust: Margin von L3 (Detail) → 0, PSNR fällt auf ~30 dB —
-     das Bild wird unschärfer.
-   - 50–60% Verlust: L2 fällt aus, nur noch L0+L1 übrig — nur grobe Form.
-   - 75% Verlust: jede Schicht fällt aus — die Ausgabe kollabiert zu Rauschen.
-5. Holen Sie zwischen den Schritten jeweils `GET /photo.png` ab und
-   begutachten Sie das PNG.
+1. Mit geseedetem `photo.png` starten (`--no-seed` weglassen).
+2. `http://127.0.0.1:8787/health/photo.png` öffnen. Du bekommst eine
+   Margentabelle pro `(channel, layer)`, Monte-Carlo-Läufe bei
+   10/25/50/75 % Verlust und ein Ganz-Zonen-Ausfall-Szenario.
+3. `http://127.0.0.1:8787/health` öffnen. Ein Raster von 40 Nodes mit
+   **Kill**- / **Revive**-Buttons.
+4. Nodes einen nach dem anderen killen und `/health/photo.png`
+   beobachten:
+   - 10–20 % Verlust: Marge überall positiv, PSNR ~99 dB.
+   - 30–40 % Verlust: L3 (Detail) Marge → 0, PSNR fällt auf ~30 dB —
+     Bild wird unschärfer.
+   - 50–60 % Verlust: L2 stirbt, nur L0+L1 bleiben — nur grobe Form.
+   - 75 % Verlust: jede Schicht stirbt — Ausgabe kollabiert zu
+     Rauschen.
+5. Zwischen den Schritten `GET /photo.png` abrufen und das PNG per Auge
+   prüfen.
 
-**Erfolgskriterien.**
+**Erfolgsmarker.**
 
-- Unterhalb der K-Schwelle jeder Schicht — vollständige Datei.
+- Unter der K-Schwelle jeder Schicht — volle Datei.
 - Über L3, aber unter L2 — erkennbares Bild mit fehlenden hohen
   Frequenzen (unschärfer).
-- Die Margin-Tabelle aktualisiert sich per SSE
-  (`/api/health/events`) — die Zahlen verschieben sich nach einem
-  Kill ohne Seitenneuladen.
+- Die Margentabelle aktualisiert sich per SSE
+  (`/api/health/events`) — Zahlen ändern sich nach einem Kill ohne
+  Seiten-Reload.
 
-**Wiederherstellung.** Klicken Sie **revive** auf den beendeten nodes.
-Nach 1–2 Zyklen des Health-Monitors (`HOLOFS_MONITOR_INTERVAL`,
-Standardwert 15 s) läuft die automatische Reparatur, und die Margin kommt
-zurück.
+**Wiederherstellung.** Klicke **Revive** auf den gekillten Nodes. Nach
+1–2 Zyklen des Health-Monitors (`HOLOFS_MONITOR_INTERVAL`, Default
+15 s) läuft Auto-Repair und die Marge kehrt zurück.
 
 ### Ganz-Zonen-Ausfall
 
-Jeder node trägt eine `zone` (0..3). Beenden Sie **alle 10 nodes** einer
-Zone: dank der zonenbewussten Platzierung (`ceil(n/z)` shards pro Zone)
-lässt sich das Objekt weiterhin bis L2 decodieren.
+Jeder Node trägt eine `zone` (0..3). Kille **alle 10 Nodes** einer
+Zone: das Objekt decodiert dank Zone-Aware-Platzierung noch bis L2
+(`ceil(n/z)` Shards pro Zone).
 
 ---
 
 ## 6. Perzeptuelle Suche und Diff
 
-**Ziel.** Ähnliche Objekte über einen 16-Byte-Perzeptual-Hash finden
-und Deduplikation per Diff beobachten.
+**Ziel.** Ähnliche Objekte über einen 16-Byte-perzeptuellen Hash finden
++ Dedup durch Diff beobachten.
 
 ```sh
 # upload two similar versions of the same image
@@ -293,51 +304,51 @@ curl -s 'http://127.0.0.1:8787/api/fingerprint/orig.png' | python3 -m json.tool
 # UI: open /similar/orig.png — neighbours sorted by L1 distance.
 ```
 
-**Diff pro Chunk.**
+**Per-Chunk-Diff.**
 
 ```
 http://127.0.0.1:8787/diff?a=orig.png&b=blurry.png
 ```
 
 Die UI zeichnet grüne Zellen (übereinstimmende Chunks) und rote
-(verschiedene). Zwei identische Kopien → 100% grün plus ein großer
+(verschiedene). Zwei identische Kopien → 100 % grün plus großes
 `storage_saved_kb`.
 
 ---
 
 ## 7. Inspect: visuelles Shard-Audit
 
-**Ziel.** Bestätigen, dass das Raster alle 444 shards (3 Kanäle × 4
-Schichten × 26..64 pro Schicht) ohne Lücken anzeigt. Regressionsprüfung
-für Stufe 11.2.
+**Ziel.** Bestätigen, dass das Raster alle 444 Shards (3 Kanäle × 4
+Schichten × 26..64 pro Schicht) ohne Lücken zeigt. Regressionscheck
+für
+1. `http://127.0.0.1:8787/inspect/mandala.png` öffnen.
+2. Scrollen — für jeden Kanal (R, G, B) solltest du 4 Abschnitte sehen
+   (Schichten 0..3), jeder mit der richtigen Thumbnail-Anzahl:
+   - L0 — 64 Shards (16 systematisch + 48 RLNC)
+   - L1 — 40 Shards (16 + 24)
+   - L2 — 26 Shards (16 + 10)
+   - L3 — 18 Shards (16 + 2)
+3. **Alle 444 Thumbnails müssen rendern** (keine kaputten
+   `<img>`-Platzhalter). Vor 2 würden ~8 % unter gleichzeitiger Last
+   ausfallen.
+4. Beliebiges Thumbnail anklicken → landen auf
+   `/inspect-zoom/<c_l_idx>/<name>` mit dem großen PNG, Hex-Coeffs,
+   Payload.
 
-1. Öffnen Sie `http://127.0.0.1:8787/inspect/mandala.png`.
-2. Scrollen Sie — für jeden Kanal (R, G, B) sollten Sie 4 Abschnitte
-   sehen (Schichten 0..3), jeder mit der passenden Vorschauanzahl:
-   - L0 — 64 shards (16 systematisch + 48 RLNC)
-   - L1 — 40 shards (16 + 24)
-   - L2 — 26 shards (16 + 10)
-   - L3 — 18 shards (16 + 2)
-3. **Alle 444 Vorschauen müssen gerendert werden** (keine kaputten
-   `<img>`-Platzhalter). Vor Stufe 11.2 fielen ~8% unter Parallellast aus.
-4. Klicken Sie auf eine beliebige Vorschau → Sie landen auf
-   `/inspect-zoom/<c_l_idx>/<name>` mit dem großen PNG, den
-   Hex-Koeffizienten und der Payload.
+**Farbcodierung.** Systematische Shards (die ersten K=16 jeder Schicht)
+haben einen grünen Rand und tragen sinnvollen Payload (Struktur
+sichtbar). RLNC — orangener Rand, Payload sieht wie Rauschen aus.
 
-**Farbcodierung.** Systematische shards (die ersten K=16 jeder Schicht)
-haben einen grünen Rand und tragen sinnvolle Payload (Struktur sichtbar).
-RLNC — oranger Rand, Payload sieht nach Rauschen aus.
-
-**Stresstest.** Öffnen Sie 4 Browser-Tabs von `/inspect/photo.png`
-gleichzeitig — jeder rendert vollständig. Das gateway-Log darf keine
-Zeilen `status=404` für `/api/shard/...` enthalten.
+**Stresstest.** Öffne 4 Browser-Tabs von `/inspect/photo.png`
+gleichzeitig — jeder rendert vollständig. Das Gateway-Log darf keine
+`status=404`-Zeilen für `/api/shard/...` enthalten.
 
 ---
 
-## 8. Holografisches Schlüssel-Escrow
+## 8. Holografische Schlüsselhinterlegung
 
-**Ziel.** Schwellwertverfahren à la Shamir — eine beliebige Datei in N
-Anteile mit Schwellwert K aufteilen und aus beliebigen K rekonstruieren.
+**Ziel.** Shamir-artiges Schwellenschema — eine beliebige Datei in N
+Anteile mit Schwelle K aufteilen, aus beliebigen K wiederherstellen.
 
 ```sh
 echo "my secret seed phrase" > /tmp/secret.txt
@@ -365,45 +376,46 @@ curl -F "shares=@/tmp/share_0.holoshare" \
 cmp /tmp/secret.txt /tmp/recovered.txt && echo "escrow roundtrip OK"
 ```
 
-**Erfolgskriterien.**
+**Erfolgsmarker.**
 
 - Beliebige **K** von N Anteilen rekonstruieren die Datei exakt
-  (byte-genau).
-- **K-1** Anteile reichen nicht (recover liefert 400).
-- Anteile werden **nicht im Cluster gespeichert** — sie verschwinden mit
-  einem gateway-Neustart. Laden Sie sie direkt nach dem Split herunter,
-  sonst liefert `/escrow/download/...` ein `410 Gone`.
+  (byte-perfekt).
+- **K-1** Anteile nicht (Recover liefert 400 zurück).
+- Anteile sind **nicht im Cluster gespeichert** — sie verschwinden bei
+  Gateway-Neustart. Direkt nach Split herunterladen; sonst gibt
+  `/escrow/download/...` `410 Gone` zurück.
 
-**UI.** `http://127.0.0.1:8787/escrow` enthält sowohl Split- als auch
-Recover-Formular.
+**UI.** `http://127.0.0.1:8787/escrow` trägt sowohl Split- als auch
+Recover-Formulare.
 
 ---
 
-## 9. In-App-Dokumentationsanzeige (Stufe 10)
+## 9. In-App-Docs-Viewer
 
-**Ziel.** Den Doc-Viewer, Mermaid- und KaTeX-Rendering überprüfen.
+**Ziel.** Den Docs-Viewer, Mermaid- und KaTeX-Rendering verifizieren.
 
-1. Öffnen Sie `http://127.0.0.1:8787/help`. Die linke Sidebar enthält
-   7 Dokumente, der rechte Bereich zeigt `README.md`.
-2. Klicken Sie **Architecture**: `/help/architecture` öffnet sich mit
+1. `http://127.0.0.1:8787/help` öffnen. Linke Seitenleiste hat 7
+   Dokumente, das rechte Fenster zeigt `README.md`.
+2. Auf **Architecture** klicken: `/help/architecture` öffnet sich mit
    einem korrekt gerenderten **Mermaid**-Diagramm (dem
-   Crate-Abhängigkeitsgraphen) — SVG, clientseitig über `mermaid.min.js`
+   Crate-Abhängigkeitsgraph) — SVG clientseitig via `mermaid.min.js`
    gezeichnet.
-3. Klicken Sie **Theory**: viele **KaTeX**-Formeln (`$x^2 + y^2$`,
-   `$$E = mc^2$$` usw.) — jede wird gerendert.
-4. Am unteren Ende der Sidebar befindet sich ein Sprachumschalter
-   (en, ru, de, fr, es). Klicken Sie **Русский** — das Dokument wird neu
-   aus `docs/ru/<slug>.md` gerendert. Mermaid und KaTeX funktionieren
-   weiterhin (Formeln und Diagramme sind Code, nicht übersetzt).
-5. Wenn eine lokalisierte Variante fehlt, liefert das gateway die
-   englische (`docs/<slug>.md`) mit `locale: en` in der Metazeile.
+3. Auf **Theory** klicken: viele **KaTeX**-Formeln (`$x^2 + y^2$`,
+   `$$E = mc^2$$`, usw.) — jede gerendert.
+4. Der untere Rand der Seitenleiste trägt einen Sprachumschalter
+   (en, ru, de, fr, es). Klicke auf **Русский** — das Dokument rendert
+   aus `docs/ru/<slug>.md` neu. Mermaid und KaTeX funktionieren
+   weiter (Formeln und Diagramme sind Code, nicht übersetzt).
+5. Wo eine lokalisierte Variante fehlt, liefert das Gateway die
+   englische (`docs/<slug>.md`) mit `locale: en` in der Meta-Zeile.
 
-**Erfolgskriterien.**
+**Erfolgsmarker.**
 
-- Alle 7 Dokumente öffnen in allen 5 Sprachen ohne 404.
-- Mermaid-Diagramme sind echte SVGs, kein Rohcode in einem `<div>`.
-- KaTeX-Formeln erscheinen als gesetzte Mathematik, nicht als TeX-Quelle.
-- Die Sidebar hebt das aktive Dokument hervor (Klasse `.active`).
+- Alle 7 Dokumente öffnen sich in allen 5 Sprachen ohne 404.
+- Mermaid-Diagramme sind echte SVGs, nicht Rohcode in einem `<div>`.
+- KaTeX-Formeln erscheinen als gesetzte Mathematik, nicht als
+  TeX-Quelle.
+- Die Seitenleiste hebt das aktive Dokument hervor (`.active`-Klasse).
 
 ---
 
@@ -411,25 +423,25 @@ Recover-Formular.
 
 **Ziel.** Die UI funktioniert in 5 Sprachen auf jeder Route.
 
-1. Öffnen Sie eine beliebige Seite (`/`, `/help`, `/escrow`).
+1. Beliebige Seite öffnen (`/`, `/help`, `/escrow`).
 2. Die rechte Seite der Topbar trägt einen kompakten Umschalter:
    `en · ru · de · fr · es`.
-3. Wechseln Sie durch:
-   - `?lang=ru` → "каталог", "состояние", "эскроу", "помощь".
-   - `?lang=de` → "Katalog", "Zustand", "Treuhand", "Hilfe".
-   - `?lang=fr` → "catalogue", "santé", "séquestre", "aide".
-   - `?lang=es` → "catálogo", "estado", "depósito", "ayuda".
-4. Die URL wird per `rewrite_lang` umgeschrieben — Pfad und andere
+3. Durchklicken:
+   - `?lang=ru` → „каталог", „состояние", „эскроу", „помощь".
+   - `?lang=de` → „Katalog", „Zustand", „Treuhand", „Hilfe".
+   - `?lang=fr` → „catalogue", „santé", „séquestre", „aide".
+   - `?lang=es` → „catálogo", „estado", „depósito", „ayuda".
+4. Die URL wird via `rewrite_lang` umgeschrieben — Pfad und andere
    Query-Parameter (`?p=…`, `?a=&b=…`) bleiben erhalten.
 
-**Unbekanntes Locale.** `?lang=ja` oder beliebiges anderes fällt auf
-Englisch zurück.
+**Unbekannte Locale.** `?lang=ja` oder anderes fällt auf Englisch
+zurück.
 
 ---
 
 ## 11. Persistenz und Neustart
 
-**Ziel.** Bestätigen, dass Daten einen Neustart überstehen.
+**Ziel.** Bestätigen, dass Daten einen Neustart überleben.
 
 ```sh
 # 1. seed the cluster
@@ -461,18 +473,19 @@ curl -o /tmp/after-restart.png http://127.0.0.1:8787/keep/img.png
 cmp assets/sample.png /tmp/after-restart.png && echo "persistence OK"
 ```
 
-**Erfolgskriterien.**
+**Erfolgsmarker.**
 
-- `catalog.bin` (~KB) und shards (`node_*/<hex>/<hex>.shard`) sind intakt.
-- Nach dem Neustart liefert `GET` das Original Byte für Byte zurück.
-- Node-Identitäten (`node_*/identity.key`) bleiben stabil — die
-  öffentlichen Schlüssel stimmen mit den Werten vor dem Neustart überein.
+- `catalog.bin` (~KB) und Shards (`node_*/<hex>/<hex>.shard`) sind
+  intakt.
+- Nach Neustart gibt `GET` das Original byte-für-byte zurück.
+- Node-Identitäten (`node_*/identity.key`) sind stabil — Pubkeys
+  stimmen mit den Vor-Neustart-Werten überein.
 
 ---
 
 ## 12. Multi-Prozess-Cluster
 
-**Ziel.** Den "echten" verteilten Modus erproben — nodes als separate
+**Ziel.** Den „echten" verteilten Modus üben — Nodes als separate
 Prozesse.
 
 ```sh
@@ -483,11 +496,11 @@ Das Skript:
 
 1. Startet 8 `holofs-node`-Prozesse mit Storage unter
    `.cluster-data/node-N`.
-2. Sammelt deren Ed25519-Pubkeys.
-3. Erzeugt ein Admin-Schlüsselpaar und signiert die whitelist.
-4. Startet das gateway mit `--whitelist`.
+2. Sammelt ihre Ed25519-Pubkeys ein.
+3. Erzeugt ein Admin-Keypair und signiert die Whitelist.
+4. Startet das Gateway mit `--whitelist`.
 
-In einem weiteren Terminal:
+In einem anderen Terminal:
 
 ```sh
 curl -X PUT --data-binary @assets/sample.png http://127.0.0.1:8787/test.png
@@ -499,21 +512,20 @@ for i in 0 1 2 3 4 5 6 7; do
 done
 ```
 
-**Erfolgskriterien.**
+**Erfolgsmarker.**
 
-- Summe der shards über alle nodes ≈ 444 (×3 Kanäle ×
-  Anzahl pro Schicht).
-- Ctrl-C im Skript beendet alle 8 nodes und das gateway.
-- Erneutes Ausführen desselben Skripts (ohne `.cluster-data/` zu löschen)
-  stellt den vorherigen Zustand wieder her — die Daten auf der
-  Festplatte sind intakt.
+- Summe der Shards über die Nodes ≈ 444 (×3 Kanäle × Per-Layer-
+  Zählungen).
+- Ctrl-C auf dem Skript stoppt alle 8 Nodes und das Gateway.
+- Erneutes Ausführen desselben Skripts (ohne `.cluster-data/` zu
+  wischen) stellt den vorherigen Zustand wieder her — Daten auf der
+  Disk sind intakt.
 
 ---
 
-## 13. TLS / mTLS auf der Leitung
+## 13. TLS / mTLS auf dem Draht
 
-**Ziel.** Optional aktivierbares TLS für den Verkehr gateway ↔ node
-einschalten.
+**Ziel.** Opt-in-TLS auf dem Gateway ↔ Node-Verkehr aktivieren.
 
 ```sh
 # embedded mode — a self-signed CA is generated automatically
@@ -523,22 +535,22 @@ HOLOFS_TLS=1 cargo run --release --bin holofs-web -- \
 
 Log: `TLS material self-signed; ca → ./holofs-data-tls/tls/ca.crt`.
 
-Wechselseitige Authentifizierung:
+Mutuelle Auth:
 
 ```sh
 HOLOFS_TLS=1 HOLOFS_MTLS=1 cargo run --release --bin holofs-web -- \
     --storage ./holofs-data-mtls --no-seed
 ```
 
-**Was zu überprüfen ist.**
+**Was zu verifizieren ist.**
 
-- Der Verkehr auf 9100..9139 ist nicht länger reines TCP — `tcpdump` auf
-  dem Loopback zeigt TLS-Handshakes (`16 03 ...`).
+- Verkehr auf 9100..9139 ist nicht mehr Plain-TCP — `tcpdump` auf
+  Loopback zeigt TLS-Handshakes (`16 03 ...`).
 - PUT/GET/inspect funktionieren genauso wie ohne TLS.
-- Ohne `--tls` bleiben Verbindungen unverschlüsselt — abwärtskompatibel.
+- Ohne `--tls` bleiben Verbindungen plain — rückwärtskompatibel.
 
-PKI-Details und der Ablauf im verteilten Modus mit vom Betreiber
-bereitgestellten Zertifikaten finden sich in
+PKI-Details und der Distributed-Mode-Fluss mit
+Operator-bereitgestellten Zertifikaten leben in
 [docs/operations.md](./operations.md).
 
 ---
@@ -580,15 +592,16 @@ Praktisch für journald / fluentd / Vector / Loki.
 curl -N http://127.0.0.1:8787/api/health/events
 ```
 
-Etwa alle 3 Sekunden trifft ein Frame `event: health\ndata: {…}\n\n`
-mit einem JSON-Snapshot ein — das treibt das Live-`/health`-Dashboard an.
+Ungefähr alle 3 Sekunden trifft ein `event: health\ndata: {…}\n\n`-
+Frame mit einem JSON-Snapshot ein — das ist es, was das
+Live-`/health`-Dashboard antreibt.
 
 ---
 
-## 15. Regressionsprüfungen für Stufe 11
+## 15. Regressionsprüfungen
 
-Drei schnelle Sonden für kürzlich behobene Probleme. Führen Sie sie nach
-jeder Änderung am gateway oder an der Ingest-Pipeline aus.
+Drei schnelle Sonden, die auf kürzlich behobene Issues zielen. Nach
+jeder Änderung am Gateway oder der Ingest-Pipeline ausführen.
 
 ### 11.1 Range auf Medien
 
@@ -597,19 +610,19 @@ curl -i -H "Range: bytes=0-99" http://127.0.0.1:8787/photo.png \
     | head -10
 ```
 
-Erwartet: `206 Partial Content`, `Content-Range: bytes 0-99/<total>`,
+Erwarte `206 Partial Content`, `Content-Range: bytes 0-99/<total>`,
 `Content-Length: 100`. Nicht 200, nicht 416.
 
-### 11.2 Inspect verliert keine shards
+### 11.2 Inspect verwirft keine Shards
 
-Öffnen Sie `http://127.0.0.1:8787/inspect/mandala.png` im Browser. Alle
-444 Vorschauen müssen rendern. Im Log:
+`http://127.0.0.1:8787/inspect/mandala.png` in einem Browser öffnen.
+Alle 444 Thumbnails müssen rendern. Im Log:
 
 ```sh
 grep -E "/api/shard/" /tmp/holofs-cluster.log | grep -v "status=200" | wc -l
 ```
 
-Erwartet: **0**. Vor Stufe 11.2 lag das bei ~41.
+Erwartet **0**. Vor 2 war das ~41.
 
 ### 11.3 Große Multipart-Uploads
 
@@ -625,56 +638,60 @@ curl -i -X PUT --data-binary @/tmp/30mb.bin \
     http://127.0.0.1:8787/big.bin 2>&1 | head -1
 ```
 
-Beide müssen `200`/`201` liefern, nicht `400 multipart read: Error parsing`.
+Beide müssen `200`/`201` zurückgeben, nicht
+`400 multipart read: Error parsing`.
 
 ---
 
-## 16. Regressionsprüfungen – 12
+## 16. Weitere Regressionsprüfungen
 
-### 16.1 Similar-Scope
+### 16.1 Similar Scope
 
 Drei Scope-Pillen oben auf `/similar/<name>`: **alle Dateien** /
 **aktueller Ordner** / **aktueller Ordner (rekursiv)**.
 
 ```sh
-# unbeschränkt (Legacy — Top-10 über den ganzen Katalog)
+# unrestricted (legacy default — top-10 across the catalog)
 curl -s 'http://127.0.0.1:8787/similar/check.txt' \
   | grep -oE 'top similar \(<!>[0-9]+'
 
-# nur Dateien im selben übergeordneten Verzeichnis
+# only files inside the same parent directory
 curl -s 'http://127.0.0.1:8787/similar/check.txt?scope=folder' \
   | grep -oE 'top similar \(<!>[0-9]+'
 
-# Teilbaum des Elternverzeichnisses (auf Root → ganzer Katalog, wie `all`)
+# subtree of the parent (root → whole catalog, equivalent to `all`)
 curl -s 'http://127.0.0.1:8787/similar/check.txt?scope=tree' \
   | grep -oE 'top similar \(<!>[0-9]+'
 ```
 
-Der Scope bleibt klebrig — ein Klick auf einen Nachbarn navigiert zu
-dessen `/similar` mit erhaltenem `?scope=` (und `?lang=`).
+Scope ist sticky — Klicken auf einen Nachbarn navigiert zu dessen
+eigener `/similar`-URL, wobei dasselbe `?scope=` (und `?lang=`)
+erhalten bleibt.
 
-### 16.2 Katalogfilter + Datei-Löschen
+### 16.2 Katalog-Filter + Datei-Löschung
 
 Serverseitiger Filter auf `/` und `/?p=<prefix>` über drei Query-
 Parameter: `q` (Namens-Glob, `*` = Wildcard, Basename-Match,
-Groß-/Kleinschreibung-egal), `from`, `to` (`YYYY-MM-DD`, Bereich über
+case-insensitiv), `from`, `to` (`YYYY-MM-DD`, Bereich über
 `created_at_unix`).
 
 ```sh
-# alle PNGs
+# all PNG files
 curl -s 'http://127.0.0.1:8787/?q=*.png' \
   | grep -oE 'class="tree-leaf' | wc -l
 
-# kombiniert: Texte aus 2026
+# combined: text files added in 2026
 curl -s 'http://127.0.0.1:8787/?q=*.txt&from=2026-01-01' \
   | grep -oE 'class="tree-leaf' | wc -l
 ```
 
-Die Baumansicht behält Vorfahr-Verzeichnisse gefilterter Blätter, damit
-Pfade navigierbar bleiben. Legacy-Einträge mit `created_at_unix=0`
-(HOLOFSM6/HOLOFSM7) passieren jeden Datumsfilter.
+Die Baumansicht behält Vorfahren-Verzeichnisse jedes behaltenen
+Blatts, damit die Pfade navigierbar bleiben. Legacy-Einträge mit
+`created_at_unix=0` (HOLOFSM6/HOLOFSM7) passieren immer jeden
+Datumsfilter.
 
-Datei-Löschen ist ein Form-POST-Pendant zu `rmdir_form`:
+Das Datei-Löschen ist ein Form-POST-Spiegel des bestehenden
+`rmdir_form`:
 
 ```sh
 curl -s -X PUT 'http://127.0.0.1:8787/tmp-delete-me.txt' \
@@ -683,26 +700,27 @@ curl -s -o /dev/null -w '%{http_code}\n' \
   -X POST 'http://127.0.0.1:8787/api/rm' \
   -H 'Content-Type: application/x-www-form-urlencoded' \
   --data 'path=tmp-delete-me.txt&return_to=/'
-# erwartet 303 (Redirect auf return_to bei Erfolg)
+# expect 303 (redirect to return_to on success)
 ```
 
-Die Datei-Zeilen im Baum bekommen einen kleinen `✕`-Button mit
-Bestätigungs-Prompt.
+Die Baum-Blatt-Zeilen rendern einen kleinen `✕`-Button mit einer
+Bestätigungsabfrage.
 
-### 16.3 Lokalisierter Date-Picker
+### 16.3 Lokalisierter Datumsauswähler
 
-Das native `<input type="date">` trägt jetzt ein `lang`-Attribut
-entsprechend der Seitensprache; in Chromium-Browsern ersetzt ein
-flatpickr-Overlay (von jsdelivr) den nativen Picker, damit der Kalender
-immer die Seitensprache spricht, nicht die OS-Sprache.
+Nativer `<input type="date">` auf der Filterleiste trägt ein
+`lang`-Attribut passend zur Seiten-Locale; in Chromium-Browsern
+ersetzt ein flatpickr-Overlay (von jsdelivr geladen) den nativen
+Picker, sodass der Kalender immer die Sprache der Seite spricht, nicht
+die OS-Locale.
 
-`/?lang=de` öffnen, auf ein Datumsfeld klicken — Kalenderkopf auf
-Deutsch. Auf `/?lang=fr` wechseln, wiederholen — Französisch. Das
-`value=…` bleibt unabhängig von der Locale `YYYY-MM-DD`.
+Besuche `/?lang=ru`, klicke ein Datumsfeld an — die Kalender-Kopfzeile
+ist auf Russisch. Wechsle zu `/?lang=fr`, wiederhole — Französisch.
+Der `value=…` läuft unabhängig von der Locale als `YYYY-MM-DD` durch.
 
-### 16.4 MCP-Server Smoke-Test
+### 16.4 MCP-Server-Smoke-Test
 
-Cluster mit Token starten, damit Schreibwerkzeuge aktiv sind:
+Starte den Cluster mit einem Token, damit Write-Tools aktiviert sind:
 
 ```sh
 HOLOFS_MCP_TOKEN=devtoken ./holofs-web \
@@ -710,7 +728,7 @@ HOLOFS_MCP_TOKEN=devtoken ./holofs-web \
   --log warn --log-format text
 ```
 
-MCP-Sitzung initialisieren und alle Werkzeuge auflisten:
+Initialisiere eine MCP-Session und liste jedes Tool:
 
 ```sh
 TOKEN=devtoken
@@ -737,7 +755,7 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
   | grep -oE '"name":"[^"]+"' | sort
 ```
 
-12 Namen werden erwartet: `diff_objects`, `find_similar`,
+Erwarte 12 Namen: `diff_objects`, `find_similar`,
 `get_cluster_health`, `get_object_health`, `inspect_object`,
 `inspect_shard`, `list_catalog`, `mkdir`, `mv_object`,
 `put_object_text`, `read_object_text`, `rmdir`.
@@ -745,14 +763,14 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
 Auth-Gating:
 
 ```sh
-# ohne Header → 401
+# no header → 401
 curl -s -o /dev/null -w 'no-auth: %{http_code}\n' \
   -X POST http://127.0.0.1:8787/mcp -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
     "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}'
 
-# gültiger Bearer → 200
+# valid bearer → 200
 curl -s -o /dev/null -w 'with-auth: %{http_code}\n' \
   -X POST http://127.0.0.1:8787/mcp \
   -H "Authorization: Bearer $TOKEN" \
@@ -762,7 +780,7 @@ curl -s -o /dev/null -w 'with-auth: %{http_code}\n' \
     "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}'
 ```
 
-Resources-Oberfläche:
+Ressourcen-Oberfläche:
 
 ```sh
 curl -s -X POST http://127.0.0.1:8787/mcp \
@@ -773,20 +791,21 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
   | grep -oE '"uri":"holofs:///[^"]+"' | head -5
 ```
 
-Einbindung in Claude Code — siehe [api.md §5](./api.md#5-mcp-server).
+Zur Verdrahtung in Claude Code siehe
+[api.md §5](./api.md#5-mcp-server).
 
 ---
 
 ## 17. Wavelet-Operationen
 
-Beide Operationen laufen über denselben MCP-Endpoint (`/mcp`) — die
-Session aus §16.4 weiter nutzen. Vor dem Cluster-Start `HOLOFS_MCP_TOKEN`
-setzen, damit `save_as` arbeitet.
+Beide Operationen laufen über den bestehenden MCP-Endpunkt (`/mcp`) —
+behalte dieselbe Session wie in §16.4 bei. Setze `HOLOFS_MCP_TOKEN`
+vor dem Cluster-Start, damit das `save_as`-Formular funktioniert.
 
-### 17.1 Wavelet-Mischung
+### 17.1 Wavelet-Mix
 
-Hybrides PNG aus zwei kompatiblen Bildern bauen und als `hybrid.png`
-in den Katalog speichern:
+Baue ein hybrides PNG aus zwei kompatiblen Bildern und speichere es im
+Katalog als `hybrid.png`:
 
 ```sh
 curl -s -X POST http://127.0.0.1:8787/mcp \
@@ -799,19 +818,19 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
       "save_as":"hybrid.png"}}}' \
   | grep -oE '"saved_as":"[^"]*"|"width":[0-9]+|"height":[0-9]+'
 
-# Hybrid herunterladen — sollte ein echtes PNG sein.
+# Pull it down to inspect the hybrid — should be a regular PNG.
 curl -s -o /tmp/hybrid.png 'http://127.0.0.1:8787/hybrid.png'
 file /tmp/hybrid.png
 ```
 
-`file /tmp/hybrid.png` sollte ein echtes PNG mit den erwarteten Maßen
-melden.
+`file /tmp/hybrid.png` sollte ein echtes PNG-Bild mit den erwarteten
+Abmessungen melden.
 
-Kompatibilitätsfehler — abweichende Form / k / per-Layer-Parameter
-liefern `BadRequest`:
+Kompatibilitäts-Fehler — inkompatible Shapes / k / Per-Layer-Params
+geben `BadRequest` zurück:
 
 ```sh
-# Bild + Text mischen → BadRequest aus dem Kind-Check.
+# Mixing image with text → BadRequest from the kind check.
 curl -s -X POST http://127.0.0.1:8787/mcp \
   -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
   -H 'Content-Type: application/json' \
@@ -824,11 +843,11 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
 
 ### 17.2 Audio-Layer-Filter
 
-Audio nur mit Bass (L0) rendern und als neuen Katalogeintrag
-speichern:
+Rendere ein Audio-Objekt, wobei nur Bass (L0) erhalten bleibt,
+speichere als neuen Katalog-Eintrag:
 
 ```sh
-# Voraussetzung: ein `track.wav` wurde vorher eingespeist.
+# Assumes some `track.wav` ingested earlier.
 curl -s -X POST http://127.0.0.1:8787/mcp \
   -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SID" \
   -H 'Content-Type: application/json' \
@@ -840,14 +859,14 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
   | grep -oE '"saved_as":"[^"]*"|"kept_layers":\[[^]]*\]'
 ```
 
-`keep_layers:[]` oder eine durchgehend-false-Maske → `BadRequest`
-(Ergebnis wäre Stille).
+`keep_layers:[]` oder jede Schicht verworfen → `BadRequest` (die
+Ausgabe wäre Stille).
 
-### 17.3 Inline-Modus "ohne Kopie"
+### 17.3 Der „No-Copy"-Inline-Modus
 
-`save_as` weglassen, um die Bytes als base64-Blob inline zu erhalten —
-praktisch, wenn das LLM nur einen Blick auf das Ergebnis werfen soll,
-ohne ein Katalog-Artefakt zu hinterlassen:
+`save_as` weglassen, um die Bytes inline als base64-Blob
+zurückzubekommen — nützlich, wenn du willst, dass das LLM das Ergebnis
+ansieht, ohne einen Katalog-Artefakt zurückzulassen:
 
 ```sh
 curl -s -X POST http://127.0.0.1:8787/mcp \
@@ -860,49 +879,584 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
   | grep -oE '"bytes_len":[0-9]+|"saved_as":"[^"]*"' | head -2
 ```
 
-`bytes_len` zeigt die PNG-Größe; `saved_as` sollte fehlen.
+`bytes_len` meldet die PNG-Größe; `saved_as` sollte fehlen.
+
+---
+
+## 18. Quickstart mit dem Sample-Tree
+
+`tools/test-data/` liefert vier Teile, die einen frischen Checkout
+direkt zu „jedes Feature ausgeübt, jede Seite befüllt" bringen, ohne
+Eingabedateien von Hand basteln zu müssen:
+
+```
+tools/test-data/
+├── generate-samples.py    # deterministic, dependency-free Python 3.10+
+├── clean-cluster.sh       # wipes catalog + shards + embeddings + versions
+├── upload-samples.sh      # PUTs the sample tree, preserving hierarchy
+└── run-tests.sh           # end-to-end smoke across Stages 12.6–15.0
+```
+
+### 18.1 Den Tree generieren
+
+```sh
+python3 tools/test-data/generate-samples.py
+# → wrote 38 samples (1,862,535 bytes) under <repo>/samples
+```
+
+Die Ausgabe lebt unter `./samples/` (gitignored). Alle Bytes sind
+deterministisch — erneutes Ausführen mit denselben Argumenten erzeugt
+byte-identische Dateien, sodass versionierte Tests gegen die exakten
+Hashes pinnen können.
+
+Hierarchie:
+
+```
+samples/
+  photos/{landscapes,abstract,brand-pairs}/*.png
+  audio/{music,effects,silence}/*.wav
+  docs/{notes,spec,legal}/{*.txt,*.md,*.json}
+  binaries/{archives,blobs}/{*.zip,*.tar,*.bin}
+```
+
+Der brand-pairs-Ordner enthält absichtliche Nahezu-Duplikate
+(`logo-N.png` + `logo-N-wm.png`), sodass die
+Robust-Copy-Spalte von `/similar` Treffer produziert.
+
+### 18.2 Sauberer Neustart
+
+```sh
+tools/test-data/clean-cluster.sh
+# (FORCE=1 to skip the confirmation prompt)
+
+./target/release/holofs-web \
+    --storage ./holofs-data \
+    --addr 127.0.0.1:8787 \
+    --enable-embed \
+    --enable-versions &
+```
+
+Ohne `--enable-embed` rendert die `/search`-Seite ein
+„Embed-deaktiviert"-Banner. Ohne `--enable-versions` löschen PUTs, die
+ein bestehendes Objekt ersetzen, die vorigen Shards (kein Archiv).
+
+### 18.3 Den Tree pushen
+
+```sh
+tools/test-data/upload-samples.sh
+```
+
+Das Skript mkdirt jeden Prefix-Ordner zuerst (damit `/?p=<dir>` sofort
+funktioniert), dann PUTet es jede Datei. Schließlich fragt es
+`/api/stats` ab und druckt die neuen Katalog-Summen — erwarte
+`objects_total = 38 + <directory_markers>` (die mkdirs des
+Upload-Skripts werden ebenfalls als Verzeichnis-Einträge gezählt).
+
+### 18.4 Ende-zu-Ende-Smoke
+
+```sh
+tools/test-data/run-tests.sh
+```
+
+Was es durchgeht, nach Stufe:
+
+| Stufe   | Prüfung                                                    |
+|---------|------------------------------------------------------------|
+| 9       | `/` + `/?p=<folder>` für jedes Unterverzeichnis            |
+| 12.6    | `/mix?a=<image>` rendert den Wavelet-Mix-Komponisten       |
+| 12.7    | `/health/<name>` Per-Datei-Metriken                        |
+| 12.7    | `/about`-Marketing-Seite                                   |
+| 12.8/9  | `/search`-UI + `/api/search?band=<any|coarse|mid|full>`   |
+| 13.0    | `/similar/<brand-pair logo>` enthält Robust-Copy-Spalte    |
+| 13.1    | `/holo/<name>` + `/preview/stream/<name>`-Multipart        |
+| 13.2    | `/api/spotlight.png?mode=spatial`                          |
+| 14.1    | `/api/spotlight.png?mode=coeff`                            |
+| 13.4    | Zweimal PUT → `/versions/<name>` zeigt archivierte Zeile   |
+| 14.0/3  | `POST /api/gc` gibt eine `GcReport`-JSON zurück            |
+
+Jede Prüfung gibt `✓` / `✗` aus, und der Exit-Code des Skripts ist
+ungleich null, wenn eine Prüfung fehlschlägt.
+
+---
+
+## 19. Per-Datei-Metrik-Seite
+
+**Ziel**: bestätigen, dass der „Unique-Metrics"-Block unter
+`/health/<name>` korrekt befüllt wird.
+
+**Schritte**:
+
+1. Wähle ein beliebiges Bild aus dem Sample-Tree, z. B.
+   `photos/landscapes/mountain.png`.
+2. Besuche
+   `http://127.0.0.1:8787/health/photos/landscapes/mountain.png` in
+   einem Browser, oder curle die zugrunde liegende API direkt:
+
+   ```sh
+   # POST — the endpoint is a leptos server fn, so the name argument
+   # rides in the form body, not the query string. A GET returns
+   # 405 Method Not Allowed.
+   curl -s -X POST -d 'name=photos/landscapes/mountain.png' \
+        http://127.0.0.1:8787/api/file_metrics \
+        | python3 -m json.tool
+   ```
+
+**Erwartetes Payload**: eine `FileMetricsView` mit:
+
+- `total_shards_in_file` ≈ `unique_shards_in_file` (PUT-zeitliches
+  Dedup komprimiert nicht innerhalb der RLNC-Codierung einer Datei).
+- `catalog_total_shards` ≥ `total_shards_in_file`.
+- `originality_pct` irgendwo in `[0, 100]`; ein Sample-Tree-Bild ohne
+  geteilte Struktur sollte nahe 100 liegen.
+- `originality_per_layer` ist ein `Vec<f32>` mit `nlayers` Einträgen.
+- `layer_energy` befüllt für image / audio; `None` für text / opaque.
+- `audio_bands` nur vorhanden, wenn `kind == "audio"`.
+- `neighbours` ist leer, es sei denn, der Katalog enthält dieselben
+  Bytes auch unter einem anderen Namen.
+
+**Brand-Pair-Check**: gegen `photos/brand-pairs/logo-1.png` sollte das
+`neighbours[]`-Array `photos/brand-pairs/logo-1-wm.png` als
+**Top**-Eintrag auflisten (höchstes `shared_total`) mit einem
+Nicht-Null-`shared_per_layer[0]` — d. h. die
+Layer-0-(LL-/Coarse-)systematischen Shards überleben byte-für-byte
+trotz des Ecken-Wasserzeichens. Andere Bilder im Katalog zeigen
+`shared_per_layer[0] == 0`. Dieser Layer-0-Overlap ist das, was den
+0-Robust-Copy-Score speist. Siehe §21 zur
+Score-Formel-Warnung auf synthetischen Testdaten.
+
+---
+
+## 20. CLIP-semantische Suche + Bänder
+
+**Voraussetzung**: Server mit `--enable-embed` gestartet. Beim ersten
+Aufruf lädt das Gateway ~155 MiB CLIP-Gewichte von HuggingFace nach
+`~/.cache/huggingface/hub`; nachfolgende Neustarts sind sofort.
+
+**Bulk-Index** (nur einmal nach sauberem Neustart nötig):
+
+```sh
+curl -s -X POST http://127.0.0.1:8787/api/embed_all
+# → {"new":<N>,"skipped":<M>}
+```
+
+`new` zählt neu eingebettete Katalog-Einträge; `skipped` zählt Bilder,
+deren `(data_cid, band)` bereits in `embeddings.bin` war (derselbe
+Inhalt unter mehreren Pfaden hochgeladen).
+
+**Per-Band-Abfrage**:
+
+```sh
+for band in any coarse mid full; do
+  echo "--- band=$band ---"
+  curl -s "http://127.0.0.1:8787/api/search?q=mountain&band=$band&limit=3" \
+    | python3 -m json.tool
+done
+```
+
+**Erwartete Ergebnisse**:
+
+- `band=any` gibt das am höchsten bewertete Band pro Datei zurück
+  (Dedup nach Name).
+- `band=coarse` rankt nach Silhouette / Farbklecks —
+  Landschaftsfotos mit einer Horizontlinie sollten nach oben blubbern.
+- `band=full` rankt nach Textur — die Rausch- / Pixelblock-Abstrakte
+  sollten sich neu mischen.
+- `band=mid` sitzt dazwischen — Gradientenbilder sollten gut
+  abschneiden.
+
+**UI-Oberfläche**: `/search?q=mountain&band=any` zeigt ein Karten-
+Raster, wobei das Coarse-Thumbnail jeder Karte in die volle Auflösung
+überblendet. Die Karte trägt ein farbiges Band-Badge (blau = coarse,
+lila = mid, pink = full).
+
+---
+
+## 21. Robust-Copy-Spalte auf `/similar`
+
+**Ziel**: „Struktur passt, Detail unterscheidet sich"-Paare erkennen
+(die Wasserzeichen- / Re-Encode- / Leicht-Retusche-Signatur).
+
+**Schritte**:
+
+1. Besuche `/similar/photos/brand-pairs/logo-1.png`.
+2. Scrolle zur „Shard-Overlaps"-Tabelle.
+
+**Erwartet**:
+
+- `photos/brand-pairs/logo-1-wm.png` ist der **Top-Nachbar**
+  (höchste `shared shards`) — bestätigt den Mechanismus: das
+  lokalisierte Ecken-unten-rechts-Wasserzeichen erhält den Großteil
+  der LL-(Layer-0)-systematischen Shards, sodass 39+ dieser 192
+  Layer-0-Shards zwischen der Basis und der wasserzeichenversehenen
+  Variante identisch hashen. Kein unbezogenes Bild (Mandala, Gradient,
+  andere Marke) teilt einen einzigen Layer-0-Shard.
+- `low-band %` > 0 (Layer-0-Overlap).
+
+**Warnung zum Score** (Beschränkung synthetischer Testdaten, kein Bug
+im Feature): der `robust copy?`-Zahlenwert auf dem geseedeten
+Sample-Tree ist für jedes Brand-Paar **negativ**, und die
++30-Wasserzeichen-Warnglyphe leuchtet hier nie auf. Der Grund ist,
+dass das Gateway 256×256-Sample-PNGs auf seine 512×512-Arbeits-
+Auflösung upsampelt, bevor es codiert; bilineares/bikubisches
+Upsampling macht das feinste Haar-Band (Schicht 3) für jedes glatte
+synthetische Bild fast vollständig zu Nullen. Die K=16 systematischen
+Shards über diesen Nullen hashen auf denselben „All-Zero"-Wert über
+**jedes** Bild im Sample-Tree, sodass jedes Paar eine Basislinie von
+~36 % `high-band %` bekommt, die die Score-Formel überschwemmt. Auf
+echten Fotografien mit reichhaltigem Hochfrequenz-Detail überschreitet
+der Score +30 sauber; auf diesem Testset behandle den **Top-Rang +
+Nicht-Null-Layer-0-Overlap** als Erfolgssignal, nicht die absolute
+Zahl.
+
+Curle die zugrundeliegende Server-Function über die Seite (nur
+Browser):
+
+```sh
+curl -s 'http://127.0.0.1:8787/similar/photos/brand-pairs/logo-1.png' \
+  | grep -oE 'robust_copy_score":-?[0-9.]+'
+```
+
+---
+
+## 22. Streaming-Hologramm
+
+**Ziel**: bestätigen, dass `/preview/stream/<name>` einen Multipart-
+Body zurückgibt und die browserseitige `/holo/<name>`-Seite
+funktioniert.
+
+**Curl-Sonde**:
+
+```sh
+curl -sI 'http://127.0.0.1:8787/preview/stream/photos/abstract/mandala-a.png'
+# Content-Type should be: multipart/x-mixed-replace; boundary=hololayer-```
+
+**Browser**:
+
+1. Besuche `/holo/photos/abstract/mandala-a.png`.
+2. Force-Reload (Cmd+Shift+R), um den Per-(name, layer)-PNG-Cache zu
+   umgehen.
+3. Beobachte, wie das Bild sichtbar schärfer wird — der erste Frame in
+   ~zehn Millisekunden, jeder nachfolgende Frame fügt das Detail einer
+   DWT-Schicht hinzu.
+
+**Warnung**: nachfolgende Besuche treffen den Cache und fühlen sich
+sofort an. Der JavaScript-freie `<img>`-Swap beruht auf
+`multipart/x-mixed-replace`, das Chrome und Firefox anmutig
+handhaben.
+
+---
+
+## 23. Holografische Spotlight-Modi
+
+**Ziel**: dieselbe ROI zweifach rendern und visuell vergleichen.
+
+```sh
+img=photos/landscapes/mountain.png
+for mode in spatial coeff; do
+  curl -s -o "/tmp/spot-$mode.png" \
+       "http://127.0.0.1:8787/api/spotlight.png?name=$img&x=0.35&y=0.35&w=0.3&h=0.3&mode=$mode"
+done
+file /tmp/spot-*.png
+md5 /tmp/spot-*.png    # expect distinct hashes
+```
+
+**Erwartet**: zwei PNGs derselben Abmessungen, aber verschiedener
+Bytes.
+
+- `spatial` behält den Bereich außerhalb der ROI als unscharfe, aber
+  sichtbare L0-Rekonstruktion.
+- `coeff` behält Nicht-ROI-Pixel nahe Schwarz (Haar-Reverse-Map
+  nullt jeden Koeffizienten, der die ROI nicht berührt).
+
+**Header**:
+
+```sh
+curl -sI \
+  "http://127.0.0.1:8787/api/spotlight.png?name=$img&x=0.35&y=0.35&w=0.3&h=0.3&mode=coeff" \
+  | grep -i 'x-holofs'
+```
+
+`x-holofs-roi-px` gibt die geklampte Pixel-ROI zurück;
+`x-holofs-decode-ms` meldet die Server-Arbeit;
+`x-holofs-bytes-downloaded` ist informativ (1 wird sie für
+`?mode=coeff` auf replizierten Objekten in eine echte
+Bandbreiten-Ersparnis-Zahl verwandeln).
+
+**UI**: `/spotlight?a=<image>` exponiert den Modus-Toggle + ROI-
+Presets + ein Formular für benutzerdefinierte Koordinaten.
+
+---
+
+## 24. Per-Objekt-Versionierung
+
+**Voraussetzung**: Server mit `--enable-versions` gestartet.
+Versionierte PUTs ÜBERSPRINGEN das übliche Shard-Purge, sodass der
+Speicher monoton wächst, solange das Flag an ist. Führe `/api/gc`
+(Szenario 25) aus, um zurückzugewinnen.
+
+**Schritte**:
+
+1. Wähle einen Zielnamen, z. B.
+   `samples/photos/abstract/mandala-a.png`, den du bereits hochgeladen
+   hast.
+2. Lade ein anderes Bild auf denselben Pfad hoch:
+
+   ```sh
+   curl -sf -X PUT \
+        --data-binary @samples/photos/abstract/mandala-b.png \
+        http://127.0.0.1:8787/photos/abstract/mandala-a.png
+   ```
+
+3. Inspiziere die Historie:
+
+   ```sh
+   open 'http://127.0.0.1:8787/versions/photos/abstract/mandala-a.png'
+   ```
+
+   Erwarte mindestens eine archivierte Zeile mit dem aktuellen Datum.
+   Das CID-Präfix sollte mit dem des Original-Uploads übereinstimmen,
+   nicht mit dem des Ersatzes.
+
+4. Klicke „restore" auf der archivierten Zeile. Bestätige im Dialog.
+
+   ```sh
+   # Or via curl:
+   curl -X POST \
+        -d 'name=photos/abstract/mandala-a.png&id=v<TS>_<CIDSHORT>' \
+        http://127.0.0.1:8787/api/restore
+   ```
+
+5. Hole das Bild neu:
+
+   ```sh
+   md5 <(curl -sf http://127.0.0.1:8787/photos/abstract/mandala-a.png)
+   ```
+
+**Erwartet**: der Post-Restore-MD5 stimmt mit dem Pre-Replace-MD5
+überein; der Ersatz ist nun selbst archiviert (Restore ist
+reversibel).
+
+---
+
+## 25. Orphan-Shard-GC + Embedding-GC
+
+**Ziel**: bestätigen, dass das Gateway Shards zurückgewinnt, die von
+keinem lebenden Manifest oder Versions-Archiv referenziert werden, UND
+stale Embeddings aus `embeddings.bin` bereinigt.
+
+**Schritte**:
+
+1. Löse einen PUT-Replace-Pass aus (Szenario 24), sodass der Cluster
+   verwaisbare Shards hat.
+2. Lösche die Version-Seitendateien für diesen Namen (simuliert den
+   Operator, der die Historie entfernt):
+
+   ```sh
+   rm -rf holofs-data/versions/photos__abstract__mandala-a.png
+   ```
+
+   (Das Skript `clean-cluster.sh` erledigt dasselbe pauschal.)
+
+3. Führe GC aus:
+
+   ```sh
+   curl -s -X POST http://127.0.0.1:8787/api/gc | python3 -m json.tool
+   ```
+
+**Erwartet**:
+
+- `purged_total` > 0 (die vorigen Shards sind nun nicht referenziert).
+- `embeddings_dropped` > 0, wenn stale CIDs im Index lebten.
+- `embeddings_kept` stimmt mit der Anzahl der verbleibenden lebenden
+  `(data_cid, band)`-Records überein.
+- Jedes `ok: true` des Nodes, kein `error`-Feld gesetzt.
+- `duration_ms` typisch < 100 ms auf dem Dev-Cluster.
+
+**Nebenläufigkeits-Check** (optional): einen langen PUT + eine GC
+parallel ausführen und verifizieren, dass beide erfolgreich sind. Die
+RwLock-Barriere in `Gateway` sollte sie serialisieren — GC wartet, bis
+der PUT beendet ist, und läuft dann allein.
+
+```sh
+( curl -sf -X PUT --data-binary @samples/photos/landscapes/ocean.png \
+       http://127.0.0.1:8787/race-test.png ) &
+sleep 0.2
+( curl -sf -X POST http://127.0.0.1:8787/api/gc | python3 -m json.tool ) &
+wait
+# Both should complete; GC's `duration_ms` will include the wait time.
+```
+
+---
+
+## 26. Reliability-Szenarien
+
+### 26.1 Auto-Repair-on-Read-Zähler
+
+Ziel: verifizieren, dass der Retry-Arm von `decode_with_autorepair`
+die Zähler in `/api/stats` nur bewegt, wenn es etwas zu reparieren
+gibt.
+
+```sh
+# Baseline — fresh cluster, healthy.
+curl -s http://127.0.0.1:8787/api/stats | jq '.auto_repairs_total, .auto_repair_failures_total'
+# 0
+# 0
+
+# Light degradation — kill 3 of 40 nodes (well under layer-3 redundancy).
+for i in 0 1 2; do curl -X POST -d "i=$i" http://127.0.0.1:8787/admin/node; done
+curl -s http://127.0.0.1:8787/photo.png -o /dev/null
+curl -s http://127.0.0.1:8787/api/stats | jq '.auto_repairs_total'
+# Still 0 — auto-repair should NOT fire under light loss.
+
+# Heavy degradation — kill 60 % of the cluster.
+for i in $(seq 3 24); do curl -X POST -d "i=$i" http://127.0.0.1:8787/admin/node; done
+curl -s http://127.0.0.1:8787/photo.png -o /dev/null
+curl -s http://127.0.0.1:8787/api/stats | jq '.auto_repairs_total, .auto_repair_failures_total'
+# At least one counter MUST be ≥ 1.
+```
+
+Automatisch abgedeckt von
+`crates/holofs-e2e/tests/auto_repair_e2e.rs`.
+
+### 26.2 Hintergrund-Scrub repariert proaktiv
+
+Ziel: beweisen, dass der Scrub Placement-Drift abfängt, bevor Nutzer
+es tun.
+
+```sh
+# Set scrub to 15 s for the demo (default is 600 s).
+HOLOFS_SCRUB_INTERVAL=15 \
+  cargo run --release --bin holofs-web
+# wait for the first tick:
+sleep 20
+curl -s http://127.0.0.1:8787/api/stats | jq '.scrub_runs_total'
+# 1+ — scrub_repairs_total stays 0 on a healthy cluster.
+```
+
+Eine lautere Demo liegt in
+`crates/holofs-e2e/tests/reliability_repair.rs::prometheus_metrics_expose_auto_repair_gauges`.
+
+### 26.3 Cluster-Degraded → 503, kein Panic
+
+Ziel: `place_shard` hat früher auf ein leeres Live-Set asserted und
+das Gateway zum Absturz gebracht. Jetzt gibt PUT gegen einen
+vollständig ausgefallenen Cluster ein sauberes 503 zurück.
+
+```sh
+# Kill every node.
+for i in $(seq 0 39); do curl -X POST -d "i=$i" http://127.0.0.1:8787/admin/node; done
+curl -i -X PUT --data-binary @some.png http://127.0.0.1:8787/test.png
+# HTTP/1.1 503 Service Unavailable
+# content-type: text/plain
+# cluster has no live nodes
+```
+
+Nach Un-Killing der Nodes (`POST /admin/node` schaltet um) gelingt
+derselbe PUT mit 2xx.
+
+Abgedeckt von `crates/holofs-e2e/tests/cluster_degraded.rs`.
+
+### 26.4 Version-Löschung + Retention-Cap
+
+Ziel: Per-Name-Historie wächst nicht unbegrenzt.
+
+```sh
+HOLOFS_VERSIONS_KEEP_LAST=2 \
+  cargo run --release --bin holofs-web -- --enable-versions
+
+# PUT four different images under the same name.
+for body in a.png b.png c.png d.png; do
+  curl -X PUT --data-binary @$body http://127.0.0.1:8787/test.png
+done
+
+# /api/versions_list — at most 2 archives, no matter how many PUTs landed.
+curl -s -X POST -d "name=test.png" http://127.0.0.1:8787/api/versions_list | jq '.versions | length'
+# 2
+
+# Manual delete of one archive — counter drops to 1.
+ID=$(curl -s -X POST -d "name=test.png" http://127.0.0.1:8787/api/versions_list | jq -r '.versions[0].id')
+curl -X POST -d "name=test.png&id=$ID&return_to=/" http://127.0.0.1:8787/api/versions/delete
+```
+
+Abgedeckt von `crates/holofs-e2e/tests/versions_lifecycle.rs`.
+
+### 26.5 cd-into-folder im Katalog-Tree
+
+Ziel: das Klicken auf „open →" auf einem Ordner zeigt NUR die Inhalte
+dieses Ordners auf der obersten Ebene, mit einem Breadcrumb, um wieder
+nach oben zu navigieren.
+
+```sh
+# Seed a nested tree (the standard sample upload script):
+tools/test-data/upload-samples.sh
+
+# Visit the catalog at /. Expand `photos/`, then click "open →" on
+# `landscapes-xl`. The URL becomes `/?p=photos/landscapes-xl` and the
+# tree now shows the six picsum JPEGs as top-level entries — no
+# sibling folders.
+xdg-open http://127.0.0.1:8787/?p=photos/landscapes-xl  # linux
+open http://127.0.0.1:8787/?p=photos/landscapes-xl      # macos
+```
+
+Inline-Upload- + mkdir-Formulare auf jeder `<details>`-Zeile landen
+Dateien in dem Ordner, den du gerade betrachtet hast; das
+Upload-Formular der Wurzel-Toolbar scoped sich auf das aktuelle
+`?p=<path>`-Prefix.
+
+Abgedeckt vom manuellen Smoke in §18 plus den Katalog-Rendering-Tests
+unter `crates/holofs-e2e/tests/ui_catalog.rs`.
+
+### 26.6 Synthetische PNG-Samples decodieren sauber
+
+Ziel: der 22-von-29-kaputt-Bug ist weg.
+
+```sh
+tools/test-data/clean-cluster.sh           # fresh storage
+HOLOFS_NO_SEED=true \
+  cargo run --release --bin holofs-web &
+sleep 4
+python3 tools/test-data/generate-samples.py
+tools/test-data/upload-samples.sh
+
+# Walk every PNG / JPG under samples/ and GET it.
+broken=0
+for f in $(find samples -type f \( -name '*.png' -o -name '*.jpg' \)); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8787/${f#samples/}")
+  [ "$code" != "200" ] && broken=$((broken+1))
+done
+echo "broken=$broken"
+# broken=0
+```
+
+Das deterministische LSB-Jitter, das von `write_png` injiziert wird
+(x), stellt sicher, dass Hochfrequenz-DWT-Shards pro Datei
+selbst auf den glattesten synthetischen Generatoren eindeutig sind.
 
 ---
 
 ## Abschluss
 
-Sauberes Stoppen:
+Sauberer Stopp:
 
 ```sh
 pkill -f 'target/release/holofs-web'
 # or Ctrl-C in the terminal running the cluster
 ```
 
-Sauberes Wischen — gesamter Zustand verwerfen:
+Sauberes Wischen — allen Zustand löschen:
 
 ```sh
+tools/test-data/clean-cluster.sh
+# or, manually:
 rm -rf ./holofs-data ./.cluster-data
 ```
 
-Falls sich etwas seltsam verhält, vergleichen Sie mit den obigen
-Beschreibungen und konsultieren Sie:
+Falls sich etwas fehlverhält, gegen die obigen Beschreibungen
+vergleichen und konsultieren:
 
 - [docs/operations.md](./operations.md) — Konfiguration und Betrieb
-- [docs/architecture.md](./architecture.md) — Datenfluss PUT → GET
-- [docs/api.md](./api.md) — HTTP-API, Wire-Protokoll-Format
+- [docs/architecture.md](./architecture.md) — PUT → GET-Datenfluss
+- [docs/api.md](./api.md) — HTTP-API, Wire-Protokoll-Format, neue
+  Endpunkte
 - [docs/threat-model.md](./threat-model.md) — abgedeckte Bedrohungen
-
----
-
-## 18+ — Stages 12.6 – 15.0 Szenarien (englische Referenz)
-
-Die folgenden Stages haben jeweils ein eigenes Test-Szenario im
-englischen `docs/test-scenarios.md` (Abschnitte 18–25):
-
-- 18 — Quickstart mit dem `tools/test-data/`-Sample-Tree
-- 19 — Per-file metrics auf `/health/<name>` (7)
-- 20 — CLIP semantic search + Band-Pillen (Stages 12.8/12.9/13.3)
-- 21 — Robust-copy-Spalte auf `/similar` (0)
-- 22 — Streaming hologram via `/preview/stream/<name>` (1)
-- 23 — `/api/spotlight.png?mode=<spatial|coeff>` (Stages 13.2 + 14.1)
-- 24 — Per-object versioning + `/api/restore` (4)
-- 25 — `POST /api/gc` für Shards + Embeddings (Stages 14.0/3/4)
-
-Deutsche Übersetzungen folgen.  In der Zwischenzeit liefert
-`tools/test-data/run-tests.sh` einen sprachlosen End-to-End-Smoke
-über alle obigen Punkte (jede Prüfung gibt `✓` / `✗` aus).
+- `tools/test-data/README.md` — Sample-Tree- + Smoke-Runner-Nutzung
