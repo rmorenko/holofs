@@ -296,9 +296,9 @@ Every variable has a matching CLI flag (`--storage`, `--log`, etc.) — run
 | `HOLOFS_POOL_IDLE_SECS`     | `60`    | Drop pooled entries idle longer than this on `acquire`. |
 | `HOLOFS_POOL_DISABLE`       | `false` | Bypass the keepalive pool — every RPC dials fresh. Useful when chasing wire-level bugs. |
 
-### 5.5.c. Per-IP rate limit ()
+### 5.5.c. Per-IP rate limit
 
-Complements the N3 global backpressure caps. N3 stops the process
+Complements the global backpressure caps: the caps stop the process
 from exploding under any burst — this layer stops a single
 misbehaving client from starving every other caller. Both apply to
 the MEDIUM (decode / PUT / dir ops) and LONG (search / spotlight /
@@ -322,34 +322,31 @@ response. Sustained non-zero rate suggests either an abusive
 client (investigate) or an under-provisioned cap (raise
 `rate_limit_rps_per_ip`).
 
-### 5.5.b. Streaming PUT ()
+### 5.5.b. Streaming PUT
 
 | Variable                    | Default   | Description                                              |
 |-----------------------------|-----------|----------------------------------------------------------|
 | `HOLOFS_UPLOAD_MAX_SIZE`    | `1 GiB`   | Per-request body cap for `PUT /*path`. The body streams straight to `<storage>/uploads/upload-<pid>-<counter>.tmp` (constant RAM regardless of client speed / body size) and is read back into a `Vec<u8>` right before `Gateway::ingest_bytes`. Bodies exceeding the cap return 413 Payload Too Large; the tempfile is deleted on every exit path. |
 
-Pre-v0.7 the PUT route wore axum's `DefaultBodyLimit::max(256 MiB)`
-which forced the entire body to buffer in RAM before the handler
-even ran. A slow client on a 200 MiB upload held 200 MiB of gateway
-RSS for the whole transfer. Post-v0.7 the RSS delta while
-streaming is bounded by the copy buffer (~64 KiB); RSS spikes to
-body size only briefly at ingest time (RLNC / DWT still expects
-`&[u8]`). Full streaming ingest (chunked RLNC) is out of scope
-until the codec supports it.
+Streaming keeps the gateway RSS delta bounded by the copy buffer
+(~64 KiB) rather than the client's upload rate — a slow client on a
+200 MiB upload no longer pins 200 MiB of gateway memory for the
+duration. RSS still spikes to body size briefly at ingest time
+because the RLNC / DWT codec expects `&[u8]`; a fully-streaming
+ingest is out of scope until the codec supports it.
 
-### 5.6. Reliability layer (N1-N8)
+### 5.6. Reliability layer
 
 Every knob below has a safe default; the gateway boots successfully
-with none of them set. See [CHANGELOG.md](../CHANGELOG.md)
-for the full behaviour matrix.
+with none of them set.
 
 | Variable                              | Default | Description                                              |
 |---------------------------------------|---------|----------------------------------------------------------|
-| `HOLOFS_MEDIUM_CONCURRENCY`           | `64`    | **N3** — permits for the MEDIUM route bucket (decodes, PUT, dir ops). On saturation the handler middleware returns 503 with a diagnostic body instead of piling axum tasks. Tune against `holofs_backpressure_permits_available{bucket="medium"}`. |
-| `HOLOFS_LONG_CONCURRENCY`             | `8`     | **N3** — permits for the LONG bucket (semantic search, spotlight, `/api/gc`, `/api/embed_all`, fingerprint scans). |
-| `HOLOFS_REPUTATION_PERSIST_INTERVAL`  | `30`    | **N5** — how often the shared `Reputation` state is snapshotted to `<storage>/reputation.bin`. The bootstrap loads it back next start; a `n_nodes` mismatch or corrupt file silently falls back to a fresh table. A final snapshot is also written on SIGTERM. |
-| `HOLOFS_ADMIN_TOKEN`                  | _(unset)_ | **N6** — when set, `POST /admin/node` and `POST /api/gc` require `Authorization: Bearer <token>`. Missing/wrong → 401. |
-| `HOLOFS_ADMIN_UNAUTHENTICATED`        | _(unset)_ | **N6 dev override** — set to `1` to leave the admin surface open when `HOLOFS_ADMIN_TOKEN` is unset. Logs a WARN at boot. If neither var is set the admin surface is disabled (403). |
+| `HOLOFS_MEDIUM_CONCURRENCY`           | `64`    | Permits for the MEDIUM route bucket (decodes, PUT, dir ops). On saturation the handler middleware returns 503 with a diagnostic body instead of piling axum tasks. Tune against `holofs_backpressure_permits_available{bucket="medium"}`. |
+| `HOLOFS_LONG_CONCURRENCY`             | `8`     | Permits for the LONG bucket (semantic search, spotlight, `/api/gc`, `/api/embed_all`, fingerprint scans). |
+| `HOLOFS_REPUTATION_PERSIST_INTERVAL`  | `30`    | How often the shared `Reputation` state is snapshotted to `<storage>/reputation.bin`. The bootstrap loads it back next start; a `n_nodes` mismatch or corrupt file silently falls back to a fresh table. A final snapshot is also written on SIGTERM. |
+| `HOLOFS_ADMIN_TOKEN`                  | _(unset)_ | When set, `POST /admin/node` and `POST /api/gc` require `Authorization: Bearer <token>`. Missing/wrong → 401. |
+| `HOLOFS_ADMIN_UNAUTHENTICATED`        | _(unset)_ | Dev override: set to `1` to leave the admin surface open when `HOLOFS_ADMIN_TOKEN` is unset. Logs a WARN at boot. If neither var is set the admin surface is disabled (403). |
 
 Timeouts are hard-coded per bucket by design (SHORT 10 s, MEDIUM 60 s,
 LONG 300 s); streaming endpoints (SSE, multipart/x-mixed-replace) +
@@ -365,7 +362,7 @@ LONG 300 s); streaming endpoints (SSE, multipart/x-mixed-replace) +
 | `HOLOFS_ENABLE_EMBED`       | `false` | Mirror of `--enable-embed`. Loads the CLIP-multilingual model on first PUT or first `/api/search`, then maintains `embeddings.bin`. |
 | `HOLOFS_MCP_TOKEN`          | —       | When set, the `/mcp` endpoint requires `Authorization: Bearer <token>` AND flips write tools on. Without the variable the endpoint stays open + read-only. |
 
-### 5.8. TOML configuration file ()
+### 5.8. TOML configuration file
 
 Every env var above (`HOLOFS_*` and `LEPTOS_SITE_ADDR`) is also
 settable through a single TOML config file passed via
@@ -416,7 +413,7 @@ a typo in `medium_concurency` (missing 'r') fails loud at boot
 with the exact key name in the error. This is intentional; a
 silent fallback would defeat the purpose of the file.
 
-### 5.9. At-rest shard encryption ()
+### 5.9. At-rest shard encryption
 
 Enable with `HOLOFS_AT_REST_ENC=1` (or `[security]
 at_rest_encryption = true` in the TOML). When on, every shard file
@@ -436,7 +433,7 @@ audit path.
 
 | Magic       | Meaning                                                     |
 |-------------|-------------------------------------------------------------|
-| `HOLOFSS1`  | Plaintext (pre-v0.7). Read by every version.                |
+| `HOLOFSS1`  | Plaintext. Read by every version.                           |
 | `HOLOFSS2`  | Sealed. `[8 B magic][18 B header][12 B nonce][ct+tag]`.     |
 
 The 18-byte header is AAD to the GCM tag, so any post-hoc header
@@ -461,7 +458,7 @@ running node — once the derived key is in RAM,
 
 The gateway exposes `GET /metrics` in Prometheus text exposition format
 (`text/plain; version=0.0.4`). Pull-based gauges sourced from
-`Gateway::api_stats` + admin-kill snapshot plus the v0.6.0 N-series
+`Gateway::api_stats` + admin-kill snapshot plus reliability
 counters.
 
 | Metric                                       | Type    | Labels                       | Meaning |
@@ -474,26 +471,27 @@ counters.
 | `holofs_dedup_savings_pct`                   | gauge   | —                            | `(1 − unique/total) × 100` |
 | `holofs_bytes_total`                         | gauge   | —                            | approximate stored bytes |
 | `holofs_node_admin_killed`                   | gauge   | `node`, `addr`, `zone`       | per-node admin-kill flag |
-| `holofs_auto_repairs_total`                  | counter | —                            | GETs that triggered `decode_with_autorepair`'s retry arm (3) |
+| `holofs_auto_repairs_total`                  | counter | —                            | GETs that triggered `decode_with_autorepair`'s retry arm |
 | `holofs_auto_repair_failures_total`          | counter | —                            | auto-repair passes that themselves failed |
 | `holofs_scrub_runs_total`                    | counter | —                            | background scrub ticks completed (`HOLOFS_SCRUB_INTERVAL`) |
 | `holofs_scrub_repairs_total`                 | counter | —                            | objects the scrub repaired *before* any user hit them |
-| `holofs_catalog_persist_failures_total`      | counter | —                            | **N4** — atomic catalog save-to-disk errors. Non-zero = on-disk state is behind memory; next restart loses writes. Alert immediately. |
-| `holofs_handler_timeouts_total`              | counter | `bucket` (short/medium/long) | **N7** — 504 responses caused by the per-bucket deadline. |
-| `holofs_backpressure_rejected_total`         | counter | `bucket` (medium/long)       | **N3** — 503 responses caused by the semaphore being at capacity. |
-| `holofs_backpressure_permits_available`      | gauge   | `bucket` (medium/long)       | **N3** — permits still free. Constantly at 0 = under-provisioned bucket; constantly at max = idle. |
-| `holofs_supervised_task_restarts_total`      | counter | `task` (monitor/auditor/scrub) | **N2** — supervised loop panics + unexpected exits. Any non-zero flags a repeated crash the operator should investigate. |
-| `holofs_admin_auth_failures_total`           | counter | `outcome` (missing/bad/disabled) | **N6** — admin bearer-token rejections split by reason. `disabled` = surface refused because neither `HOLOFS_ADMIN_TOKEN` nor `HOLOFS_ADMIN_UNAUTHENTICATED` is set. |
+| `holofs_catalog_persist_failures_total`      | counter | —                            | Atomic catalog save-to-disk errors. Non-zero = on-disk state is behind memory; next restart loses writes. Alert immediately. |
+| `holofs_handler_timeouts_total`              | counter | `bucket` (short/medium/long) | 504 responses caused by the per-bucket deadline. |
+| `holofs_backpressure_rejected_total`         | counter | `bucket` (medium/long)       | 503 responses caused by the semaphore being at capacity. |
+| `holofs_backpressure_permits_available`      | gauge   | `bucket` (medium/long)       | Permits still free. Constantly at 0 = under-provisioned bucket; constantly at max = idle. |
+| `holofs_supervised_task_restarts_total`      | counter | `task` (monitor/auditor/scrub) | Supervised loop panics + unexpected exits. Any non-zero flags a repeated crash the operator should investigate. |
+| `holofs_admin_auth_failures_total`           | counter | `outcome` (missing/bad/disabled) | Admin bearer-token rejections split by reason. `disabled` = surface refused because neither `HOLOFS_ADMIN_TOKEN` nor `HOLOFS_ADMIN_UNAUTHENTICATED` is set. |
 
-A healthy cluster keeps the four self-healing counters at zero or
+A healthy cluster keeps the self-healing counters at zero or
 near-zero; sustained non-zero rate on `auto_repair_failures_total`
 is the operator alert signal that placement / disk loss has gone
 beyond what the K threshold can absorb.
 
-The N4/N7/N3/N2/N6 counters together form the "reliability alert
-dashboard" — every one of them should be flat at zero on a
-well-provisioned cluster with a token configured. See the reference
-alert rules below.
+The reliability counters (persist failures, handler timeouts,
+backpressure rejections, supervised restarts, admin-auth failures)
+together form the "reliability alert dashboard" — every one of
+them should be flat at zero on a well-provisioned cluster with a
+token configured. See the reference alert rules below.
 
 Future releases will add histograms for wire RTT, decode latency,
 and per-object reputation (currently logged via `tracing` only).

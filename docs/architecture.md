@@ -31,9 +31,9 @@ graph BT
     cluster["holofs-cluster<br/>health, monitor, audit, repair, reputation"]
     embed["holofs-embed<br/>CLIP-multilingual + HNSW ANN"]
     analytics["holofs-analytics<br/>fingerprint, MinHash, escrow"]
-    gateway["holofs-gateway<br/>catalog, decode, auto-repair, scrub<br/>(18-module fan-out post v0.6.0)"]
+    gateway["holofs-gateway<br/>catalog, decode, auto-repair, scrub<br/>(18-module fan-out)"]
     mcp["holofs-mcp<br/>Streamable-HTTP MCP server"]
-    web["holofs-web<br/>axum + Leptos 0.7 SSR + WASM hydrate<br/>(21-module fan-out post v0.6.1)"]
+    web["holofs-web<br/>axum + Leptos 0.7 SSR + WASM hydrate<br/>(21-module fan-out)"]
     cli["holofs-cli<br/>holofs-admin, -bench, -inspect, ..."]
     e2e["holofs-e2e<br/>thirtyfour + chromedriver test harness"]
 
@@ -76,7 +76,7 @@ graph BT
 needs a separate discussion — it almost always means a type or function is
 in the wrong crate.
 
-### 1.1. Gateway module layout (post )
+### 1.1. Gateway module layout
 
 The `holofs-gateway` crate ships one type — `Gateway` — but its
 implementation is split across 18 sibling modules, each owning one
@@ -102,7 +102,7 @@ etc. without touching the module path.
 | `fingerprint` | Perceptual FP + `similar_to`. |
 | `mix` | Wavelet mix + audio band filter. |
 | `diff` | Byte-perfect chunk-diff analyzer. |
-| `spotlight` | 2 + 14.1 ROI composites. |
+| `spotlight` | Sharp-inside / blurred-outside ROI composites. |
 | `inspect` | `/inspect` view-model + shard payload extraction. |
 | `metrics` | `file_metrics` — storage/dedup + originality + layer energy in one pass. |
 | `health` | Cluster stats, admin toggles, `scrub_tick`, `object_health`. |
@@ -114,49 +114,46 @@ concern they extend, not to `http_gateway.rs`. If a new module is
 needed, it goes alongside the others and gets its own `impl Gateway`
 block; nothing in `http_gateway.rs` should grow again.
 
-### 1.2. Reliability layer (N1-N8)
+### 1.2. Reliability layer
 
 The reliability primitives live in `holofs-web` because they
 compose the HTTP surface, not the gateway state. See
-[operations.md § 5.6](operations.md#56-reliability-layer-v060--n1-n8)
-for the env-var reference and [CHANGELOG.md](../CHANGELOG.md)
-for the full behaviour matrix.
+[operations.md § 5.6](operations.md#56-reliability-layer) for the
+env-var reference.
 
 | Module | Purpose |
 |---|---|
-| `holofs_web::supervised` | `supervised_spawn(name, shutdown, counter, f)` — panic-catching + exp-backoff restart wrapper around `tokio::spawn`. Powers **N2**. |
-| `holofs_web::timeout` | `run_with_deadline` middleware + `SHORT`/`MEDIUM`/`LONG` duration buckets. Powers **N7**. |
-| `holofs_web::backpressure` | `with_permit` middleware — `Arc<Semaphore>::try_acquire_owned` per bucket, 503 on saturation. Powers **N3**. |
-| `holofs_web::admin_auth` | `AdminAuth::from_env` + `require_admin_token` middleware — bearer-token gate for `/admin/*` + `/api/gc`. Powers **N6**. |
-| `holofs_web::bootstrap` | Reads env, wires the shared `CancellationToken` into every long-running task (**N1**), builds the `Bootstrap` handle main.rs joins on shutdown, plumbs the reputation-persist supervised task (**N5**). |
+| `holofs_web::supervised` | `supervised_spawn(name, shutdown, counter, f)` — panic-catching + exp-backoff restart wrapper around `tokio::spawn`. |
+| `holofs_web::timeout` | `run_with_deadline` middleware + `SHORT`/`MEDIUM`/`LONG` duration buckets. |
+| `holofs_web::backpressure` | `with_permit` middleware — `Arc<Semaphore>::try_acquire_owned` per bucket, 503 on saturation. |
+| `holofs_web::admin_auth` | `AdminAuth::from_env` + `require_admin_token` middleware — bearer-token gate for `/admin/*` + `/api/gc`. |
+| `holofs_web::bootstrap` | Reads env, wires the shared `CancellationToken` into every long-running task, builds the `Bootstrap` handle main.rs joins on shutdown, plumbs the reputation-persist supervised task. |
 
-**Fail-loud persistence (N4)** is a gateway-side change, not a
+**Fail-loud persistence** is a gateway-side change, not a
 holofs-web one: `Gateway::persist_catalog` returns
 `Result<(), GatewayError::Persist>` and every writer path (`ingest`,
 `dirops`, `versions`) propagates via `?`.
 
-### 1.3. Web crate module layout (post )
+### 1.3. Web crate module layout
 
-`holofs-web` was originally two god-files:
-`src/lib.rs` (2487 lines — Leptos SSR components + server_fns + filter)
-and `src/handlers.rs` (1857 lines — 25 axum handlers + ~30 helpers).
-split both into single-purpose sibling modules.
+`holofs-web` is split into single-purpose sibling modules — nothing
+in it exceeds a few hundred lines.
 
-**Post-R2a: `lib.rs` (253 lines)** — module registry + crate-root
-`pub use` re-exports + [`Shell`] / [`App`] / [`RoutedApp`] top-level
-components + `url_encode` utility + WASM `hydrate` entry.
-Everything else moved to:
+**`lib.rs`** — module registry + crate-root `pub use` re-exports +
+[`Shell`] / [`App`] / [`RoutedApp`] top-level components +
+`url_encode` utility + WASM `hydrate` entry. Everything else lives
+in siblings:
 
 | Module | Purpose |
 |---|---|
 | `catalog_types` | `CatalogEntry` view-model shared across SSR + hydrate boundaries. `from_manifest` (SSR-only). |
-| `filter` | 17 catalog filter — `CatalogFilter`, `apply_filter`, `compile_glob`, `parse_date_to_unix`, `ymd_to_unix` + seven unit tests. SSR-only. |
+| `filter` | Catalog filter — `CatalogFilter`, `apply_filter`, `compile_glob`, `parse_date_to_unix`, `ymd_to_unix` + seven unit tests. SSR-only. |
 | `server_fns` | The three `#[server]` functions (`get_catalog`, `list_dir`, `list_dir_page`) + `ListDirPage` + `TreeSort` + `compare_entries`. |
 | `catalog_ui` | Fifteen Leptos components — `CatalogPage`, `CatalogFocusView`, `FilterBar`, `TreeZoomButtons`, `Breadcrumb`, `CatalogTreeView` + eager/lazy variants, `LazyLevel`, `LazyDirNode`, `CatalogTreeBody`, `TreeNodeView`, `MkdirForm`, `UploadForm`, `ObjectCard`. |
 
-**Post-R2b: `handlers.rs` (64 lines)** — pure module-registration
-front-door + `pub use` re-exports. Every handler lives in a
-domain submodule under `handlers/`:
+**`handlers.rs`** — pure module-registration front-door + `pub use`
+re-exports. Every handler lives in a domain submodule under
+`handlers/`:
 
 | Module | Handlers |
 |---|---|
@@ -413,14 +410,14 @@ trust class as Backblaze B2 or AWS S3, not Filecoin or Storj. See
 | Health monitor       | `HOLOFS_MONITOR_INTERVAL` (15 s default) | holofs-cluster |
 | PoR auditor          | `HOLOFS_AUDIT_INTERVAL` (30 s default)   | holofs-cluster |
 | Shard scrub          | `HOLOFS_SCRUB_INTERVAL` (600 s default)  | holofs-gateway |
-| Reputation persist   | `HOLOFS_REPUTATION_PERSIST_INTERVAL` (30 s default; **N5**) | holofs-web |
+| Reputation persist   | `HOLOFS_REPUTATION_PERSIST_INTERVAL` (30 s default) | holofs-web |
 | Catalog autosave     | on every catalog mutation (inline)       | holofs-gateway |
 
 All four background loops run under
-[`holofs_web::supervised::supervised_spawn`](#12-reliability-layer-v060--n1-n8):
+[`holofs_web::supervised::supervised_spawn`](#12-reliability-layer):
 a panic → ERROR log + exponential-backoff (1 → 30 s cap) + restart.
 They also honour a shared `tokio_util::sync::CancellationToken` and
-drain cleanly on SIGTERM / SIGINT (see **N1**).
+drain cleanly on SIGTERM / SIGINT.
 
 ### Auto-repair-on-read + scrub
 
@@ -437,21 +434,20 @@ between user requests, diffs `list_node_hashes` against
 before any reader hits a `LayerLost`. Tracked via
 `scrub_runs_total` + `scrub_repairs_total` counters.
 
-### `gc_barrier` writer/scrub rendezvous
+### Epoch-based GC concurrency
 
-Three operations can mutate shard state: `ingest_bytes` (PUT),
-`gc_orphaned_shards` (manual GC), and the background scrub. They
-coordinate through a single `tokio::sync::RwLock<()>`:
+The GC pass runs concurrently with PUT / `restore_version` / scrub
+without a global writer lock. Every shard the store holds carries
+a wall-clock write epoch (ms since UNIX_EPOCH). At the start of a
+GC pass the gateway takes an epoch snapshot; the node-side
+`PurgeByHashUpTo` refuses to delete any shard whose stored epoch
+exceeds the snapshot — a fresh PUT that races the pass is
+protected because its epoch is strictly greater than the cutoff.
 
-- PUT / restore_version / scrub take **read** guards — they don't
-  conflict with each other, but they block GC.
-- GC takes a **write** guard — exclusive, blocks every concurrent
-  shard write until it finishes.
-
-Without this, the GC pass could enumerate hashes, decide a shard is
-orphaned, and PurgeByHash it *just* as a fresh PUT was about to
-land a manifest pointing at that hash — observed as silent shard
-loss on the §25 concurrency scenario.
+The one remaining serialisation point is the `embeddings.bin`
+rewrite at the tail of GC — that step still holds `gc_barrier`
+against the `search::embed_object` append, since the file itself
+has no epoch analogue.
 
 ### RPC timeouts + retries
 
@@ -476,10 +472,10 @@ the OS-level 60-75 s TCP timeout.
 | Node lies "I have it" without storing       | PoR audit (`MissingShard`)   | reputation drops |
 | Whole rack / zone goes dark                 | health monitor + zone-aware  | object stays decodable up to L_{n-1}/L_{n-2} |
 | Gateway crashes mid-PUT                     | client retry                  | shards already on nodes are dedup'd by hash on retry |
-| Gateway crashes mid-DELETE                  | inconsistent: some nodes purged, some not | `POST /api/gc` (0) scoops up orphan shards on demand; the background scrub catches them between runs |
-| Disk corruption on one shard file           | hash verify on read           | shard discarded → margin drops → auto-repair-on-read (3) re-encodes from donors |
-| Network partition between gateway and node  | `HOLOFS_RPC_TIMEOUT_MS` budget (x) | timed-out RPC retries once on a fresh socket; health monitor → exclude → repair if margin drops |
-| All nodes simultaneously dark               | `place_shard` returns `NoLiveNodes` (x) | gateway 503s with `ClusterDegraded` instead of asserting; client retries when nodes return |
+| Gateway crashes mid-DELETE                  | inconsistent: some nodes purged, some not | `POST /api/gc` scoops up orphan shards on demand; the background scrub catches them between runs |
+| Disk corruption on one shard file           | hash verify on read           | shard discarded → margin drops → auto-repair-on-read re-encodes from donors |
+| Network partition between gateway and node  | `HOLOFS_RPC_TIMEOUT_MS` budget | timed-out RPC retries once on a fresh socket; health monitor → exclude → repair if margin drops |
+| All nodes simultaneously dark               | `place_shard` returns `NoLiveNodes` | gateway 503s with `ClusterDegraded` instead of asserting; client retries when nodes return |
 | Whitelist signature invalid                 | gateway startup check        | refuses to start (fail-fast) |
 
 ### What we don't protect against

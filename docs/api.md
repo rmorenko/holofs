@@ -91,7 +91,7 @@ Status-code mapping for the dir ops:
 | `GET`  | `/health`             | Per-node table, kill/revive buttons          |
 | `GET`  | `/health/<name>`      | Margin per (channel, layer), Monte-Carlo loss simulation, zone-failure table |
 | `GET`  | `/api/stats`          | JSON: object counts by kind, shards, dedup % |
-| `POST` | `/admin/node` (`i=N`) | Toggle node N (admin-side excluded/restored). **Admin-auth gated (v0.6.0 N6)** — requires `Authorization: Bearer $HOLOFS_ADMIN_TOKEN` when the env var is set. |
+| `POST` | `/admin/node` (`i=N`) | Toggle node N (admin-side excluded/restored). **Admin-auth gated** — requires `Authorization: Bearer $HOLOFS_ADMIN_TOKEN` when the env var is set. |
 
 `/api/stats` returns:
 
@@ -115,8 +115,7 @@ Status-code mapping for the dir ops:
 `objects_total = sum(objects_by_kind)`; `directory` markers are counted
 but contribute nothing to `shards_total` / `bytes_total`.
 
-The four trailing counters (3 + 15.x) expose self-healing
-activity:
+The four trailing counters expose self-healing activity:
 
 - `auto_repairs_total` — GETs that triggered the
   `decode_with_autorepair` retry arm (LayerLost on the first decode
@@ -137,21 +136,21 @@ signal.
 `text/plain; version=0.0.4` body — every gauge / counter emits
 `# HELP` + `# TYPE` lines. See
 [`docs/operations.md § 6.1`](operations.md#61-metrics-endpoint) for
-the full metric catalog, labels, and interpretation. v0.6.0
-introduced the N-series reliability counters:
+the full metric catalog, labels, and interpretation. Reliability
+counters worth pointing out:
 
-- `holofs_catalog_persist_failures_total` — **N4**, disk-write errors
-  on the atomic catalog save.
+- `holofs_catalog_persist_failures_total` — disk-write errors on
+  the atomic catalog save.
 - `holofs_handler_timeouts_total{bucket="short|medium|long"}` —
-  **N7**, 504 responses.
-- `holofs_backpressure_rejected_total{bucket="medium|long"}` — **N3**,
+  504 responses.
+- `holofs_backpressure_rejected_total{bucket="medium|long"}` —
   503 responses on semaphore saturation.
 - `holofs_backpressure_permits_available{bucket="medium|long"}` —
-  **N3**, gauge of permits still free.
+  gauge of permits still free.
 - `holofs_supervised_task_restarts_total{task="monitor|auditor|scrub"}`
-  — **N2**, supervised-loop restarts on panic.
+  — supervised-loop restarts on panic.
 - `holofs_admin_auth_failures_total{outcome="missing|bad|disabled"}` —
-  **N6**, admin bearer-token rejections split by reason.
+  admin bearer-token rejections split by reason.
 
 `/metrics` lives in the SHORT route bucket and inherits the 10 s
 deadline; a slow `/metrics` response is itself an alert signal.
@@ -177,8 +176,8 @@ deadline; a slow `/metrics` response is itself an alert signal.
 ### Shard inspection
 
 The `c_l_idx` triple identifies one shard within an object as
-`<channel>_<layer>_<idx>`. reordered the URL so the fixed triple
-sits in front of the wildcard object path.
+`<channel>_<layer>_<idx>`. The URL puts the fixed triple in front
+of the wildcard object path.
 
 | Method | Path                                                     | Description |
 |--------|----------------------------------------------------------|-------------|
@@ -246,7 +245,7 @@ gateway (no `--enable-embed`) → 503 + hint about the missing flag.
 
 | Method | Path                          | Description |
 |--------|-------------------------------|-------------|
-| `POST` | `/api/gc`                     | Orphan-shard collector. Walks catalog + version archives, lists every node's hashes, asks each to `PurgeByHash` the residue. **Admin-auth gated (v0.6.0 N6)** — see below. |
+| `POST` | `/api/gc`                     | Orphan-shard collector. Walks catalog + version archives, lists every node's hashes, asks each to `PurgeByHash` the residue. **Admin-auth gated** — see below. |
 | `POST` | `/api/upload` (multipart)     | Form-friendly upload. Fields: `parent` (string, may be empty), `file` (binary), optional `name` rename, `return_to` |
 | `POST` | `/api/mv`                     | Rename / move. Form fields `from=…&to=…`. 4xx on clobber attempts. |
 
@@ -284,11 +283,11 @@ when `--enable-embed` is off.
 | `HOLOFS_POOL_PER_NODE`                | `8`     | Max idle pooled connections per node addr.             |
 | `HOLOFS_POOL_IDLE_SECS`               | `60`    | Drop pooled entries idle longer than this on `acquire`. |
 | `HOLOFS_POOL_DISABLE`                 | `false` | Bypass the keepalive pool — every RPC dials fresh.     |
-| `HOLOFS_MEDIUM_CONCURRENCY`           | `64`    | **N3** MEDIUM-bucket permits (decodes, PUT, dir ops).  |
-| `HOLOFS_LONG_CONCURRENCY`             | `8`     | **N3** LONG-bucket permits (search, spotlight, GC).    |
-| `HOLOFS_REPUTATION_PERSIST_INTERVAL`  | `30`    | **N5** — how often the shared `Reputation` state is snapshotted to `<storage>/reputation.bin`. |
-| `HOLOFS_ADMIN_TOKEN`                  | _(unset)_ | **N6** — bearer token for `/admin/*` + `/api/gc`. When set, the `Authorization: Bearer $TOKEN` header is mandatory. |
-| `HOLOFS_ADMIN_UNAUTHENTICATED`        | _(unset)_ | **N6 dev override** — set to `1` to leave the admin surface open when no token is configured (logs a WARN). |
+| `HOLOFS_MEDIUM_CONCURRENCY`           | `64`    | MEDIUM-bucket permits (decodes, PUT, dir ops).         |
+| `HOLOFS_LONG_CONCURRENCY`             | `8`     | LONG-bucket permits (search, spotlight, GC).           |
+| `HOLOFS_REPUTATION_PERSIST_INTERVAL`  | `30`    | How often the shared `Reputation` state is snapshotted to `<storage>/reputation.bin`. |
+| `HOLOFS_ADMIN_TOKEN`                  | _(unset)_ | Bearer token for `/admin/*` + `/api/gc`. When set, the `Authorization: Bearer $TOKEN` header is mandatory. |
+| `HOLOFS_ADMIN_UNAUTHENTICATED`        | _(unset)_ | Dev override: set to `1` to leave the admin surface open when no token is configured (logs a WARN). |
 
 #### Cluster-degraded errors
 
@@ -306,7 +305,7 @@ When every node is admin-killed or unreachable, the typed
 admin-disabled and admin-restored. `nodes_live` in `/api/stats`
 reflects the effective set immediately.
 
-#### Admin auth (N6)
+#### Admin auth
 
 `/admin/node` and `/api/gc` are gated by the following matrix,
 resolved once at process startup:

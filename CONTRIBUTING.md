@@ -114,18 +114,18 @@ preferably at the level closest to the bug:
   `holofs-client` / `holofs-cluster`
 - HTTP-handler / UI bug → e2e test under `holofs-e2e/tests/`
 
-## Reliability layer (v0.6.0)
+## Reliability layer
 
-Post-v0.6.0 every long-running background task in `holofs-web`
-goes through the `supervised` wrapper, and every `axum` route
-lives in one of four buckets (short / medium / long / streaming)
-with its own timeout + backpressure policy. Before touching any
-of the following, please read the module-level docs and the
-sibling unit tests:
+Every long-running background task in `holofs-web` goes through
+the `supervised` wrapper, and every `axum` route lives in one of
+four buckets (short / medium / long / streaming) with its own
+timeout + backpressure policy. Before touching any of the
+following, please read the module-level docs and the sibling
+unit tests:
 
 | Concern | Module | See also |
 |---|---|---|
-| SIGTERM / SIGINT drain | `holofs_web::bootstrap` + `holofs_web::main` | `CHANGELOG.md § N1` |
+| SIGTERM / SIGINT drain | `holofs_web::bootstrap` + `holofs_web::main` | `docs/operations.md § 5.6` |
 | Panic-safe background loops | `holofs_web::supervised::supervised_spawn` | tests in the same module |
 | Per-route timeouts | `holofs_web::timeout` | `docs/api.md § /metrics`, tests in the module |
 | Per-bucket backpressure | `holofs_web::backpressure` | `docs/operations.md § 5.6` |
