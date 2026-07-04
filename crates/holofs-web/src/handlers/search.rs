@@ -1,4 +1,4 @@
-//! Stage 12.8 — CLIP-based semantic search axum handlers.
+//! CLIP-based semantic search axum handlers.
 //!
 //! - `POST /api/embed_all` — [`embed_all`]. Kicks off a one-shot bulk
 //!   embed of every image in the catalog that isn't in
@@ -14,7 +14,6 @@
 //! Both routes 503 with a diagnostic body when the embedding feature
 //! is off (`--enable-embed` wasn't passed at startup).
 //!
-//! Moved out of `handlers.rs` in Phase R2b.5.
 
 use std::sync::Arc;
 

@@ -59,17 +59,17 @@ pub fn now_epoch() -> WriteEpoch {
 }
 
 const SHARD_MAGIC_V1: &[u8; 8] = b"HOLOFSS1";
-/// v0.7: same file layout as v1 but the `coeffs || payload` blob is
+/// same file layout as v1 but the `coeffs || payload` blob is
 /// sealed with AES-256-GCM. See [`crate::crypto`] for the wire format.
 const SHARD_MAGIC_V2: &[u8; 8] = b"HOLOFSS2";
-/// Legacy alias kept for pre-v0.7 call sites (tests). New writers
+/// Legacy alias kept for call sites (tests). New writers
 /// pick the magic based on the store's `enc_key` field.
 #[allow(dead_code)]
 const SHARD_MAGIC: &[u8; 8] = SHARD_MAGIC_V1;
 
 /// Store: for each (object_id, channel, layer) — `HashMap<shard_hash,
 /// (Shard, WriteEpoch)>`. Using the hash as the key gives O(1) dedup;
-/// the epoch (v0.7) tags each entry with its wall-clock write time so
+/// the epoch () tags each entry with its wall-clock write time so
 /// concurrent GC can protect fresh writes. A repeated PUT of the same
 /// shard is a no-op *for the payload* but bumps the epoch to the
 /// current time — the effect is "this shard is still live", so a GC
@@ -80,7 +80,7 @@ const SHARD_MAGIC: &[u8; 8] = SHARD_MAGIC_V1;
 pub struct Store {
     shards: HashMap<Key, HashMap<Hash, (Shard, WriteEpoch)>>,
     dir: Option<PathBuf>,
-    /// v0.7: per-node AES-256-GCM key derived from
+    /// per-node AES-256-GCM key derived from
     /// `NodeIdentity::to_bytes()` via HKDF-SHA256. `None` = plaintext
     /// shard files on disk. Reads accept both formats regardless of
     /// this field so upgrades roll gracefully. Writes pick the
@@ -184,7 +184,7 @@ impl Store {
             .unwrap_or_default()
     }
 
-    /// Point lookup by shard hash. Used by the Stage 7 audit: a client checks
+    /// Point lookup by shard hash. Used by the audit: a client checks
     /// that the node actually stores **exactly that** shard.
     pub fn get_by_hash(&self, k: Key, hash: &Hash) -> Option<Shard> {
         self.shards
@@ -215,7 +215,7 @@ impl Store {
         self.shards.values().map(|v| v.len()).sum()
     }
 
-    /// Stage 14.0: list every shard hash this node currently stores,
+    /// list every shard hash this node currently stores,
     /// across every `(object_id, channel, layer)` bucket. Used by the
     /// gateway's GC pass to compute the "held but not referenced
     /// anywhere in the catalog or version archives" delta.
@@ -227,7 +227,7 @@ impl Store {
         out
     }
 
-    /// Stage 14.0: delete every shard whose hash is in `targets`.
+    /// delete every shard whose hash is in `targets`.
     /// Kept for tests and non-GC internal callers; production GC
     /// uses [`Self::purge_by_hashes_up_to`] with the pass's snapshot
     /// epoch so concurrent PUTs are safe.
@@ -235,7 +235,7 @@ impl Store {
         self.purge_by_hashes_up_to(targets, WriteEpoch::MAX)
     }
 
-    /// v0.7 epoch-GC: delete every shard whose hash is in `targets`
+    /// epoch-GC: delete every shard whose hash is in `targets`
     /// AND whose stored write-epoch is `<= max_epoch`. Shards with a
     /// higher epoch survive — they were written after the caller's
     /// snapshot, so the caller's "orphan" verdict is stale for them.
@@ -268,7 +268,7 @@ impl Store {
         removed
     }
 
-    /// v0.7 epoch-GC: current wall-clock. Snapshotted by the gateway
+    /// epoch-GC: current wall-clock. Snapshotted by the gateway
     /// GC pass before it starts walking the catalog / node held
     /// lists, then passed as `max_epoch` to
     /// [`Self::purge_by_hashes_up_to`].
@@ -276,7 +276,7 @@ impl Store {
         now_epoch()
     }
 
-    /// v0.7 epoch-GC: peek at a shard's stored write-epoch. Used by
+    /// epoch-GC: peek at a shard's stored write-epoch. Used by
     /// tests + diagnostic paths; there is no wire op for this.
     pub fn epoch_of(&self, k: Key, hash: &Hash) -> Option<WriteEpoch> {
         self.shards.get(&k).and_then(|m| m.get(hash)).map(|(_, e)| *e)
@@ -482,14 +482,14 @@ pub async fn spawn_node_persistent(
 
 /// Same as [`spawn_node_persistent`] but wraps every accepted connection in
 /// TLS using `tls`. `tls = None` falls back to plain TCP — backward
-/// compatibility for callers that have not migrated to Stage 6 yet.
+/// compatibility for callers that have not migrated to yet.
 pub async fn spawn_node_persistent_with_tls(
     addr: SocketAddr,
     storage_dir: impl AsRef<Path>,
     tls: Option<Arc<rustls::ServerConfig>>,
 ) -> io::Result<(SocketAddr, SharedStore, tokio::task::JoinHandle<()>)> {
     let dir = storage_dir.as_ref().to_path_buf();
-    // v0.7: opt in to at-rest shard encryption via
+    // opt in to at-rest shard encryption via
     // `HOLOFS_AT_REST_ENC=1`. Key material comes from the node's
     // own identity seed — no new secret to manage. Reads accept
     // both plaintext (v1) and sealed (v2) files, so nothing needs
@@ -825,7 +825,7 @@ mod tests {
     fn persistent_store_roundtrip_through_restart() {
         let dir = tmpdir("roundtrip");
 
-        // Round 1: open, write a couple of shards, close.
+        // open, write a couple of shards, close.
         let mut s1 = Store::open(&dir).unwrap();
         let sh1 = make_shard(1);
         let sh2 = make_shard(2);
@@ -834,7 +834,7 @@ mod tests {
         assert_eq!(s1.total(), 2);
         drop(s1);
 
-        // Round 2: open again — index is rebuilt from files.
+        // open again — index is rebuilt from files.
         let s2 = Store::open(&dir).unwrap();
         assert_eq!(s2.total(), 2);
         let got = s2.get((42, 0, 1));
@@ -846,19 +846,19 @@ mod tests {
 
     #[test]
     fn encrypted_store_roundtrip_and_disk_ciphertext() {
-        // v0.7: writing under `open_with_key` yields HOLOFSS2 files.
+        // writing under `open_with_key` yields HOLOFSS2 files.
         // Reading them back reconstructs the shards; and inspecting
         // the raw bytes confirms the payload is not plaintext.
         let dir = tmpdir("enc-roundtrip");
         let key = crate::crypto::derive_shard_key(&[0xEE; 32]);
 
-        // Round 1: sealed writes.
+        // sealed writes.
         let mut s1 = Store::open_with_key(&dir, key).unwrap();
         let sh = make_shard(0xAA);
         assert!(s1.put((100, 1, 2), sh.clone()));
         drop(s1);
 
-        // File exists and starts with the v0.7 magic.
+        // File exists and starts with the magic.
         let files = walk_shard_files(&dir).unwrap();
         assert_eq!(files.len(), 1);
         let raw = std::fs::read(&files[0]).unwrap();
@@ -869,7 +869,7 @@ mod tests {
             "encrypted file contains plaintext payload — GCM broken?"
         );
 
-        // Round 2: opening WITH the right key must succeed.
+        // opening WITH the right key must succeed.
         let s2 = Store::open_with_key(&dir, key).unwrap();
         assert_eq!(s2.total(), 1);
         assert_eq!(s2.get((100, 1, 2)), vec![sh.clone()]);
@@ -950,7 +950,7 @@ mod tests {
 
     #[test]
     fn purge_up_to_skips_shards_written_after_snapshot() {
-        // v0.7 epoch-GC: a shard whose stored epoch is strictly
+        // epoch-GC: a shard whose stored epoch is strictly
         // greater than the caller's `max_epoch` must NOT be purged
         // even when its hash is in the target set. Simulates a
         // concurrent PUT that lands between the GC's held-list
@@ -1026,7 +1026,7 @@ mod tests {
     async fn persistent_spawn_node_survives_restart() {
         let dir = tmpdir("spawn-restart");
 
-        // Round 1: start a persistent node, write shards via RPC, shut down.
+        // start a persistent node, write shards via RPC, shut down.
         let (addr1, _store1, handle1) =
             spawn_node_persistent((Ipv4Addr::LOCALHOST, 0).into(), &dir)
                 .await
@@ -1059,7 +1059,7 @@ mod tests {
         // Not strictly necessary, but give drop a tick to close the listener.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Round 2: same storage_dir — the data must be there.
+        // same storage_dir — the data must be there.
         let (addr2, _store2, handle2) =
             spawn_node_persistent((Ipv4Addr::LOCALHOST, 0).into(), &dir)
                 .await

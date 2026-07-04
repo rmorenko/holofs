@@ -8,8 +8,8 @@
 //! visible.
 //!
 //! The 2-pass re-ranking (Coarse band → Mid band refinement) lives on
-//! the roadmap for Stage 13.3 (hierarchical index by layer level). For
-//! now Stage 12.9 is a single-pass query against the existing Coarse
+//! the roadmap for (hierarchical index by layer level). For
+//! now is a single-pass query against the existing Coarse
 //! band index.
 
 use leptos::prelude::*;
@@ -32,7 +32,7 @@ pub struct SearchHitView {
     /// 0.2-0.35 for strong matches; the UI scales them into a 0..100
     /// confidence bar.
     pub score: f32,
-    /// Stage 13.3: layer band that produced the winning score for this
+    /// layer band that produced the winning score for this
     /// file. UI badges results with it so the user can tell apart "the
     /// match was on silhouette" from "the match was on texture".
     pub band: String,
@@ -262,7 +262,7 @@ fn SearchBody(data: SearchResultsView) -> impl IntoView {
                 view! {
                     <a class="search-card" href={format!("/{enc}")} rel="external">
                         <div class="search-thumb-wrap">
-                            // Stage 12.9: lo-fi preview first paint, then
+                            // lo-fi preview first paint, then
                             // the browser fetches the full-res image and
                             // swaps when ready. CSS cross-fades the swap
                             // so the user perceives the result

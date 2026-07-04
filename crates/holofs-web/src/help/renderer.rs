@@ -80,7 +80,7 @@ pub fn render_markdown(md: &str) -> String {
     let mut out_events: Vec<Event<'_>> = Vec::new();
     let mut in_mermaid = false;
     let mut mermaid_src = String::new();
-    // Stage 11.15: collect heading text into a buffer so we can derive
+    // collect heading text into a buffer so we can derive
     // an `id` from it on TagEnd and re-emit the whole heading as a
     // raw-HTML block with the id + a wrapping anchor link.
     let mut heading_state: Option<(HeadingLevel, String, String)> = None;
@@ -156,7 +156,7 @@ pub fn render_markdown(md: &str) -> String {
                 );
                 out_events.push(Event::Html(CowStr::from(html_block)));
             }
-            // Stage 11.14: rewrite relative `*.md` links so they land
+            // rewrite relative `*.md` links so they land
             // on the in-app help viewer instead of trying to GET a
             // catalog object. Source docs link to siblings via
             // `[theory.md](./theory.md)` for human readability; in the
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn renders_plain_markdown() {
         let html = render_markdown("# title\n\nhello **world**\n");
-        // Stage 11.15: headings carry an id + wrapping anchor link
+        // headings carry an id + wrapping anchor link
         // so TOC entries can navigate.
         assert!(html.contains("<h1 id=\"title\""));
         assert!(html.contains("title</a></h1>"));
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn slugify_english() {
         assert_eq!(slugify("1. Bring up the cluster"), "1-bring-up-the-cluster");
-        assert_eq!(slugify("HTTP Range on GET (Stage 11.1)"), "http-range-on-get-stage-111");
+        assert_eq!(slugify("HTTP Range on GET"), "http-range-on-get");
         assert_eq!(slugify("Documentation"), "documentation");
     }
 

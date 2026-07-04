@@ -1,4 +1,4 @@
-//! Regression guard for Stage 15.2 (`gateway: DELETE / PUT-replace must
+//! Regression guard for (`gateway: DELETE / PUT-replace must
 //! not purge shards shared with other objects`, commit `804da77`).
 //!
 //! Two objects with byte-identical content share a `data_cid` and

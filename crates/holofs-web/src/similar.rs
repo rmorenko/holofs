@@ -16,7 +16,7 @@ pub enum MethodView {
     /// MinHash Jaccard over 5-shingles (text).
     Jaccard,
     /// Hamming distance over the 45-bit dHash derived from the per-channel
-    /// 48-byte fingerprint (image/audio). Stage 11.6 retired the old
+    /// 48-byte fingerprint (image/audio). retired the old
     /// `L1` byte-magnitude scoring after it kept saturating at 95%+ on
     /// unrelated photos.
     DHash,
@@ -34,11 +34,11 @@ pub struct ShardOverlapView {
     pub name: String,
     pub common: usize,
     pub overlap_pct: f32,
-    /// Stage 13.0: low-layer overlap %.
+    /// low-layer overlap %.
     pub low_layer_overlap_pct: f32,
-    /// Stage 13.0: high-layer overlap %.
+    /// high-layer overlap %.
     pub high_layer_overlap_pct: f32,
-    /// Stage 13.0: low - high. >30 flags robust copies (watermark /
+    /// low - high. >30 flags robust copies (watermark /
     /// recompress / light retouch — structure intact, detail
     /// perturbed).
     pub robust_copy_score: f32,
@@ -128,7 +128,7 @@ pub fn SimilarPage() -> impl IntoView {
     let params = use_params_map();
     let query = use_query_map();
     let name = move || params.with(|p| p.get("name").unwrap_or_default());
-    // Stage 11.16: `?scope=all|folder|tree`. Default `all` keeps the
+    // `?scope=all|folder|tree`. Default `all` keeps the
     // existing behaviour for bookmarks made before this stage.
     let scope = move || {
         query
@@ -249,7 +249,7 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
         } else {
             let self_enc = self_enc.clone();
             view! {
-                // Stage 11.23: every header gets the same `class="name"`
+                // every header gets the same `class="name"`
                 // its data cells already had so the th text aligns with
                 // the values under it (left-aligned). Previously the
                 // headers fell through to the default centred `<th>` rule
@@ -375,7 +375,7 @@ fn SimilarBody(data: SimilarReportView, active_scope: String) -> impl IntoView {
     }
 }
 
-/// Stage 11.16: scope picker for `/similar/<name>`. Three modes —
+/// scope picker for `/similar/<name>`. Three modes —
 /// whole catalog (legacy), direct siblings, subtree. SSR-friendly: each
 /// option is an `<a>` so the browser reloads with the new `?scope=`.
 #[component]

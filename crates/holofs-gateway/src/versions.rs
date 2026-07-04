@@ -1,4 +1,4 @@
-//! Stage 13.4 — per-object version history.
+//! per-object version history.
 //!
 //! On-disk layout: `<versions_root>/versions/<sanitized_name>/v<ts_ms>_<cid8>.bin`.
 //! Each `.bin` is a serialised [`Manifest`](holofs_model::manifest::Manifest)
@@ -6,7 +6,6 @@
 //! (shard purge skipped) so a `restore_version` call finds its shards
 //! still alive on the cluster.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.3.
 
 use holofs_core::hash::hex;
 use holofs_model::manifest::{Manifest, ObjectKind};
@@ -14,7 +13,6 @@ use holofs_model::manifest::{Manifest, ObjectKind};
 use crate::error::GatewayError;
 use crate::Gateway;
 
-// === Stage 13.4: per-object version history ================================
 
 /// Lazy versioning state. `enabled` set via `Gateway::enable_versions`;
 /// the on-disk layout is `root/<sanitized_name>/v<ts_ms>_<cid8>.bin`,
@@ -91,7 +89,7 @@ impl Gateway {
         std::fs::write(&path, &bytes)
             .map_err(|e| GatewayError::BadRequest(format!("versions write: {e}")))?;
         // Trim oldest archives if a retention cap is configured. No
-        // gc_barrier needed anymore (v0.7 epoch-GC) — the shards
+        // gc_barrier needed anymore (epoch-GC) — the shards
         // referenced by any archive still live in the store; if
         // concurrent full GC's snapshot froze before the archive
         // write, its per-node PurgeByHashUpTo won't touch our new
@@ -167,7 +165,7 @@ impl Gateway {
         name: &str,
         id: &str,
     ) -> Result<RestoreResult, GatewayError> {
-        // v0.7 epoch-GC: no gc_barrier here. Any shards the target
+        // epoch-GC: no gc_barrier here. Any shards the target
         // manifest references are already on the cluster — GC's
         // orphan-set computation is a snapshot, and the shards it
         // references trace back to a live catalog or archived
@@ -227,7 +225,7 @@ impl Gateway {
         name: &str,
         id: &str,
     ) -> Result<DeleteVersionResult, GatewayError> {
-        // v0.7 epoch-GC: no gc_barrier here. Double-purge with a
+        // epoch-GC: no gc_barrier here. Double-purge with a
         // concurrent full-GC pass is idempotent (purge_orphans_of
         // and PurgeByHashUpTo both no-op on missing hashes); the
         // orphan-diff race isn't observable to callers because

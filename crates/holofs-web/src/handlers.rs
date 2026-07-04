@@ -6,8 +6,7 @@
 //! [`docs/api.md`](../../../docs/api.md).
 //!
 //! The historical single-file `handlers.rs` (1857 lines) was split
-//! into domain modules during Phase R2b:
-//!
+//! into domain modules during //!
 //! | Submodule            | Handlers                                            |
 //! |----------------------|-----------------------------------------------------|
 //! | [`objects`]          | GET / PUT / DELETE `/*path`, `/preview/*`,          |

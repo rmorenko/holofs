@@ -1,4 +1,4 @@
-//! Stage 5: background health monitor.
+//! background health monitor.
 //!
 //! Each `tick`:
 //! 1. Pings every cluster node via `discover_live`.
@@ -10,7 +10,7 @@
 //!    costs only the network round trip, no shards are lost.
 //!
 //! This is the "operational" loop: it fixes faults that already happened.
-//! Preventive auto-rebalancing on topology change is a separate Stage 5 item.
+//! Preventive auto-rebalancing on topology change is a separate item.
 //!
 //! Pure-logic design: `tick_once` takes the current state and returns a list
 //! of events. Long-lived state (`prev_live`, `rng`) is held by the caller —
@@ -43,7 +43,7 @@ pub struct MonitorConfig {
     pub margin_threshold: i32,
     pub repair_d: usize,
     /// Reputation-based node exclusion threshold (see `Reputation::alive`).
-    /// 0.0 = reputation does not affect the live set (Stage 5 behaviour).
+    /// 0.0 = reputation does not affect the live set.
     pub reputation_threshold: f32,
 }
 
@@ -147,7 +147,7 @@ pub async fn tick_once(
     // 2. Pseudo-manifest for discover_live: the pinger walks nodes_addrs by index.
     let probe = probe_manifest(nodes_addrs);
     let mut live = discover_live(&probe).await;
-    // 2a. Stage 7.2: drop nodes with poor reputation. They technically answer
+    // 2a. drop nodes with poor reputation. They technically answer
     // ping, but we no longer trust them — exclude them from operations.
     if let Some(rep) = &reputation {
         let rep_guard = rep.lock().await;

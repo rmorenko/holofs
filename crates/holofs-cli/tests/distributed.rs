@@ -166,7 +166,7 @@ async fn put_then_get_roundtrip_exact() {
 
 #[tokio::test]
 async fn put_replicated_blocks_full_roundtrip_is_exact() {
-    // Stage 15.1: put_object_replicated_blocks → get_object_blocks
+    // put_object_replicated_blocks → get_object_blocks
     // with every block requested must reconstruct the original
     // bit-exact (no RLNC randomness, no linear-combination lossy
     // reduction — a block IS its raw f32 payload).
@@ -223,7 +223,7 @@ async fn put_replicated_blocks_full_roundtrip_is_exact() {
 
 #[tokio::test]
 async fn get_object_blocks_roi_saves_bandwidth() {
-    // Stage 15.1 marquee property: a corner ROI fetches strictly
+    // marquee property: a corner ROI fetches strictly
     // fewer bytes than the full image, and reconstructs the
     // interior of the ROI correctly (positions outside the touched
     // set stay at their zero-decoded value → after inverse-Haar
@@ -271,7 +271,7 @@ async fn get_object_blocks_roi_saves_bandwidth() {
     );
 }
 
-/// Stage 15.1 smoke: honor the 15.0 rollback lesson by actually
+/// smoke: honor the 15.0 rollback lesson by actually
 /// running the 512×512 PUT the previous cut choked on. block_size=64,
 /// R=3 → ~36 k shards across 8 nodes. Must complete in tens of ms,
 /// not tens of seconds; must reconstruct near-perfectly; the ROI
@@ -426,7 +426,7 @@ async fn smoke_512x512_shard_budget_and_roundtrip() {
 
 #[tokio::test]
 async fn repair_node_replicated_restores_wiped_replicas() {
-    // Stage 15.1 repair path: put a Replicated object, wipe a
+    // repair path: put a Replicated object, wipe a
     // node's store completely, run repair_node_replicated, verify
     // the node now holds exactly the block hashes its R-placement
     // says it should. Full get_object_blocks roundtrip after the
@@ -497,7 +497,7 @@ async fn repair_node_replicated_restores_wiped_replicas() {
 #[tokio::test]
 async fn repair_node_noop_on_directory_manifest() {
     // Same reproducer as `repair_node_replicated_noop_on_directory_manifest`
-    // but exercises the RLNC path. Field trace (2026-07-03) showed
+    // but exercises the RLNC path. Field traceshowed
     // monitor walking a directory manifest into the RLNC repair too
     // once concurrent Replicated PUTs kicked scrub cycles more
     // frequently. Both variants MUST short-circuit before touching
@@ -672,7 +672,6 @@ async fn gather_layer_pulls_across_all_live_nodes() {
     assert!(!bytes.is_empty());
 }
 
-// === Stage 3: integrity and addressing =====================================
 
 #[tokio::test]
 async fn put_is_deterministic_and_dedupes() {

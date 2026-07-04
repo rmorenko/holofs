@@ -1,7 +1,6 @@
 # Справочник API
 
 
-> ⚠ **Translation may be stale.** This file was last synced before Stage 12-15 (versioning + deletion, HNSW-backed semantic search, /spotlight ROI, streaming /holo, /diff, /similar, auto-repair-on-read, background scrub, typed RPC layer with timeouts + NoLiveNodes panic-fix, per-folder inline upload). The English source under [../](../) is the canon for any new feature; the [Unreleased] block of [../../CHANGELOG.md](../../CHANGELOG.md) lists every delta this translation does not yet cover.
 
 
 Три внешних интерфейса: **HTTP gateway**, **проводной протокол node** и
@@ -13,17 +12,17 @@
 2. [Проводной протокол (TCP)](#2-wire-protocol-tcp)
 3. [Форматы на диске](#3-on-disk-formats)
 4. [Соглашения о заголовках ответа](#4-response-header-conventions)
-5. [MCP-сервер (Stage 12)](#5-mcp-сервер-stage-12)
-6. [Wavelet-операции (Stage 12.5)](#6-wavelet-операции-stage-125)
+5. [MCP-сервер](#5-mcp-сервер)
+6. [Wavelet-операции (5)](#6-wavelet-операции)
 
 ---
 
 ## 1. HTTP gateway
 
 Базовый URL: `http://<addr>:8787/` (HTTPS через собственную TLS-обвязку
-gateway из Stage 6 — `HOLOFS_TLS=1`, mTLS через `HOLOFS_MTLS=1`).
+gateway из `HOLOFS_TLS=1`, mTLS через `HOLOFS_MTLS=1`).
 
-> **Обновление Stage 9.** Пути разделяются слешем и адресуются как
+> **Обновление ** Пути разделяются слешем и адресуются как
 > wildcard (`/photos/2026/img.jpg`). Зарезервированные сегменты верхнего уровня —
 > `api`, `health`, `escrow`, `preview`, `inspect`, `similar`, `diff`,
 > `admin`, `metrics`, `pkg` — не могут использоваться как первый сегмент
@@ -39,7 +38,7 @@ gateway из Stage 6 — `HOLOFS_TLS=1`, mTLS через `HOLOFS_MTLS=1`).
 | `PUT`    | `/<path>`                  | Загрузить сырые байты, kind определяется автоматически. Родительский каталог должен существовать (через `mkdir`) | body = file |
 | `DELETE` | `/<path>`                  | Удалить объект + Purge на всех node. Отказывает в удалении записей-каталогов (используйте `rmdir`) | —             |
 
-### Операции с каталогами (Stage 9)
+### Операции с каталогами
 
 Две разновидности каждой мутации каталога: wildcard JSON-вариант для
 программных вызовов / `curl` и form-urlencoded POST, который HTML-формы
@@ -77,7 +76,7 @@ UI могут вызывать без JavaScript. Формовые вариан�
 | audio     | `audio/wav` (16-bit PCM, моно/стерео как сохранено)         |
 | text      | content-type для текста в соответствии с расширением, тело включает маркеры пропусков, если shard'ов не хватает |
 | opaque    | оригинальный content-type + `Content-Disposition: attachment` |
-| directory | `409 Conflict` — у каталогов нет полезной нагрузки (Stage 9) |
+| directory | `409 Conflict` — у каталогов нет полезной нагрузки |
 
 ### Здоровье кластера
 
@@ -111,7 +110,7 @@ UI могут вызывать без JavaScript. Формовые вариан�
 | Метод | Путь                          | Описание                                       |
 |-------|-------------------------------|------------------------------------------------|
 | `GET` | `/similar/<path>`             | Топ-10 похожих объектов + межобъектное пересечение |
-| `GET` | `/diff?a=<a>&b=<b>`           | Поchunk-визуализация diff. Два пути объектов не помещаются в один маршрут, поэтому Stage 9 перенёс их в query string |
+| `GET` | `/diff?a=<a>&b=<b>`           | Поchunk-визуализация diff. Два пути объектов не помещаются в один маршрут, поэтому перенёс их в query string |
 | `GET` | `/api/fingerprint/<path>`     | JSON: 16-байтовый перцептуальный хэш (image/audio) или первые 16 байт CID (text/opaque) |
 
 `/api/fingerprint/<name>` возвращает:
@@ -127,7 +126,7 @@ UI могут вызывать без JavaScript. Формовые вариан�
 ### Инспекция shard
 
 Тройка `c_l_idx` идентифицирует один shard внутри объекта как
-`<channel>_<layer>_<idx>`. Stage 9 перестроил URL так, что фиксированная
+`<channel>_<layer>_<idx>`. перестроил URL так, что фиксированная
 тройка теперь стоит перед wildcard-путём объекта.
 
 | Метод | Путь                                                     | Описание |
@@ -221,7 +220,7 @@ sequenceDiagram
 
 ### 3.1. Manifest (`HOLOFSM7`, легаси `HOLOFSM6` принимается при чтении)
 
-Stage 9 поднял magic до `HOLOFSM7`, чтобы сигнализировать, что запись
+поднял magic до `HOLOFSM7`, чтобы сигнализировать, что запись
 может содержать дискриминант `ObjectKind::Directory` (тег `4`). Раскладка
 байтов идентична `HOLOFSM6`; вырос только набор допустимых значений `kind`.
 Старые файлы `HOLOFSM6` декодируются корректно новым кодом.
@@ -368,7 +367,7 @@ payload         payload_len bytes
 
 ---
 
-## 5. MCP-сервер (Stage 12)
+## 5. MCP-сервер
 
 Gateway отдаёт эндпоинт **Model Context Protocol** на `POST /mcp` по
 транспорту Streamable HTTP (спека ревизии `2025-03-26`). MCP-клиенты
@@ -489,7 +488,7 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
 
 ---
 
-## 6. Wavelet-операции (Stage 12.5)
+## 6. Wavelet-операции
 
 Эти две операции используют тот факт, что holofs хранит каждый image-
 и audio-объект в wavelet (DWT) домене, разнесённым по `(channel,
@@ -497,7 +496,7 @@ layer)`-ведрам шардов. Манипуляции с шардами на
 позволяют *трансформировать* объект — без декодирования, перекодирования,
 без второй копии source-данных.
 
-Оба инструмента сейчас доступны только через MCP (Stage 12.5) — HTTP
+Оба инструмента сейчас доступны только через MCP (5) — HTTP
 маршруты можно будет добавить позже, но `claude mcp` + curl уже
 покрывают те же сценарии.
 
@@ -621,7 +620,7 @@ blob_base64}`.
 }
 ```
 
-**Concurrency (Stage 14.4):** GC берёт эксклюзивный `write()` на
+**Concurrency (4):** GC берёт эксклюзивный `write()` на
 `gc_barrier` RwLock; PUT-ы / restore / embed-append держат `read()`.
 GC ждёт пока все in-flight writers закончат, и блокирует новые
 до завершения паса. PUT блокируется на ~40 ms на dev-каталоге.
@@ -632,27 +631,27 @@ GC ждёт пока все in-flight writers закончат, и блокир�
 |-------|----------------------------------|-----------|------------|
 | `0x07`| `ListHashes`                     | `Hashes`  | Перечисление всех hash-ей шардов на ноде. Используется GC для вычисления orphans = held − live. |
 | `0x08`| `PurgeByHash { hashes }`         | `Ack`     | Идемпотентное удаление по списку hash. |
-| `0x09`| `PutBatch { object_id, channel, layer, shards }` | `Ack` | Батч-PUT: один RPC вместо одного на каждый шард. Используется в Stage 15.0 scaffolding для будущего producer-а replicated encoding. |
+| `0x09`| `PutBatch { object_id, channel, layer, shards }` | `Ack` | Батч-PUT: один RPC вместо одного на каждый шард. Используется в 0 scaffolding для будущего producer-а replicated encoding. |
 
 ### CLI-флаги оператора
 
 | Флаг                  | Default | Назначение |
 |-----------------------|---------|------------|
-| `--enable-embed`      | off     | Stage 12.8 — мультилингвальный семантический поиск (50+ языков). Первый запуск качает ~700 MiB весов (155 MiB ViT-B/32 image + 540 MiB DistilBERT-multilingual text + 1.5 MiB projection) в `~/.cache/huggingface/hub/`. |
-| `--enable-versions`   | off     | Stage 13.4 — per-object versions. Storage растёт монотонно пока флаг включён; `POST /api/gc` чистит. |
+| `--enable-embed`      | off     | мультилингвальный семантический поиск (50+ языков). Первый запуск качает ~700 MiB весов (155 MiB ViT-B/32 image + 540 MiB DistilBERT-multilingual text + 1.5 MiB projection) в `~/.cache/huggingface/hub/`. |
+| `--enable-versions`   | off     | per-object versions. Storage растёт монотонно пока флаг включён; `POST /api/gc` чистит. |
 
-### HOLOFSM9 + `ObjectEncoding` (Stage 15.0)
+### HOLOFSM9 + `ObjectEncoding`
 
 Манифест добавил трейлинг-байт `encoding`. Варианты:
 
 | Байт | Вариант                              | Хвост |
 |------|--------------------------------------|-------|
 | `0`  | `Rlnc`                               | — (дефолт для всего, что мы пишем сегодня) |
-| `1`  | `Replicated { replication: u8 }`     | один `u8` (Stage 15.1 scaffolding; producer'а ещё нет) |
+| `1`  | `Replicated { replication: u8 }`     | один `u8` (1 scaffolding; producer'а ещё нет) |
 
 Совместимость: `HOLOFSM8/7/6` декодируются с дефолтом `Rlnc`.
 
-### Пул соединений (Stage 15.1)
+### Пул соединений
 
 Все client→node RPC теперь идут через per-address LIFO-пул живых
 `TransportStream`-ов. Серверная сторона и так работает в режиме

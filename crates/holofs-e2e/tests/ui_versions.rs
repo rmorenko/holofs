@@ -1,4 +1,4 @@
-//! `/versions/<name>` per-object history + `/api/restore` (Stage 13.4).
+//! `/versions/<name>` per-object history + `/api/restore`.
 //!
 //! End-to-end: PUT a file, PUT-replace it with different content,
 //! confirm the version archive grew, restore via the JSON API, and

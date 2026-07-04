@@ -39,7 +39,7 @@ pub enum ObjectKind {
     Directory,
 }
 
-/// Stage 15.0/.1: how an object's per-(channel, layer) shards are
+/// /.1: how an object's per-(channel, layer) shards are
 /// laid out.
 ///
 /// `Rlnc` (the historical default) packs each layer's coefficients into
@@ -47,7 +47,7 @@ pub enum ObjectKind {
 /// fault-tolerant but opaque to ROI fetches because every shard mixes
 /// every coefficient.
 ///
-/// `Replicated { replication, block_size }` ships in Stage 15.1: each
+/// `Replicated { replication, block_size }` ships in each
 /// layer's coefficients are grouped into `block_size`-wide blocks and
 /// each block is replicated to `replication` cluster nodes. Payload
 /// per shard is `block_size * 4` bytes (raw `f32` coefficients).
@@ -56,7 +56,7 @@ pub enum ObjectKind {
 /// bandwidth-aware `/spotlight` is the marquee use case.
 ///
 /// **Sizing rule of thumb (worth the same 5-second sanity-check the
-/// Stage 15.0 rollback taught us):** total shards per PUT ≈
+/// rollback taught us):** total shards per PUT ≈
 /// `channels × (Σ layer_lengths / block_size) × replication`. A
 /// 512×512 RGB image at `block_size=64, replication=3` hits ≈ 36 k
 /// shards — comfortable for the disk-backed store.
@@ -65,7 +65,7 @@ pub enum ObjectEncoding {
     /// Default. Each layer's K chunks fan into n_per_layer[l] RLNC
     /// shards. `shard_hashes[c][l]` length matches `n_per_layer[l]`.
     Rlnc,
-    /// Stage 15.1 per-block replicated encoding. See the type doc.
+    /// per-block replicated encoding. See the type doc.
     Replicated {
         /// How many cluster nodes hold each block. Also the
         /// per-block fault-tolerance budget: `replication - 1`
@@ -108,7 +108,6 @@ pub struct Manifest {
     /// into plain HRW.
     pub zones: Vec<u8>,
 
-    // === Stage 3: integrity and addressing ===============================
     /// Stable object CID — hash over source data + parameters.
     /// Identical inputs produce identical `data_cid` across clients.
     pub data_cid: Hash,
@@ -119,7 +118,6 @@ pub struct Manifest {
     /// On GET, a shard whose hash is not in here is dropped before decode.
     pub shard_hashes: Vec<Vec<Vec<Hash>>>,
 
-    // === Stage 8: object kind ============================================
     /// Object kind (Image / Text). Determines the decode path and response format.
     pub kind: ObjectKind,
     /// MIME returned to clients on GET (`image/png`, `text/plain; charset=utf-8`).
@@ -134,16 +132,14 @@ pub struct Manifest {
     /// Computed at PUT time, ~64 u32 values. Empty for non-text.
     pub text_minhash: Vec<u32>,
 
-    // === Stage 11.12: creation timestamp =================================
     /// Unix epoch seconds at which this manifest was created (PUT for
     /// objects, `mkdir` for directories). `0` means "unknown / legacy"
     /// — manifests written under magic `HOLOFSM6` or `HOLOFSM7` (i.e.
-    /// before Stage 11.12) carry no timestamp and decode as zero. The
+    /// before ) carry no timestamp and decode as zero. The
     /// gateway sets this field automatically on every catalog mutation,
     /// so going forward it stays populated.
     pub created_at_unix: u64,
 
-    // === Stage 15.0: shard layout ========================================
     /// How shards are laid out inside each `(channel, layer)`. Legacy
     /// manifests (HOLOFSM8 and older) decode as `Rlnc`; `HOLOFSM9`
     /// adds an explicit byte plus per-variant payload (currently just
@@ -243,16 +239,16 @@ impl Manifest {
     }
 }
 
-/// Current on-disk magic. Stage 15.0 bumped from `HOLOFSM8` to
+/// Current on-disk magic. bumped from `HOLOFSM8` to
 /// `HOLOFSM9` to append the new `ObjectEncoding` tail (one byte for
 /// the variant, plus variant-specific payload). Pure-append schema
 /// extension: readers see the new bytes, legacy readers decode
 /// through and default `encoding` to `Rlnc`.
 const MAGIC: &[u8; 8] = b"HOLOFSM9";
-/// Stage 11.12 magic — accepted on read; lacks the trailing
+/// magic — accepted on read; lacks the trailing
 /// `encoding` byte (defaults to `Rlnc`).
 const MAGIC_LEGACY_V8: &[u8; 8] = b"HOLOFSM8";
-/// Stage 9 magic — accepted on read; also no `created_at_unix`
+/// magic — accepted on read; also no `created_at_unix`
 /// (defaults to 0). Legal set of `kind` values identical to V8.
 const MAGIC_LEGACY_V7: &[u8; 8] = b"HOLOFSM7";
 /// Pre-Stage-9 magic — also accepted on read. Cannot carry
@@ -300,7 +296,6 @@ impl Manifest {
             b.extend_from_slice(bytes);
         }
 
-        // === Stage 5: zones =================================================
         assert_eq!(
             self.zones.len(),
             self.nodes.len(),
@@ -308,7 +303,6 @@ impl Manifest {
         );
         b.extend_from_slice(&self.zones);
 
-        // === Stage 3 ========================================================
         b.extend_from_slice(&self.data_cid);
         b.extend_from_slice(&self.merkle_root);
         assert_eq!(self.shard_hashes.len(), self.channels as usize);
@@ -322,7 +316,6 @@ impl Manifest {
             }
         }
 
-        // === Stage 8: object kind ===========================================
         b.push(match self.kind {
             ObjectKind::Image => 0,
             ObjectKind::Text => 1,
@@ -343,10 +336,8 @@ impl Manifest {
             b.extend_from_slice(&h.to_be_bytes());
         }
 
-        // === Stage 11.12: creation timestamp ==================================
         b.extend_from_slice(&self.created_at_unix.to_be_bytes());
 
-        // === Stage 15.0/.1: encoding selector =================================
         b.push(self.encoding.tag());
         match self.encoding {
             ObjectEncoding::Rlnc => {}
@@ -422,10 +413,8 @@ impl Manifest {
             })?);
         }
 
-        // === Stage 5: zones =================================================
         let zones = c.take(nn)?.to_vec();
 
-        // === Stage 3 ========================================================
         let mut data_cid = [0u8; 32];
         data_cid.copy_from_slice(c.take(32)?);
         let mut merkle_root = [0u8; 32];
@@ -444,7 +433,6 @@ impl Manifest {
             }
         }
 
-        // === Stage 8: object kind ===========================================
         let kind = match c.u8()? {
             0 => ObjectKind::Image,
             1 => ObjectKind::Text,
@@ -474,17 +462,16 @@ impl Manifest {
             text_minhash.push(c.u32()?);
         }
 
-        // Stage 11.12: trailing u64 timestamp. Present in HOLOFSM8
+        // trailing u64 timestamp. Present in HOLOFSM8
         // and HOLOFSM9; legacy HOLOFSM6/HOLOFSM7 records end before it.
         let created_at_unix = if is_current || is_legacy_v8 {
             c.u64()?
         } else {
             0
         };
-        // Stage 15.0/.1: trailing encoding selector. Only present in
+        // /.1: trailing encoding selector. Only present in
         // HOLOFSM9; everything older defaults to `Rlnc`. The
-        // Replicated tail grew a `block_size: u32` in Stage 15.1
-        // without a magic bump — the invariant carried over from
+        // Replicated tail grew a `block_size: u32` in         // without a magic bump — the invariant carried over from
         // 15.0 that no `Replicated` manifest was ever persisted
         // means there's no backwards-compat load-path to preserve.
         let encoding = if is_current {
@@ -684,14 +671,14 @@ mod tests {
             // expected decode default is 0 — the field gets set here to
             // match what `decode` will yield.
             created_at_unix: 0,
-            // Same story for Stage 15.0 encoding selector.
+            // Same story for encoding selector.
             encoding: ObjectEncoding::Rlnc,
         };
         let mut bytes = m.encode();
         // Pretend this is a HOLOFSM6 record: rewrite the magic AND chop
         // off the trailing fields appended after V6:
-        //   * `created_at_unix` (u64, 8 bytes, Stage 11.12)
-        //   * encoding selector tag (u8, 1 byte, Stage 15.0)
+        //   * `created_at_unix` (u64, 8 bytes, )
+        //   * encoding selector tag (u8, 1 byte, )
         // That's 9 bytes total for the `Rlnc` default.
         bytes[..8].copy_from_slice(b"HOLOFSM6");
         bytes.truncate(bytes.len() - 9);
@@ -701,13 +688,13 @@ mod tests {
 
     #[test]
     fn legacy_v7_magic_decodes_with_zero_timestamp() {
-        // Records written under HOLOFSM7 (Stage 9, pre-11.12) lack the
+        // Records written under HOLOFSM7 lack the
         // trailing `created_at_unix` field. New code must still accept
         // them and zero-fill the timestamp.
         let m = Manifest::directory(0xC0FFEE, 0);
         let mut bytes = m.encode();
         bytes[..8].copy_from_slice(b"HOLOFSM7");
-        // Strip Stage 11.12 timestamp (8) + Stage 15.0 encoding tag (1).
+        // Strip timestamp (8) + encoding tag (1).
         bytes.truncate(bytes.len() - 9);
         let back = Manifest::decode(&bytes).unwrap();
         assert_eq!(back.created_at_unix, 0);
@@ -716,7 +703,7 @@ mod tests {
 
     #[test]
     fn replicated_encoding_roundtrips_block_size() {
-        // Stage 15.1: Replicated tail now carries block_size after
+        // Replicated tail now carries block_size after
         // replication. Build a small manifest with a Replicated
         // encoding, roundtrip through encode/decode, verify both
         // fields survive.
@@ -739,7 +726,7 @@ mod tests {
 
     #[test]
     fn place_shard_zone_aware_wraps_shard_idx_past_n_per_layer() {
-        // Reproducer for the 2026-07-03 auditor-panic bug: after
+        // Reproducer for theauditor-panic bug: after
         // an auto-repair grows `shard_hashes[c][l]` beyond
         // `n_per_layer[l]`, the auditor picks a random `h_idx`
         // from the grown array and passes it into
@@ -768,13 +755,13 @@ mod tests {
 
     #[test]
     fn legacy_v8_magic_decodes_with_default_encoding() {
-        // HOLOFSM8 records were written before Stage 15.0 — they carry
+        // HOLOFSM8 records were written before — they carry
         // `created_at_unix` but no encoding selector. Decode must
         // default to `Rlnc` and keep the timestamp.
         let m = Manifest::directory(0xBADC0FFEE0, 1_700_000_123);
         let mut bytes = m.encode();
         bytes[..8].copy_from_slice(b"HOLOFSM8");
-        // Strip only the Stage 15.0 encoding tag (the legacy V8 path
+        // Strip only the encoding tag (the legacy V8 path
         // does NOT read it).
         bytes.truncate(bytes.len() - 1);
         let back = Manifest::decode(&bytes).unwrap();

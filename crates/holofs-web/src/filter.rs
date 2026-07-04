@@ -1,4 +1,4 @@
-//! Stage 11.17 — server-side catalog filter shared by the
+//! server-side catalog filter shared by the
 //! [`crate::get_catalog`] and [`crate::list_dir`] server functions.
 //!
 //! Three URL params drive it:
@@ -15,7 +15,6 @@
 //! adaptation — no `chrono` dependency in the WASM build (this file
 //! is SSR-only, but the crate's tests build both targets).
 //!
-//! Moved out of `lib.rs` in Phase R2a.1.
 
 #![cfg(feature = "ssr")]
 
@@ -131,8 +130,8 @@ fn parse_date_to_unix(s: &str, inclusive_end: bool) -> Result<u64, String> {
     }
     let mut secs = ymd_to_unix(y, m, d);
     if inclusive_end {
-        // Advance by 86 400s so a `to=2026-06-23` filter covers
-        // anything created up to 2026-06-23 23:59:59 UTC.
+        // Advance by 86 400s so a `to=` filter covers
+        // anything created up to23:59:59 UTC.
         secs = secs.saturating_add(86_400);
     }
     Ok(secs)
@@ -237,11 +236,11 @@ mod tests {
 
     #[test]
     fn date_parse_ymd_to_unix_round_trips() {
-        // 1970-01-01 = epoch 0.
+        //= epoch 0.
         assert_eq!(parse_date_to_unix("1970-01-01", false).unwrap(), 0);
         // Inclusive-end flag adds one day (86 400 s).
         assert_eq!(parse_date_to_unix("1970-01-01", true).unwrap(), 86_400);
-        // 2026-01-01 — sanity check against the JS Date equivalent
+        // sanity check against the JS Date equivalent
         // (Date.UTC(2026,0,1)/1000 = 1767225600).
         assert_eq!(parse_date_to_unix("2026-01-01", false).unwrap(), 1_767_225_600);
     }

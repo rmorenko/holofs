@@ -1,7 +1,6 @@
 # Bedrohungsmodell
 
 
-> ⚠ **Translation may be stale.** This file was last synced before Stage 12-15 (versioning + deletion, HNSW-backed semantic search, /spotlight ROI, streaming /holo, /diff, /similar, auto-repair-on-read, background scrub, typed RPC layer with timeouts + NoLiveNodes panic-fix, per-folder inline upload). The English source under [../](../) is the canon for any new feature; the [Unreleased] block of [../../CHANGELOG.md](../../CHANGELOG.md) lists every delta this translation does not yet cover.
 
 
 Dieses Dokument zählt die **Angreifer**, **Schutzgüter**,
@@ -89,7 +88,7 @@ flowchart LR
 |--------------------|---------------------------------|-----------------|------------------|
 | Nutzer → Edge      | Anwendungsebene (Cookies, JWT)  | TLS 1.3         | Außerhalb des Geltungsbereichs |
 | Edge → Gateway     | Heute keine (geplant: mTLS)     | Keine / mTLS    | gateway an privates VLAN binden |
-| Gateway ↔ Node     | Ed25519 Challenge-Response (+ optional mTLS) | Plain TCP, oder rustls TLS via `--tls` (Stage 6) | Wire-Protokoll-nonce + signierter Handshake; `--mtls` ergänzt X.509-Zertifikatsverifikation |
+| Gateway ↔ Node     | Ed25519 Challenge-Response (+ optional mTLS) | Plain TCP, oder rustls TLS via `--tls` | Wire-Protokoll-nonce + signierter Handshake; `--mtls` ergänzt X.509-Zertifikatsverifikation |
 | Operator → Cluster | Admin-Ed25519 signiert whitelist | Out-of-band    | Admin-Schlüssel offline / HSM verwahren |
 
 ---
@@ -147,7 +146,7 @@ zielen auf ihn ab.
 | # | Bedrohung                                           | Gegenmaßnahme |
 |---|-----------------------------------------------------|---------------|
 | I1 | Ein einzelner node liest "seine" shards und enthüllt Klartext | Ein einzelner shard ist `coeffs · chunks` über GF(2⁸), eine zufällige lineare Kombination von Chunks. Klartext aus weniger als `K` unabhängigen shards zu gewinnen, erfordert das Lösen eines unterbestimmten linearen Systems — informationstheoretisch undurchführbar **für einen einzelnen zufälligen shard**. |
-| I2 | Angreifer sammelt ≥ K shards eines Objekts         | RLNC über öffentlichem GF(2⁸) ist **kein** Verschlüsselungsschema. Beliebige K linear unabhängige shards rekonstruieren den Payload. Gegenmaßnahme: **At-Rest-Verschlüsselung pro node** (geplant in Stage 7) und **Platzierungsdiversität** — unter `RendezvousZoneAware` umfassen K shards ≥ K verschiedene nodes in ≥ ⌈K/zone_count⌉ Zonen, sodass deren Auslesen die Kompromittierung entsprechend vieler erfordert. |
+| I2 | Angreifer sammelt ≥ K shards eines Objekts         | RLNC über öffentlichem GF(2⁸) ist **kein** Verschlüsselungsschema. Beliebige K linear unabhängige shards rekonstruieren den Payload. Gegenmaßnahme: **At-Rest-Verschlüsselung pro node**  und **Platzierungsdiversität** — unter `RendezvousZoneAware` umfassen K shards ≥ K verschiedene nodes in ≥ ⌈K/zone_count⌉ Zonen, sodass deren Auslesen die Kompromittierung entsprechend vieler erfordert. |
 | I3 | Metadaten-Leak: Name + Art + Größe                 | Das manifest speichert Objektname und Content-Type im Klartext. Sensible Deployments sollten Namen vor dem Hochladen hashen oder pseudonymisieren. |
 | I4 | Seitenkanäle (Cache, Netzwerk-Timing)              | In 0.1 nicht gemindert — dedizierte CPUs / dediziertes Netzwerk für sensible Deployments. |
 | I5 | Backup-Leak                                        | Backups erben dieselbe Bedrohung: sie müssen verschlüsselt at rest gespeichert werden (`restic --pass-file`, S3 SSE-KMS). |
@@ -209,9 +208,8 @@ Kontrollen, falls benötigt:
 3. **Manipulationssicheres Audit-Log.** Reputation erfasst node-Fehlverhalten,
    erzeugt jedoch kein signiertes, nur anhängbares Log.
 4. **Kryptografischer Anti-Replay-Schutz auf Wire-Frames.** Nur die
-   `AuthChallenge` trägt eine nonce. Stage 7 fügt Per-Session-Keying hinzu.
-5. **Quanten-Resistenz.** Ed25519 und SHA-256 sind pre-quantum. Stage 8
-   evaluiert PQ-Migration.
+   `AuthChallenge` trägt eine nonce. fügt Per-Session-Keying hinzu.
+5. **Quanten-Resistenz.** Ed25519 und SHA-256 sind pre-quantum.    evaluiert PQ-Migration.
 
 ---
 
@@ -219,13 +217,13 @@ Kontrollen, falls benötigt:
 
 | Risiko                                              | Schwere   | Wahrscheinlichkeit | Kompensierende Kontrolle |
 |-----------------------------------------------------|:---------:|:------------------:|---------------------------|
-| Wire-Verkehr im Klartext auf gemeinsamem LAN        | Niedrig   | Niedrig            | Durch `--tls` (rustls TLS 1.2/1.3, Stage 6) gemildert. Operatoren, die `--tls` nicht setzen, sollten auf ein privates VLAN beschränken. |
+| Wire-Verkehr im Klartext auf gemeinsamem LAN        | Niedrig   | Niedrig            | Durch `--tls` (rustls TLS 1.2/1.3) gemildert. Operatoren, die `--tls` nicht setzen, sollten auf ein privates VLAN beschränken. |
 | Kompromittierung des Admin-Schlüssels               | Kritisch  | Niedrig            | Offline-Speicherung; vierteljährliche Rotations-Übung |
 | Wire-Frame-Replay (Nicht-Handshake)                 | Mittel    | Niedrig            | Hash-Bindung begrenzt Schaden auf Integrität, nicht Vertraulichkeit |
 | Seitenkanalangriffe auf gemeinsamer CPU             | Mittel    | Niedrig            | Dedizierte nodes für sensible Workloads |
 | Backup-Leak                                         | Hoch      | Mittel             | Backups verschlüsseln (`restic`, SSE-KMS) |
 | DSGVO-Löschung unvollständig aufgrund von Backups   | Mittel    | Mittel             | Dokumentierte Aufbewahrungsrichtlinie + Kundenoffenlegung |
-| Operator-Kompromittierung über Supply Chain         | Hoch      | Niedrig            | Reproduzierbare Builds + signierte Releases (Stage 8) |
+| Operator-Kompromittierung über Supply Chain         | Hoch      | Niedrig            | Reproduzierbare Builds + signierte Releases |
 
 Jedes Risiko hat einen Owner (`@holofs/security`) und ein geplantes
 Gegenmaßnahmen-Release. Verfolgung über GitHub-Issues mit Label `security`.

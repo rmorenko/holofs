@@ -1,4 +1,4 @@
-//! `/mix?a=&b=&split=` — wavelet-mix page (Stage 12.6).
+//! `/mix?a=&b=&split=` — wavelet-mix page.
 //!
 //! Three URL params drive the page:
 //! * `a` — source A (locked once the user navigated here from a
@@ -119,7 +119,7 @@ fn MixBody(
                                         "(" {candidates.len().to_string()} ")"
                                     </span>
                                 </span>
-                                // Stage 12.6.1: text input + datalist instead
+                                // .1: text input + datalist instead
                                 // of a `<select>`. Typing filters the list
                                 // natively in the browser — no JS — so
                                 // picking from hundreds of images stays

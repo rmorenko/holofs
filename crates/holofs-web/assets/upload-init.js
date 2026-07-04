@@ -1,4 +1,4 @@
-// Stage 11.4: progressive enhancement for the catalog upload form.
+// progressive enhancement for the catalog upload form.
 //
 // Without JS: clicking the styled <label> opens the native file picker,
 // pressing "upload" submits the form. Works fine.

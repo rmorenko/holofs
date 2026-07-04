@@ -19,8 +19,7 @@
 //! HNSW index on top — but until then a flat scan is the smallest
 //! moving part.
 //!
-//! Removal happens by writing a tombstone record (zero dim). Stage 12.8
-//! doesn't expose that yet — file rebuild is the upgrade path.
+//! Removal happens by writing a tombstone record (zero dim). //! doesn't expose that yet — file rebuild is the upgrade path.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -155,7 +154,7 @@ impl Index {
         Ok(n)
     }
 
-    /// Stage 14.3: rewrite the index keeping only records for which
+    /// rewrite the index keeping only records for which
     /// `keep(data_cid)` returns `true`. Atomic-on-success: writes to
     /// `<path>.tmp` first, then renames over the original. Returns
     /// `(kept, dropped)` counts. Tombstones (`vec.is_empty()`) are

@@ -10,7 +10,6 @@
 //! `put_opaque_object` from `holofs_client` fill in `data_cid`,
 //! `merkle_root`, and `shard_hashes` in place.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.16.
 
 use std::time::Instant;
 
@@ -273,7 +272,7 @@ impl Gateway {
         name: &str,
         body: &[u8],
     ) -> Result<IngestResult, GatewayError> {
-        // v0.7 epoch-GC: no `gc_barrier` here anymore. Concurrent
+        // epoch-GC: no `gc_barrier` here anymore. Concurrent
         // GC snapshots its cutoff epoch before it starts and every
         // shard we're about to write gets a fresh (higher) epoch
         // from `Store::put`, so the node-side `PurgeByHashUpTo`
@@ -315,7 +314,7 @@ impl Gateway {
         }
         let prev = self.catalog.lock().await.get(name).cloned();
         if let Some(old) = &prev {
-            // Stage 13.4: when versioning is on we archive the prior
+            // when versioning is on we archive the prior
             // manifest as a side file AND skip the shard purge — the
             // old shards must stay live so a `restore_version` call
             // can decode them again. Trade-off: storage grows
@@ -326,7 +325,7 @@ impl Gateway {
                     eprintln!("PUT {name}: version archive failed: {e}");
                 }
             } else {
-                // Stage 15.2 fix: the prior `purge_object(old, &live)`
+                // fix: the prior `purge_object(old, &live)`
                 // call yanked entire (object_id, channel, layer) buckets
                 // on every node, which destroyed the shards of any
                 // other catalog entry that happened to share the same
@@ -350,7 +349,7 @@ impl Gateway {
             .put_any(name, body, &live)
             .await
             .map_err(GatewayError::BadRequest)?;
-        // Stage 11.12: stamp the manifest with creation time so the
+        // stamp the manifest with creation time so the
         // tree view can sort by date.
         manifest.created_at_unix = now_unix();
         let put_ms = t0.elapsed().as_millis();
@@ -377,7 +376,7 @@ impl Gateway {
         })
     }
 
-    /// Stage 15.1: image-only PUT that stores the object under the
+    /// image-only PUT that stores the object under the
     /// per-block Replicated encoding instead of the default RLNC.
     ///
     /// Semantically parallel to [`Self::ingest_bytes`] but:

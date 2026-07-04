@@ -1,4 +1,4 @@
-//! Stage 10: perceptual fingerprints and cross-object analytics on top of shards.
+//! perceptual fingerprints and cross-object analytics on top of shards.
 //!
 //! Idea: systematic L0 shards contain **raw bytes of the DWT LL band** as
 //! f32 LE. That is effectively "low resolution in the frequency domain" —
@@ -184,7 +184,7 @@ pub fn fingerprint_hex(fp: &Fingerprint) -> String {
 
 // === Cross-object analytics ===============================================
 
-/// Stage 13.0: per-layer shard overlap. Returns, for every layer in
+/// per-layer shard overlap. Returns, for every layer in
 /// the target manifest `a`, the number of `a`'s hashes that also live
 /// in `b` (across any layer of `b`). The split lets the caller tell
 /// "shares coarse structure" (overlap concentrated in low layers)
@@ -249,7 +249,7 @@ pub fn shard_overlap(a: &Manifest, b: &Manifest) -> (usize, usize, usize) {
     (common, total_a, total_b)
 }
 
-// === Per-chunk diff (Stage 10c) ============================================
+// === Per-chunk diff ============================================
 
 /// One chunk-diff entry: where the chunk lives and whether it is shared
 /// with the other object.

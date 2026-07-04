@@ -9,7 +9,7 @@
 //!
 //! TLS is **opt-in** at the binary level. When the gateway and nodes are
 //! launched without `--tls`, they keep speaking plain TCP — same as before
-//! Stage 6. Once `--tls` is set the wire is encrypted; passing `--mtls`
+//! . Once `--tls` is set the wire is encrypted; passing `--mtls`
 //! further requires + verifies a client certificate.
 
 use std::fs;

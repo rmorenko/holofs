@@ -1,4 +1,4 @@
-//! Stage 8 — holographic key escrow (Shamir-style RLNC).
+//! holographic key escrow (Shamir-style RLNC).
 //!
 //! `escrow_split` chops a file into `n` RLNC shares, any `k` of
 //! which can reconstruct the original. Shares are held in a
@@ -7,7 +7,6 @@
 //! `.holoshare` files are **not stored on the cluster** — they
 //! live only in gateway RAM until download or restart.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.5.
 
 use holofs_core::hash::hex;
 

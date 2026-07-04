@@ -97,7 +97,7 @@ fn report_to_view(rep: holofs_gateway::DiffReport) -> DiffReportView {
 
 #[component]
 pub fn DiffPage() -> impl IntoView {
-    // Stage 9: two object paths don't fit a single routable pattern, so the
+    // two object paths don't fit a single routable pattern, so the
     // catalog paths are passed as `?a=…&b=…` query string instead of route
     // segments. Both must be present; anything missing is treated as a
     // 400-equivalent in the view layer.

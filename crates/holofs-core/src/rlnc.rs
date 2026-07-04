@@ -259,7 +259,7 @@ pub fn encode_layer(gf: &Gf, data: &[u8], n: usize, rng: &mut Rng) -> (usize, Ve
 /// Decode a layer **with holes**: returns a `Vec<Option<Vec<u8>>>` of length K
 /// where `Some(chunk_i)` is the recovered i-th source chunk, and `None`
 /// indicates that there were not enough shards to recover that chunk. This is
-/// the text path (Stage 8): shard loss manifests as **positional holes**, not
+/// the text path: shard loss manifests as **positional holes**, not
 /// "all or nothing".
 ///
 /// Algorithm:
@@ -385,7 +385,6 @@ pub fn decode_layer(gf: &Gf, shards: &[&Shard], symbol_len: usize) -> Option<Vec
         return None;
     }
 
-    // === Phase 1: split into systematic vs RLNC ===========================
     let mut known: Vec<Option<&[u8]>> = vec![None; K];
     let mut rlnc: Vec<&Shard> = Vec::new();
     for &s in shards {
@@ -416,7 +415,6 @@ pub fn decode_layer(gf: &Gf, shards: &[&Shard], symbol_len: usize) -> Option<Vec
         return None;
     }
 
-    // === Phase 2: subtract known contributions from RLNC payloads, build
     // the reduced system n_unknown × n_unknown.
     let unknown_positions: Vec<usize> = (0..K).filter(|i| known[*i].is_none()).collect();
     let rl = n_unknown + symbol_len;
@@ -442,7 +440,6 @@ pub fn decode_layer(gf: &Gf, shards: &[&Shard], symbol_len: usize) -> Option<Vec
         rows.push(row);
     }
 
-    // === Phase 3: Gauss-Jordan on the reduced system =====================
     let mut pr = 0usize;
     for col in 0..n_unknown {
         let mut sel = None;
@@ -474,7 +471,6 @@ pub fn decode_layer(gf: &Gf, shards: &[&Shard], symbol_len: usize) -> Option<Vec
         pr += 1;
     }
 
-    // === Phase 4: build the output ========================================
     let mut out = Vec::with_capacity(K * symbol_len);
     for i in 0..K {
         if let Some(chunk) = known[i] {

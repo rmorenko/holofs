@@ -1,4 +1,4 @@
-//! Stage 7.2: node reputation.
+//! node reputation.
 //!
 //! Plain EMA over audit results: every `success/fail` observation is mixed
 //! with the old value using factor `alpha`. This yields a "progressively

@@ -197,8 +197,7 @@ fn main() {
     );
     println!("\nmontage: montage.png (order: original, s100, s085, s062, s045, s030)");
 
-    // ===== Stage 1: RLNC node regeneration ===================================
-    println!("\n=== Stage 1: RLNC regeneration (repair without full reconstruction) ===");
+    println!("\n=== RLNC regeneration (repair without full reconstruction) ===");
     let d_param = K;
     let threshold = 0.5_f32;
     let kill_count = (N_NODES * 60) / 100;

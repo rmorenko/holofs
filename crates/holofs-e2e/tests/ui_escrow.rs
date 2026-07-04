@@ -1,4 +1,4 @@
-//! `/escrow` split + recover (Stage 8).
+//! `/escrow` split + recover.
 //!
 //! The page hosts a multipart upload form for splitting an
 //! arbitrary file into N shares with threshold K, and a second

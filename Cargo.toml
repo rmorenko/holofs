@@ -19,52 +19,23 @@ members = [
 ]
 
 [workspace.package]
-# 0.1.0 → 0.2.0 — Stage 4 axum + Leptos SSR migration (gateway API rewrite).
-# 0.2.0 → 0.3.0 — Stage 8 Leptos 0.7 upgrade, MSRV bump 1.75 → 1.81, and
-# the rustls-pemfile → rustls-pki-types switchover that drops the
-# unmaintained-dep advisories.
-# 0.3.0 → 0.4.0 — Stage 10 in-app help viewer, UI i18n (5 locales) and
-# fully translated documentation set under docs/{ru,de,fr,es}/.
-# 0.4.0 → 0.5.0 — Stage 11.4-15.x fan-out: per-folder upload + cd-into-
-# folder catalog, /versions history with delete + retention, HNSW
-# semantic search, /spotlight ROI, streaming /holo, /diff, /similar,
-# auto-repair-on-read, background scrub, typed RPC layer (timeouts +
-# NoLiveNodes), MCP server, 426-test coverage (320 workspace + 106 e2e).
-# 0.5.0 → 0.6.0 — Phase R1 gateway monolith decomposition (http_gateway.rs
-# 4477 → 288 lines across 18 sibling modules; new holofs-testutils
-# crate) + Phase N1-N8 reliability layer (SIGTERM graceful shutdown,
-# supervised background tasks, per-bucket backpressure semaphores,
-# fail-loud persist_catalog, persistent Reputation across restarts,
-# admin bearer-token auth, per-route handler timeouts, six new
-# /metrics counters). 491-test coverage.
-# 0.6.0 → 0.7.0 — Phase R2 holofs-web decomposition (lib.rs 2487 → 253,
-# handlers.rs 1857 → 64, ~10 new sibling modules under
-# `handlers/`, `catalog_types`, `filter`, `server_fns`,
-# `catalog_ui`) + v0.7 operational + security series (TOML config,
-# streaming PUT, per-IP rate limit, at-rest AES-256-GCM shard
-# encryption, holofs-mcp 1245 → 7 sibling modules) + reactive-
-# context i18n fix + epoch-based GC (removes gc_barrier from PUT
-# path) + Stage 15.1 per-block replicated encoding
-# (ObjectEncoding::Replicated { R, block_size }, bandwidth-aware
-# /spotlight, 512×512 smoke). ~540-test coverage.
-version = "0.7.0"
+version = "1.0.0"
 edition = "2021"
-# Leptos 0.7 itself only needs Rust 1.76, but several transitive deps
-# (tokio 1.41+, tracing-subscriber 0.3.19+, hyper 1.5+) have moved to
-# 1.80/1.81 baselines. 1.81 is the common upper bound across the tree.
+# Several transitive deps (tokio 1.41+, tracing-subscriber 0.3.19+,
+# hyper 1.5+) have moved to 1.80/1.81 baselines. 1.81 is the common
+# upper bound across the tree.
 rust-version = "1.81"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/holofs/holofs"
-# None of the holofs-* crates are intended for crates.io at this stage —
-# the workspace ships as a single binary distribution. Individual crates
-# opt back in by setting `publish = true` once their public API
-# stabilises (planned for v0.3+).
+# The workspace ships as a single binary distribution — none of the
+# holofs-* crates are intended for crates.io. Individual crates opt
+# back in by setting `publish = true` once their public API stabilises.
 publish = false
 
 [workspace.dependencies]
 # Math/IO base
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
-# CancellationToken for graceful shutdown across background tasks (N1).
+# CancellationToken for graceful shutdown across background tasks.
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 png = "0.18"
 image = { version = "0.25", default-features = false, features = ["jpeg", "webp", "gif", "bmp", "tiff", "png"] }
@@ -73,16 +44,15 @@ symphonia = { version = "0.5", default-features = false, features = ["wav", "mp3
 # Crypto
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
-# v0.7 at-rest shard encryption. AES-256-GCM, HKDF-SHA256 for
-# derivation from NodeIdentity's seed. Default-features off keeps
-# the sha2 pull minimal (no asm).
+# At-rest shard encryption: AES-256-GCM, HKDF-SHA256 for derivation
+# from NodeIdentity's seed. Default-features off keeps the sha2 pull
+# minimal (no asm).
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 hkdf = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
-# Stage 6: rustls TLS on the wire protocol. tokio-rustls 0.26 lines up with
-# the rustls 0.23 line; rcgen self-signs the embedded-mode CA. Stage 8
-# dropped the unmaintained rustls-pemfile in favour of the PEM parser
-# shipped under `rustls::pki_types::pem` (rustls-pki-types 1.x).
+# rustls TLS on the wire protocol. tokio-rustls 0.26 lines up with the
+# rustls 0.23 line; rcgen self-signs the embedded-mode CA. rustls-pki-types
+# ships the PEM parser under `rustls::pki_types::pem`.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
@@ -100,23 +70,21 @@ async-stream = "0.3"
 futures-util = { version = "0.3", default-features = false }
 serde_json = "1"
 
-# Stage 5: operational concerns — CLI parser, structured logging.
+# Operational concerns — CLI parser, structured logging.
 clap = { version = "4", features = ["derive", "env"] }
-# v0.7 — TOML config file support. `toml` needs serde derive.
+# TOML config file support. `toml` needs serde derive.
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi", "tracing-log"] }
 
-# Stage 10: server-side markdown renderer for the in-app /help section.
-# `gfm` enables tables/strikethrough/tasklists; `math` enables `$…$` and
+# Server-side markdown renderer for the in-app /help section. `gfm`
+# enables tables/strikethrough/tasklists; `math` enables `$…$` and
 # `$$…$$` capture (we render the actual math client-side via KaTeX).
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 
-# Leptos 0.7 stable. The 0.7 ecosystem drops the unmaintained
-# `proc-macro-error`/`paste` chain, lets us unpin `web-sys`/`js-sys`, and
-# replaces the broken `server_fn 0.6.15` browser code path with a clean
-# `server_fn 0.7+` build.
+# Leptos 0.7 stable — clean `server_fn 0.7+` build chain, no
+# unmaintained `proc-macro-error`/`paste` transitive deps.
 leptos = { version = "0.7", default-features = false }
 leptos_axum = { version = "0.7" }
 leptos_router = { version = "0.7", default-features = false }
@@ -125,24 +93,22 @@ leptos_meta = { version = "0.7", default-features = false }
 # WASM-side helpers (only pulled in by the `hydrate` feature of holofs-web).
 console_error_panic_hook = "0.1"
 wasm-bindgen = "0.2"
-# Pin removed in Stage 8 — `server_fn 0.7` uses the modern `RequestInit`
-# chained API so web-sys 0.3.70+ works.
 web-sys = "0.3"
 js-sys = "0.3"
 
 # Internal crates (path-deps)
-holofs-core      = { path = "crates/holofs-core",      version = "0.7.0" }
-holofs-model     = { path = "crates/holofs-model",     version = "0.7.0" }
-holofs-wire      = { path = "crates/holofs-wire",      version = "0.7.0" }
-holofs-codec     = { path = "crates/holofs-codec",     version = "0.7.0" }
-holofs-storage   = { path = "crates/holofs-storage",   version = "0.7.0" }
-holofs-client    = { path = "crates/holofs-client",    version = "0.7.0" }
-holofs-cluster   = { path = "crates/holofs-cluster",   version = "0.7.0" }
-holofs-analytics = { path = "crates/holofs-analytics", version = "0.7.0" }
-holofs-gateway   = { path = "crates/holofs-gateway",   version = "0.7.0" }
-holofs-mcp       = { path = "crates/holofs-mcp",       version = "0.7.0" }
-holofs-embed     = { path = "crates/holofs-embed",     version = "0.7.0" }
-holofs-testutils = { path = "crates/holofs-testutils", version = "0.7.0" }
+holofs-core      = { path = "crates/holofs-core",      version = "1.0.0" }
+holofs-model     = { path = "crates/holofs-model",     version = "1.0.0" }
+holofs-wire      = { path = "crates/holofs-wire",      version = "1.0.0" }
+holofs-codec     = { path = "crates/holofs-codec",     version = "1.0.0" }
+holofs-storage   = { path = "crates/holofs-storage",   version = "1.0.0" }
+holofs-client    = { path = "crates/holofs-client",    version = "1.0.0" }
+holofs-cluster   = { path = "crates/holofs-cluster",   version = "1.0.0" }
+holofs-analytics = { path = "crates/holofs-analytics", version = "1.0.0" }
+holofs-gateway   = { path = "crates/holofs-gateway",   version = "1.0.0" }
+holofs-mcp       = { path = "crates/holofs-mcp",       version = "1.0.0" }
+holofs-embed     = { path = "crates/holofs-embed",     version = "1.0.0" }
+holofs-testutils = { path = "crates/holofs-testutils", version = "1.0.0" }
 
 [profile.release]
 opt-level = 3

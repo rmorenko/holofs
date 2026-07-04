@@ -1,4 +1,4 @@
-//! Stage 9 `/inspect/<name>` view-model.
+//! `/inspect/<name>` view-model.
 //!
 //! `inspect` builds the per-(channel, layer) layout for the shard
 //! grid page; `shard_payload` fetches (and verifies) one specific
@@ -6,7 +6,6 @@
 //! everything runs against catalog snapshots + gather RPCs, no
 //! catalog mutation.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.8.
 
 use std::sync::Arc;
 
@@ -16,7 +15,6 @@ use holofs_core::hash::hex;
 use crate::error::GatewayError;
 use crate::Gateway;
 
-// === Phase 4b.5: inspect / similar / diff view-models =====================
 
 /// One shard placement inside [`LayerLayout`].
 #[derive(Debug, Clone)]
@@ -180,7 +178,7 @@ impl Gateway {
             .unwrap_or(0);
         let is_systematic = idx < u32::from(manifest.k);
 
-        // Stage 11.2: cache the per-layer gather. The inspect grid renders
+        // cache the per-layer gather. The inspect grid renders
         // every (channel, layer)'s shard cells in parallel — without
         // deduplication, each of the ~26 cells in one layer kicks off its
         // own cluster-wide `gather_layer`, which under load drops some

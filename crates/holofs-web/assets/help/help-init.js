@@ -1,4 +1,4 @@
-// Stage 10: client-side init for the /help docs viewer.
+// client-side init for the /help docs viewer.
 //
 // Two libraries are loaded from CDN by the page itself; this shim:
 // 1. wires KaTeX auto-render to scan rendered doc bodies for `\(…\)` /

@@ -1,4 +1,4 @@
-// Stage 11.18: flatpickr init for the catalog filter bar.
+// flatpickr init for the catalog filter bar.
 //
 // The server already renders `<input type="date" name="from" lang="…">`
 // which works on its own — flatpickr is progressive enhancement: when

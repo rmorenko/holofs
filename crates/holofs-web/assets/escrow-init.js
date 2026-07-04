@@ -1,4 +1,4 @@
-// Stage 11.20: progressive enhancement for the two escrow forms.
+// progressive enhancement for the two escrow forms.
 //
 // Without JS: clicking the styled <label> opens the native file
 // picker, pressing submit posts the form. Works.

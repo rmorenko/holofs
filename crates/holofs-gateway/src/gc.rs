@@ -1,4 +1,4 @@
-//! Stage 14.0 — orphan-shard garbage collection.
+//! orphan-shard garbage collection.
 //!
 //! The `gc_orphaned_shards` pass:
 //!   1. Snapshots every shard hash referenced by the catalog +
@@ -6,7 +6,6 @@
 //!   2. Asks every live node for its held-shards list.
 //!   3. `PurgeByHash`'s the residue (held − live) node-by-node.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.4. The
 //! `purge_orphans_of` helper (called by DELETE and PUT-replace)
 //! stays in the monolith because both catalog-mutating paths
 //! consume it too.
@@ -19,7 +18,7 @@ use holofs_model::manifest::{Manifest, ObjectKind};
 use crate::error::GatewayError;
 use crate::Gateway;
 
-/// Stage 14.0: per-node breakdown of one GC pass.
+/// per-node breakdown of one GC pass.
 #[derive(Debug, Clone)]
 pub struct GcNodeReport {
     /// `idx` inside `cluster.node_addrs`.
@@ -52,10 +51,10 @@ pub struct GcReport {
     pub purged_total: u64,
     /// Per-node breakdown.
     pub nodes: Vec<GcNodeReport>,
-    /// Stage 14.3: embedding records kept after rewriting
+    /// embedding records kept after rewriting
     /// embeddings.bin. `None` when the embed feature is off.
     pub embeddings_kept: Option<u64>,
-    /// Stage 14.3: embedding records dropped (orphan data_cid +
+    /// embedding records dropped (orphan data_cid +
     /// tombstones). `None` when the embed feature is off.
     pub embeddings_dropped: Option<u64>,
     /// Wall-clock duration in ms.
@@ -63,7 +62,7 @@ pub struct GcReport {
 }
 
 impl Gateway {
-    /// Stage 14.0: garbage-collect orphan shards from every live
+    /// garbage-collect orphan shards from every live
     /// cluster node.
     ///
     /// Live set = union of shard hashes referenced by:
@@ -74,7 +73,7 @@ impl Gateway {
     /// Held set = `ListHashes` from each node. Orphans = held - live.
     /// One `PurgeByHash` round per node deletes the orphans.
     ///
-    /// **Concurrency (v0.7 epoch-GC):** the pass no longer takes an
+    /// **Concurrency (epoch-GC):** the pass no longer takes an
     /// exclusive `gc_barrier.write()` guard against writers. Shard
     /// safety comes from the epoch tag: every `Store::put` records a
     /// wall-clock write-epoch, and the pass gates each per-node
@@ -107,7 +106,7 @@ impl Gateway {
 
         // 1. Snapshot the live catalog hashes.
         //
-        // Stage 14.3: alongside the shard-hash set we also build the
+        // alongside the shard-hash set we also build the
         // set of live `data_cid`s — used at the end of the pass to
         // tombstone embeddings whose owning object no longer exists
         // anywhere (catalog + version archives).
@@ -188,7 +187,7 @@ impl Gateway {
         let mut purged_total: u64 = 0;
         for node_idx in live_nodes {
             let addr = self.cluster.node_addrs[node_idx].clone();
-            // v0.7 epoch-GC: pick the tighter of {gateway snapshot,
+            // epoch-GC: pick the tighter of {gateway snapshot,
             // node-reported current epoch}. Using the node's own
             // clock as an upper bound sidesteps clock skew: if the
             // node's wall clock lags the gateway's, the gateway's
@@ -238,14 +237,14 @@ impl Gateway {
             });
         }
 
-        // Stage 14.3: embedding GC — rewrite embeddings.bin keeping
+        // embedding GC — rewrite embeddings.bin keeping
         // only records whose data_cid is still in `live_cids`. Also
         // strips tombstones for free (rewrite_keep drops empty-vec
         // records unconditionally). Bumps ann_generation so the next
         // semantic_search rebuilds the in-memory ANN index without
         // stale hits.
         //
-        // v0.7 epoch-GC: this is the ONLY thing still under the
+        // epoch-GC: this is the ONLY thing still under the
         // `gc_barrier` write guard — the rewrite walks the file
         // whole-hog, so a concurrent `search::embed_object` append
         // would race it. The shard-GC block above no longer needs

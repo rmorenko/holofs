@@ -270,7 +270,7 @@ pub async fn put_object(
     Ok(())
 }
 
-/// Stage 15.1: per-block replicated encoder.
+/// per-block replicated encoder.
 ///
 /// For each `(channel, layer)`, groups the layer's DWT coefficients
 /// into contiguous blocks of `block_size` coefficients (last block
@@ -381,7 +381,7 @@ pub async fn put_object_replicated_blocks(
             // `join_all` — on 40 nodes with R=3 this collapses
             // ~40 sequential RPCs into one round-trip, taking
             // the 512×512 PUT under the MEDIUM-bucket timeout
-            // (2026-07-03 field bug: sequential dispatch made
+            //sequential dispatch made
             // large clusters + Replicated encoding 504 out).
             let dispatches = batches.into_iter().map(|(node, shards)| {
                 let addr = manifest.nodes[node].clone();
@@ -466,7 +466,7 @@ pub async fn get_object_up_to_layer(
     Ok((out, bytes_used))
 }
 
-/// Stage 14.1: variant of [`get_object_up_to_layer`] that decodes
+/// variant of [`get_object_up_to_layer`] that decodes
 /// every layer normally but **places only those coefficients whose
 /// flat plane index is in `allowed`**; positions outside the mask
 /// stay at zero before the inverse Haar runs.
@@ -482,7 +482,7 @@ pub async fn get_object_up_to_layer(
 /// coefficient set into every shard, so you still need K shards per
 /// layer to decode anything. The win is in the spatial reconstruction
 /// (sharp ROI, dark elsewhere) — the visible alternative to the
-/// "two-pass spatial composite" of Stage 13.2.
+/// "two-pass spatial composite" of .
 pub async fn get_object_with_coeff_mask(
     gf: &Gf,
     manifest: &Manifest,
@@ -528,7 +528,7 @@ pub async fn get_object_with_coeff_mask(
     Ok((out, bytes_used))
 }
 
-/// Stage 12.5: wavelet mix. For each `(channel, layer)`, pull shards from
+/// wavelet mix. For each `(channel, layer)`, pull shards from
 /// manifest `a` when `layer <= split`, from manifest `b` otherwise. The
 /// IDWT runs on the hybrid coefficient plane so structure (low layers)
 /// comes from one source and detail (high layers) from the other.
@@ -649,7 +649,7 @@ pub async fn get_object(
     Ok(out)
 }
 
-/// Stage 15.1 companion to [`get_object_up_to_layer`]: fetches only
+/// companion to [`get_object_up_to_layer`]: fetches only
 /// the specific block ids requested per layer instead of the whole
 /// layer, then places those blocks' coefficients into the DWT plane
 /// (leaving un-fetched positions at zero) and runs inverse-Haar.
@@ -779,7 +779,6 @@ pub async fn get_object_blocks(
     Ok((out, bytes_used))
 }
 
-// === Stage 8: text path ====================================================
 
 /// Encode UTF-8 text into a cluster object. The text is split into K chunks
 /// along UTF-8 boundaries, then encoded as a single layer (channels=1,
@@ -813,7 +812,7 @@ pub async fn put_text_object(
     manifest.chunk_lens = split.chunk_lens;
     manifest.sym_len = vec![split.sym_len as u32];
 
-    // MinHash for fuzzy similar-text search (Stage 10b).
+    // MinHash for fuzzy similar-text search.
     manifest.text_minhash = holofs_analytics::shingle::compute_minhash(text);
 
     // CID = SHA-256 of raw text + metadata (kind=Text, content_type).
@@ -878,7 +877,6 @@ pub async fn get_text_object_with_holes(
     Ok(assemble_text_with_holes(&chunks, &manifest.chunk_lens))
 }
 
-// === Stage 9: audio path ===================================================
 
 /// Encode an audio object: 1D Haar DWT per channel, priority-layer placement
 /// (like images but without the second axis). Channels (1 or 2) become
@@ -1019,7 +1017,7 @@ pub async fn get_audio_object_up_to_layer(
     Ok((out, bytes_used))
 }
 
-/// Stage 12.5: audio layer filtering. Decode an audio object but only
+/// audio layer filtering. Decode an audio object but only
 /// place coefficients from layers where `keep[layer] == true` —
 /// dropped layers contribute zero before the inverse Haar. Each layer
 /// roughly maps to a frequency band (L0 = bass envelope, ascending),
@@ -1073,7 +1071,7 @@ pub async fn get_audio_filtered(
     Ok((out, bytes_used))
 }
 
-/// Stage 12.7: per-layer DWT coefficient energy, summed across channels.
+/// per-layer DWT coefficient energy, summed across channels.
 ///
 /// Decodes every layer the same way the real GET path does, but instead
 /// of placing the coefficients into a plane + running the inverse Haar,
@@ -1124,7 +1122,6 @@ pub async fn layer_energies(
     Ok((energy, bytes_used))
 }
 
-// === Stage 10: opaque blob (arbitrary files, no graceful degradation) ======
 
 /// Encode an arbitrary binary as a single RLNC "canvas": the payload is split
 /// into K chunks and encode_layer emits n systematic+RLNC shards.
@@ -1271,7 +1268,7 @@ pub async fn repair_node(
     // catalog entry including directories, whose `nodes` vec is
     // empty. Without this the raw index below panics with
     // "index out of bounds: the len is 0 but the index is N".
-    // 2026-07-03 field reproducer: parallel Replicated PUTs
+    //parallel Replicated PUTs
     // triggered monitor scans that eventually landed a
     // directory manifest here.
     if manifest.nodes.is_empty() {
@@ -1403,7 +1400,7 @@ pub async fn repair_node(
     Ok(stats)
 }
 
-/// Stage 15.1 repair path for `ObjectEncoding::Replicated` objects.
+/// repair path for `ObjectEncoding::Replicated` objects.
 ///
 /// For every `(channel, layer, block_id)` whose HRW-computed
 /// R-placement contains `replacement`, fetch a byte-identical copy
@@ -1581,7 +1578,7 @@ pub async fn purge_object(manifest: &Manifest, live: &LiveNodes) -> Result<(), C
     Ok(())
 }
 
-/// Stage 14.0: enumerate every shard hash a node currently stores.
+/// enumerate every shard hash a node currently stores.
 /// Used by the gateway GC to compute orphans (held by node but not
 /// referenced by any catalog / version manifest). Address is taken
 /// directly — node need not belong to any particular manifest, so the
@@ -1594,7 +1591,7 @@ pub async fn list_node_hashes(addr: &str) -> Result<Vec<Hash>, ClientError> {
     }
 }
 
-/// Stage 14.0: ask a node to delete every shard whose hash is in
+/// ask a node to delete every shard whose hash is in
 /// `hashes`. Idempotent — a node that never held a hash just no-ops on
 /// it. Returns `Ok(())` once the node acks; on Error response, surfaces
 /// the protocol error.
@@ -1609,7 +1606,7 @@ pub async fn purge_node_by_hash(
     }
 }
 
-/// v0.7 epoch-GC: read a node's current wall-clock (ms since
+/// epoch-GC: read a node's current wall-clock (ms since
 /// UNIX_EPOCH). Snapshotted by the gateway GC pass to gate the
 /// subsequent [`purge_node_by_hash_up_to`] — shards with an epoch
 /// greater than the snapshot are protected from purge.
@@ -1624,7 +1621,7 @@ pub async fn node_current_epoch(addr: &str) -> Result<u64, ClientError> {
     }
 }
 
-/// v0.7 epoch-GC: same as [`purge_node_by_hash`] but the node only
+/// epoch-GC: same as [`purge_node_by_hash`] but the node only
 /// removes shards whose stored write-epoch is `<= max_epoch`. Purges
 /// that would otherwise race a concurrent PUT are safely no-op'd on
 /// the fresh shard.
@@ -1655,7 +1652,7 @@ pub async fn discover_live(manifest: &Manifest) -> LiveNodes {
     live
 }
 
-/// Stage 7.3: check a node's identity. Sends a random nonce, receives a
+/// check a node's identity. Sends a random nonce, receives a
 /// signature, verifies it against `expected_pubkey`. `true` — the node
 /// controls the private key from the whitelist; `false` — spoofing, network
 /// error, wrong key, or broken protocol.
@@ -1792,7 +1789,7 @@ mod rpc_tests {
         assert!(matches!(err, ClientError::UnexpectedResponse { .. }));
     }
 
-    /// 2026-07-03 field bug: `tokio::time::timeout` drops the RPC
+    ///`tokio::time::timeout` drops the RPC
     /// future mid-frame, but the pooled socket was returned via
     /// its normal Drop path — pool then handed a half-read socket
     /// to the *next* caller who got somebody else's response and

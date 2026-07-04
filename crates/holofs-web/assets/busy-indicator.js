@@ -1,4 +1,4 @@
-// Stage 16: global "something is loading" indicator.
+// global "something is loading" indicator.
 //
 // Exposes `window.holofsBusy(true|false)` as a counter-based gate
 // — every `true` increments, every `false` decrements, and the

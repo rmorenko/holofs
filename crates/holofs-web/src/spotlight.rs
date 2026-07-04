@@ -31,7 +31,7 @@ pub fn SpotlightPage() -> impl IntoView {
                 q.get("h")
                     .and_then(|s| s.parse::<f32>().ok())
                     .unwrap_or(0.3),
-                // Stage 14.1: ?mode=coeff selects the Haar-mask path,
+                // ?mode=coeff selects the Haar-mask path,
                 // anything else (or absent) → spatial composite.
                 q.get("mode").unwrap_or_else(|| "spatial".to_string()),
             )
@@ -151,8 +151,8 @@ fn PresetButtons(a: String, mode: String) -> impl IntoView {
     }
 }
 
-/// Stage 14.1: two-mode pill picker — spatial composite (default,
-/// Stage 13.2) vs coefficient mask (Stage 14.1, exposes the Haar
+/// two-mode pill picker — spatial composite (default,
+/// ) vs coefficient mask (, exposes the Haar
 /// reverse map).
 #[component]
 fn ModeToggle(

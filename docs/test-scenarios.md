@@ -14,19 +14,19 @@ commands, expected result, and success markers.
 
 1. [Bring up the cluster](#1-bring-up-the-cluster)
 2. [Basic object CRUD](#2-basic-object-crud)
-3. [Hierarchical catalog (Stage 9)](#3-hierarchical-catalog-stage-9)
-4. [HTTP Range on GET (Stage 11.1)](#4-http-range-on-get-stage-111)
+3. [Hierarchical catalog](#3-hierarchical-catalog)
+4. [HTTP Range on GET (1)](#4-http-range-on-get)
 5. [Holographic degradation](#5-holographic-degradation)
 6. [Perceptual search and diff](#6-perceptual-search-and-diff)
 7. [Inspect: visual shard audit](#7-inspect-visual-shard-audit)
 8. [Holographic Key Escrow](#8-holographic-key-escrow)
-9. [In-app docs viewer (Stage 10)](#9-in-app-docs-viewer-stage-10)
+9. [In-app docs viewer](#9-in-app-docs-viewer)
 10. [i18n: language switching](#10-i18n-language-switching)
 11. [Persistence and restart](#11-persistence-and-restart)
 12. [Multi-process cluster](#12-multi-process-cluster)
 13. [TLS / mTLS on the wire](#13-tls--mtls-on-the-wire)
 14. [Metrics, logs, SSE](#14-metrics-logs-sse)
-15. [Stage 11 regression checks](#15-stage-11-regression-checks)
+15. [regression checks](-regression-checks)
 
 ---
 
@@ -126,7 +126,7 @@ curl -s http://127.0.0.1:8787/api/stats | python3 -m json.tool | grep dedup
 
 ---
 
-## 3. Hierarchical catalog (Stage 9)
+## 3. Hierarchical catalog
 
 **Goal.** Verify mkdir, navigation into subdirs, correct refusals on
 collision, rename, rmdir.
@@ -174,7 +174,7 @@ the "+ folder" form works.
 
 ---
 
-## 4. HTTP Range on GET (Stage 11.1)
+## 4. HTTP Range on GET
 
 **Goal.** Confirm partial GETs work — required for audio scrubbing,
 resumable large downloads, future video seek.
@@ -296,8 +296,7 @@ identical copies → 100% green plus a large `storage_saved_kb`.
 ## 7. Inspect: visual shard audit
 
 **Goal.** Confirm the grid shows all 444 shards (3 channels × 4 layers
-× 26..64 per layer) without gaps. Regression check for Stage 11.2.
-
+× 26..64 per layer) without gaps. Regression check for 
 1. Open `http://127.0.0.1:8787/inspect/mandala.png`.
 2. Scroll — for each channel (R, G, B) you should see 4 sections
    (layers 0..3), each with the right thumbnail count:
@@ -306,7 +305,7 @@ identical copies → 100% green plus a large `storage_saved_kb`.
    - L2 — 26 shards (16 + 10)
    - L3 — 18 shards (16 + 2)
 3. **All 444 thumbnails must render** (no broken `<img>` placeholders).
-   Before Stage 11.2 ~8% would drop under concurrent load.
+   Before 2 ~8% would drop under concurrent load.
 4. Click any thumbnail → land on `/inspect-zoom/<c_l_idx>/<name>` with
    the large PNG, hex coeffs, payload.
 
@@ -364,7 +363,7 @@ forms.
 
 ---
 
-## 9. In-app docs viewer (Stage 10)
+## 9. In-app docs viewer
 
 **Goal.** Verify the docs viewer, Mermaid, and KaTeX rendering.
 
@@ -564,7 +563,7 @@ with a JSON snapshot — this is what drives the live `/health` dashboard.
 
 ---
 
-## 15. Stage 11 regression checks
+## 15. regression checks
 
 Three quick probes targeting recently-fixed issues. Run them after any
 change to the gateway or the ingest pipeline.
@@ -588,7 +587,7 @@ thumbnails must render. In the log:
 grep -E "/api/shard/" /tmp/holofs-cluster.log | grep -v "status=200" | wc -l
 ```
 
-Expected **0**. Before Stage 11.2 this was ~41.
+Expected **0**. Before 2 this was ~41.
 
 ### 11.3 Large multipart uploads
 
@@ -608,9 +607,9 @@ Both must return `200`/`201`, not `400 multipart read: Error parsing`.
 
 ---
 
-## 16. Stage 11.16 – 12 regression checks
+## 16. – 12 regression checks
 
-### 16.1 Similar scope (Stage 11.16)
+### 16.1 Similar scope
 
 Three scope pills at the top of `/similar/<name>`: **all files** /
 **current folder** / **current folder (recursive)**.
@@ -632,7 +631,7 @@ curl -s 'http://127.0.0.1:8787/similar/check.txt?scope=tree' \
 Scope is sticky — clicking a neighbour navigates to its own `/similar`
 URL with the same `?scope=` (and `?lang=`) preserved.
 
-### 16.2 Catalog filter + file delete (Stage 11.17)
+### 16.2 Catalog filter + file delete
 
 Server-side filter on `/` and `/?p=<prefix>` via three query params:
 `q` (name glob, `*` = wildcard, basename match, case-insensitive),
@@ -666,7 +665,7 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 
 The tree leaf rows render a small `✕` button with a confirm prompt.
 
-### 16.3 Localized date picker (Stage 11.18)
+### 16.3 Localized date picker
 
 Native `<input type="date">` on the filter bar carries a `lang`
 attribute matching the page locale; in Chromium browsers a flatpickr
@@ -677,7 +676,7 @@ Visit `/?lang=ru`, click a date field — the calendar header is in
 Russian. Switch to `/?lang=fr`, repeat — French. The `value=…` round
 trips as `YYYY-MM-DD` regardless of locale.
 
-### 16.4 MCP server smoke test (Stage 12)
+### 16.4 MCP server smoke test
 
 Start the cluster with a token so write tools are enabled:
 
@@ -749,11 +748,11 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
   | grep -oE '"uri":"holofs:///[^"]+"' | head -5
 ```
 
-For wiring into Claude Code see [api.md §5](./api.md#5-mcp-server-stage-12).
+For wiring into Claude Code see [api.md §5](./api.md#5-mcp-server).
 
 ---
 
-## 17. Wavelet operations (Stage 12.5)
+## 17. Wavelet operations
 
 Both operations work over the existing MCP endpoint (`/mcp`) — keep
 the same session as in §16.4. Set `HOLOFS_MCP_TOKEN` before starting
@@ -935,7 +934,7 @@ if any check fails.
 
 ---
 
-## 19. Per-file metrics page (Stage 12.7)
+## 19. Per-file metrics page
 
 **Goal**: confirm the "Unique metrics" block under
 `/health/<name>` populates correctly.
@@ -975,7 +974,7 @@ as the **top** entry (highest `shared_total`) with a non-zero
 `shared_per_layer[0]` — i.e., layer-0 (LL / coarse) systematic
 shards survive byte-for-byte despite the corner watermark. Other
 images in the catalog show `shared_per_layer[0] == 0`. That layer-0
-overlap is what feeds the Stage 13.0 robust-copy score. See §21
+overlap is what feeds the 0 robust-copy score. See §21
 for the score-formula caveat on synthetic test data.
 
 ---
@@ -1024,7 +1023,7 @@ coarse, purple = mid, pink = full).
 
 ---
 
-## 21. Robust-copy column on `/similar` (Stage 13.0)
+## 21. Robust-copy column on `/similar`
 
 **Goal**: detect "structure matches, detail differs" pairs (the
 watermark / re-encode / light retouch signature).
@@ -1069,7 +1068,7 @@ curl -s 'http://127.0.0.1:8787/similar/photos/brand-pairs/logo-1.png' \
 
 ---
 
-## 22. Streaming hologram (Stage 13.1)
+## 22. Streaming hologram
 
 **Goal**: confirm that `/preview/stream/<name>` returns a multipart
 body and the browser-side `/holo/<name>` page works.
@@ -1078,8 +1077,7 @@ body and the browser-side `/holo/<name>` page works.
 
 ```sh
 curl -sI 'http://127.0.0.1:8787/preview/stream/photos/abstract/mandala-a.png'
-# Content-Type should be: multipart/x-mixed-replace; boundary=hololayer-2026-06-25
-```
+# Content-Type should be: multipart/x-mixed-replace; boundary=hololayer-```
 
 **Browser**:
 
@@ -1096,7 +1094,7 @@ which Chrome and Firefox handle gracefully.
 
 ---
 
-## 23. Holographic spotlight modes (Stage 13.2 + 14.1)
+## 23. Holographic spotlight modes
 
 **Goal**: render the same ROI two ways and compare visually.
 
@@ -1127,7 +1125,7 @@ curl -sI \
 
 `x-holofs-roi-px` echoes the clamped pixel ROI; `x-holofs-decode-ms`
 reports server work; `x-holofs-bytes-downloaded` is informational
-(Stage 15.1 will turn it into a real bandwidth-saving number for
+(1 will turn it into a real bandwidth-saving number for
 `?mode=coeff` on replicated objects).
 
 **UI**: `/spotlight?a=<image>` exposes the mode toggle + ROI
@@ -1135,7 +1133,7 @@ presets + a custom-coordinates form.
 
 ---
 
-## 24. Per-object versioning (Stage 13.4)
+## 24. Per-object versioning
 
 **Prereq**: server started with `--enable-versions`. Versioned PUTs
 SKIP the usual shard purge so storage grows monotonically while
@@ -1160,7 +1158,7 @@ the flag is on. Run `/api/gc` (scenario 25) to reclaim.
    ```
 
    Expect at least one archived row dated just now. The CID prefix
-   should match the original Stage 18 upload, not the replacement.
+   should match the original upload, not the replacement.
 
 4. Click "restore" on the archived row. Confirm at the dialog.
 
@@ -1232,7 +1230,7 @@ wait
 
 ---
 
-## 26. Stage 15.x reliability scenarios
+## 26. .x reliability scenarios
 
 ### 26.1 Auto-repair-on-read counters
 
@@ -1367,7 +1365,7 @@ echo "broken=$broken"
 # broken=0
 ```
 
-The deterministic LSB jitter injected by `write_png` (Stage 15.x)
+The deterministic LSB jitter injected by `write_png` (x)
 ensures high-frequency DWT shards are unique per file even on the
 smoothest synthetic generators.
 

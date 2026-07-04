@@ -1,6 +1,6 @@
 //! Shared UI primitives used across multiple Leptos pages.
 //!
-//! Stage 10 carved this module out so the topbar (page navigation +
+//! carved this module out so the topbar (page navigation +
 //! locale switcher) lives in one place — every page that used to copy the
 //! `<header class="topbar">` block now embeds `<Topbar active="…"/>` and
 //! gets translations + the locale picker for free.
@@ -21,7 +21,7 @@ pub fn Topbar(active: &'static str) -> impl IntoView {
             ""
         }
     };
-    // Stage 11.14: preserve `?lang=<code>` across nav clicks. Without
+    // preserve `?lang=<code>` across nav clicks. Without
     // this, clicking "catalog" from `/health?lang=ru` would drop the
     // locale and bounce the user back to English. Helper closure reads
     // the live locale signal and appends the param when it isn't `en`.
@@ -64,10 +64,9 @@ pub fn Topbar(active: &'static str) -> impl IntoView {
                 "holofs"
             </h1>
             <nav>
-                // Stage 14.3: every topbar link gets `rel="external"`
+                // every topbar link gets `rel="external"`
                 // so the browser does a full-page navigation instead
-                // of the SPA-router intercept. Same trick Stage 11.29
-                // applied to per-file action links — under hydrate
+                // of the SPA-router intercept. Same trick                 // applied to per-file action links — under hydrate
                 // bugs (currently the locale Memo + FilterBar query
                 // emit non-reactive-context warnings) the SPA-router
                 // intercept can fail mid-navigation, leaving the
@@ -98,7 +97,7 @@ pub fn Topbar(active: &'static str) -> impl IntoView {
     }
 }
 
-/// Stage 11.13: light / dark theme toggle. Pure inline JS — clicks flip
+/// light / dark theme toggle. Pure inline JS — clicks flip
 /// `data-theme` on `<html>` and persist the choice in localStorage so the
 /// pre-paint script in `App` picks it up on the next render. Without JS
 /// the button just doesn't do anything; the static markup stays

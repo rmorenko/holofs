@@ -33,7 +33,7 @@ thiserror = "1"
 tracing = { workspace = true }
 # OnceCell for the lazily-initialised model instance.
 once_cell = "1"
-# Stage 14.2: HNSW (Hierarchical Navigable Small World) approximate
+# HNSW (Hierarchical Navigable Small World) approximate
 # nearest-neighbour index. Brute-force cosine scan stays the default
 # for small bands (< 200 records); HNSW kicks in past that threshold
 # where its sub-linear query time dominates the constant rebuild

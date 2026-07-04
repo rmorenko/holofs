@@ -13,7 +13,6 @@
 //! - `parent_dir` / `in_scope` — helpers used by both `similar_to`
 //!   and the unit tests
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.6.
 
 /// Scope filter for [`Gateway::similar_to`]. Constrains the candidate
 /// pool relative to the target object's parent directory.
@@ -96,7 +95,7 @@ pub struct ShardOverlap {
     pub common: usize,
     /// `common / total_target * 100`.
     pub overlap_pct: f32,
-    /// Stage 13.0: percentage of *low-layer* (structure / silhouette)
+    /// percentage of *low-layer* (structure / silhouette)
     /// shards of the target that this neighbour also carries. Computed
     /// over the bottom half of layers — for the typical `nlayers=8`
     /// image that's L0..=L3.

@@ -1,7 +1,6 @@
 # Testszenarien
 
 
-> ⚠ **Translation may be stale.** This file was last synced before Stage 12-15 (versioning + deletion, HNSW-backed semantic search, /spotlight ROI, streaming /holo, /diff, /similar, auto-repair-on-read, background scrub, typed RPC layer with timeouts + NoLiveNodes panic-fix, per-folder inline upload). The English source under [../](../) is the canon for any new feature; the [Unreleased] block of [../../CHANGELOG.md](../../CHANGELOG.md) lists every delta this translation does not yet cover.
 
 
 Manuelle Ende-zu-Ende-Checkliste für holofs. Sie deckt alle wichtigen
@@ -630,9 +629,9 @@ Beide müssen `200`/`201` liefern, nicht `400 multipart read: Error parsing`.
 
 ---
 
-## 16. Regressionsprüfungen Stage 11.16 – 12
+## 16. Regressionsprüfungen – 12
 
-### 16.1 Similar-Scope (Stage 11.16)
+### 16.1 Similar-Scope
 
 Drei Scope-Pillen oben auf `/similar/<name>`: **alle Dateien** /
 **aktueller Ordner** / **aktueller Ordner (rekursiv)**.
@@ -654,7 +653,7 @@ curl -s 'http://127.0.0.1:8787/similar/check.txt?scope=tree' \
 Der Scope bleibt klebrig — ein Klick auf einen Nachbarn navigiert zu
 dessen `/similar` mit erhaltenem `?scope=` (und `?lang=`).
 
-### 16.2 Katalogfilter + Datei-Löschen (Stage 11.17)
+### 16.2 Katalogfilter + Datei-Löschen
 
 Serverseitiger Filter auf `/` und `/?p=<prefix>` über drei Query-
 Parameter: `q` (Namens-Glob, `*` = Wildcard, Basename-Match,
@@ -690,7 +689,7 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 Die Datei-Zeilen im Baum bekommen einen kleinen `✕`-Button mit
 Bestätigungs-Prompt.
 
-### 16.3 Lokalisierter Date-Picker (Stage 11.18)
+### 16.3 Lokalisierter Date-Picker
 
 Das native `<input type="date">` trägt jetzt ein `lang`-Attribut
 entsprechend der Seitensprache; in Chromium-Browsern ersetzt ein
@@ -701,7 +700,7 @@ immer die Seitensprache spricht, nicht die OS-Sprache.
 Deutsch. Auf `/?lang=fr` wechseln, wiederholen — Französisch. Das
 `value=…` bleibt unabhängig von der Locale `YYYY-MM-DD`.
 
-### 16.4 MCP-Server Smoke-Test (Stage 12)
+### 16.4 MCP-Server Smoke-Test
 
 Cluster mit Token starten, damit Schreibwerkzeuge aktiv sind:
 
@@ -774,11 +773,11 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
   | grep -oE '"uri":"holofs:///[^"]+"' | head -5
 ```
 
-Einbindung in Claude Code — siehe [api.md §5](./api.md#5-mcp-server-stage-12).
+Einbindung in Claude Code — siehe [api.md §5](./api.md#5-mcp-server).
 
 ---
 
-## 17. Wavelet-Operationen (Stage 12.5)
+## 17. Wavelet-Operationen
 
 Beide Operationen laufen über denselben MCP-Endpoint (`/mcp`) — die
 Session aus §16.4 weiter nutzen. Vor dem Cluster-Start `HOLOFS_MCP_TOKEN`
@@ -896,12 +895,12 @@ Die folgenden Stages haben jeweils ein eigenes Test-Szenario im
 englischen `docs/test-scenarios.md` (Abschnitte 18–25):
 
 - 18 — Quickstart mit dem `tools/test-data/`-Sample-Tree
-- 19 — Per-file metrics auf `/health/<name>` (Stage 12.7)
+- 19 — Per-file metrics auf `/health/<name>` (7)
 - 20 — CLIP semantic search + Band-Pillen (Stages 12.8/12.9/13.3)
-- 21 — Robust-copy-Spalte auf `/similar` (Stage 13.0)
-- 22 — Streaming hologram via `/preview/stream/<name>` (Stage 13.1)
+- 21 — Robust-copy-Spalte auf `/similar` (0)
+- 22 — Streaming hologram via `/preview/stream/<name>` (1)
 - 23 — `/api/spotlight.png?mode=<spatial|coeff>` (Stages 13.2 + 14.1)
-- 24 — Per-object versioning + `/api/restore` (Stage 13.4)
+- 24 — Per-object versioning + `/api/restore` (4)
 - 25 — `POST /api/gc` für Shards + Embeddings (Stages 14.0/3/4)
 
 Deutsche Übersetzungen folgen.  In der Zwischenzeit liefert

@@ -1,7 +1,6 @@
 # Betriebshandbuch
 
 
-> ⚠ **Translation may be stale.** This file was last synced before Stage 12-15 (versioning + deletion, HNSW-backed semantic search, /spotlight ROI, streaming /holo, /diff, /similar, auto-repair-on-read, background scrub, typed RPC layer with timeouts + NoLiveNodes panic-fix, per-folder inline upload). The English source under [../](../) is the canon for any new feature; the [Unreleased] block of [../../CHANGELOG.md](../../CHANGELOG.md) lists every delta this translation does not yet cover.
 
 
 Dieses Handbuch beschreibt, wie ein holofs-Cluster in der Produktion
@@ -90,7 +89,7 @@ Wire-Format: `HOLOFSW1` (siehe [api.md §3.4](./api.md#34-whitelist-holofsw1)).
 
 ### 2.4. TLS für das Wire-Protokoll (`--tls`, `--mtls`)
 
-Das gateway↔node-Binärprotokoll kann mit rustls verschlüsselt werden (Stage 6).
+Das gateway↔node-Binärprotokoll kann mit rustls verschlüsselt werden.
 Zwei optionale Flags steuern das Verhalten:
 
 | Flag       | Wirkung |
@@ -148,7 +147,7 @@ Environment=HOLOFS_DATA_DIR=/var/lib/holofs/node%i
 Environment=HOLOFS_LISTEN=0.0.0.0:91%i
 Environment=HOLOFS_WHITELIST=/etc/holofs/whitelist.holofs
 Environment=HOLOFS_SECRET_KEY=/etc/holofs/keys/node%i.priv
-# Stage 6: enable TLS on the wire protocol. Drop the next four lines for
+# enable TLS on the wire protocol. Drop the next four lines for
 # plain-TCP clusters; set HOLOFS_MTLS=1 for mutual auth.
 Environment=HOLOFS_TLS=1
 Environment=HOLOFS_TLS_CA_CERT=/etc/holofs/ca.crt

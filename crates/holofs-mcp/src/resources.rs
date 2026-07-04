@@ -1,4 +1,4 @@
-//! MCP `resources/*` handlers (Stage 12.3).
+//! MCP `resources/*` handlers.
 //!
 //! Catalog entries are exposed as MCP resources at
 //! `holofs:///<path>`. `list_resources` enumerates files (directories

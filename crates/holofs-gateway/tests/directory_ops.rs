@@ -1,4 +1,4 @@
-//! Stage 9 integration tests: end-to-end mkdir / list_dir / rename / rmdir
+//! integration tests: end-to-end mkdir / list_dir / rename / rmdir
 //! against a real [`Gateway`]. The cluster machinery (live nodes,
 //! `ingest_bytes`, `decode_object`) is **not** exercised here — these tests
 //! intentionally use a zero-node Gateway because every directory operation

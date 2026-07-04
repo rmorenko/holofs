@@ -1,4 +1,4 @@
-//! Demo of the file interface (Stage 4):
+//! Demo of the file interface:
 //! - place several files into the catalog
 //! - show progressive reads (preview → details → full)
 //! - print time and traffic at each stage

@@ -1,4 +1,4 @@
-//! Write tool bodies (Stage 12.1).
+//! Write tool bodies.
 //!
 //! All four require `HOLOFS_MCP_TOKEN` on the transport — see
 //! [`HolofsHandler::require_writes`]. Without that the calls return an

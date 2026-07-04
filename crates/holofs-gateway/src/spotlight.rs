@@ -1,16 +1,15 @@
-//! Stage 13.2 / 14.1 — holographic spotlight.
+//! / 14.1 — holographic spotlight.
 //!
 //! Two composite modes over the same ROI abstraction:
 //!
-//! - `spotlight` (Stage 13.2): decode L0 + full quality, blit
+//! - `spotlight`: decode L0 + full quality, blit
 //!   the sharp full-quality pixels inside the ROI over an L0
 //!   background. Outside the ROI stays blurry-but-visible.
-//! - `spotlight_coeff` (Stage 14.1): decode every layer but mask
+//! - `spotlight_coeff`: decode every layer but mask
 //!   the DWT coefficients outside the ROI's Haar reverse map.
 //!   Non-ROI pixels collapse to black; the ROI is sharp and the
 //!   composite lives entirely in coefficient space.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.7.
 
 use std::time::Instant;
 
@@ -22,7 +21,7 @@ use crate::error::GatewayError;
 use crate::util::encode_png;
 use crate::Gateway;
 
-/// Stage 13.2: region-of-interest for [`Gateway::spotlight`]. All four
+/// region-of-interest for [`Gateway::spotlight`]. All four
 /// coordinates are normalised image-relative (`0.0..=1.0`). `x`/`y` is
 /// the top-left corner; `w`/`h` is the rectangle's extent.
 #[derive(Debug, Clone, Copy)]
@@ -54,7 +53,7 @@ pub struct SpotlightImage {
 
 impl Gateway {
 
-    /// Stage 13.2: holographic spotlight — decode the image twice (L0
+    /// holographic spotlight — decode the image twice (L0
     /// only and full quality), then composite per-pixel so the rectangle
     /// `(x_pct, y_pct, w_pct, h_pct)` inside the image is sharp while
     /// everything else stays at L0 blur. The architectural pitch from
@@ -146,7 +145,7 @@ impl Gateway {
         })
     }
 
-    /// Stage 14.1: "coefficient-mask" spotlight — alternative to
+    /// "coefficient-mask" spotlight — alternative to
     /// [`Self::spotlight`]'s spatial composite.
     ///
     /// Maps the spatial ROI to the set of DWT-plane positions whose
@@ -155,10 +154,9 @@ impl Gateway {
     /// places only those coefficients into the reconstruction plane
     /// before the inverse Haar. Non-ROI pixels collapse to black.
     ///
-    /// Visual difference vs Stage 13.2:
-    ///   * Stage 13.2 (`spotlight`) = decode coarse + full, composite
+    /// Visual difference vs     ///   * (`spotlight`) = decode coarse + full, composite
     ///     per pixel. Outside ROI stays blurry-but-visible.
-    ///   * Stage 14.1 (`spotlight_coeff`) = decode every layer, mask
+    ///   * (`spotlight_coeff`) = decode every layer, mask
     ///     coefficients outside ROI. Outside ROI is black (or near-
     ///     black, since Haar with masked high coefficients leaks a
     ///     little).
@@ -167,11 +165,11 @@ impl Gateway {
     /// mixes every coefficient across every shard). The win is
     /// spatial.
     ///
-    /// For **Replicated** objects (Stage 15.1): the ROI's Haar
+    /// For **Replicated** objects: the ROI's Haar
     /// reverse-map is converted to per-layer block ids via
     /// `roi_to_block_ids_with_stride`; only those blocks are
     /// fetched. Bandwidth scales linearly with the ROI area — the
-    /// marquee "bandwidth-aware spotlight" the Stage 14.1 mask
+    /// marquee "bandwidth-aware spotlight" the mask
     /// primitive predicted but couldn't deliver on RLNC.
     pub async fn spotlight_coeff(
         &self,
@@ -206,7 +204,7 @@ impl Gateway {
         let t0 = Instant::now();
         let (channels, bytes_dl) = match manifest.encoding {
             ObjectEncoding::Replicated { block_size, .. } => {
-                // Stage 15.1: fetch only the blocks whose
+                // fetch only the blocks whose
                 // coefficients affect the ROI. Positions outside
                 // the touched set stay at 0 → decode-mask
                 // semantics fall out for free (haar_inverse of

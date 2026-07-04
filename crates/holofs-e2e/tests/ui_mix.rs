@@ -1,4 +1,4 @@
-//! `/mix?a=<image>` wavelet composer (Stage 12.6).
+//! `/mix?a=<image>` wavelet composer.
 //!
 //! Form-driven: pick a second image, pick a split point, render
 //! the composite at `/api/mix.png`. The interesting cross-check is

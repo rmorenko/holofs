@@ -9,14 +9,13 @@
 //! - [`list_dir`] — one-level children under a prefix. Used by the
 //!   focus-view page + as a fallback under filters.
 //! - [`list_dir_page`] — paginated one-level children. Powers the
-//!   Stage 11.21 / 11.22 lazy tree.
+//!   / 11.22 lazy tree.
 //!
 //! [`TreeSort`] is the shared "which column drives ordering" enum and
 //! [`compare_entries`] is the shared comparator so the eager tree
 //! ordering (`build_tree`) and the paged tree ordering
 //! (`list_dir_page`) stay in lock-step.
 //!
-//! Moved out of `lib.rs` in Phase R2a.1.
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -50,7 +49,7 @@ pub async fn get_catalog(
         .iter()
         .map(|(name, m)| CatalogEntry::from_manifest(name, m))
         .collect();
-    // Stage 11.17: apply server-side filter. Filter is matched against
+    // apply server-side filter. Filter is matched against
     // leaves (non-directory entries); ancestor directories of any
     // matching leaf are kept automatically so the tree still has paths
     // to render. Directories whose own name/date matches the filter
@@ -105,7 +104,7 @@ pub async fn list_dir(
     Ok(out)
 }
 
-/// Stage 11.21 / 11.22: a single page of a directory listing. `entries`
+/// / 11.22: a single page of a directory listing. `entries`
 /// is `[offset..offset+limit]` slice of the children, sorted with the
 /// same key the rest of the tree view uses (dirs first, then by
 /// `TreeSort`). `has_more` is `true` when there are more entries past
@@ -123,7 +122,7 @@ pub struct ListDirPage {
 }
 
 /// `GET /api/list_dir_page?prefix=&offset=&limit=&sort=` — paginated
-/// children for the lazy tree view (Stage 11.21 / 11.22). Distinct
+/// children for the lazy tree view. Distinct
 /// from [`list_dir`] which returns the whole directory at once for the
 /// focus view — when filters are active the lazy tree falls back to
 /// the eager `get_catalog` path so prefix-less pagination would

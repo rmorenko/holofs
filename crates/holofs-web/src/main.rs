@@ -52,7 +52,7 @@ const UPLOAD_BODY_LIMIT: usize = 256 * 1024 * 1024;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
-    // v0.7: TOML config file. Runs before clap so the config's
+    // TOML config file. Runs before clap so the config's
     // values populate HOLOFS_* env vars, which then feed into
     // clap's normal env-fallback resolution. See
     // `holofs_web::config_file` for the priority ladder + safety
@@ -128,7 +128,7 @@ async fn main() {
     server_fn::axum::register_explicit::<GetInspectZoom>();
     server_fn::axum::register_explicit::<GetSimilar>();
     server_fn::axum::register_explicit::<GetDiff>();
-    // Stage 10: in-app help / docs viewer.
+    // in-app help / docs viewer.
     server_fn::axum::register_explicit::<GetDoc>();
     server_fn::axum::register_explicit::<ListDocs>();
 
@@ -138,7 +138,7 @@ async fn main() {
     // handler. Both need the same `Arc<Gateway>` in context.
     let gw_for_routes = Arc::clone(&gateway);
     let gw_for_server_fns = Arc::clone(&gateway);
-    // Stage 11.24 fix: provide `LeptosOptions` as context so the
+    // fix: provide `LeptosOptions` as context so the
     // `App` shell can pick it up and render `<HydrationScripts/>`. The
     // bundle (`pkg/holofs.js` + wasm) is never loaded otherwise — the
     // page works as pure SSR with no client-side reactivity, which is
@@ -209,7 +209,7 @@ async fn main() {
         .route_layer(from_fn(move |req, next| {
             with_permit(long_sem.clone(), long_rej.clone(), req, next)
         }))
-        // v0.7: per-IP rate limit applied ABOVE backpressure so a
+        // per-IP rate limit applied ABOVE backpressure so a
         // rejected client doesn't consume a MEDIUM/LONG permit.
         // Layer is a no-op when HOLOFS_RATE_LIMIT_RPS_PER_IP=0
         // (default).
@@ -222,7 +222,7 @@ async fn main() {
     // the stream at the deadline.
     let streaming_routes: Router<LeptosOptions> = Router::new()
         .route("/api/health/events", get(handlers::health_events))
-        // Stage 13.1: streaming hologram — multipart/x-mixed-replace
+        // streaming hologram — multipart/x-mixed-replace
         // body re-rendered for every layer from L0 to full.
         .route("/preview/stream/*name", get(handlers::preview_stream));
 
@@ -246,7 +246,7 @@ async fn main() {
                 }
             }),
         )
-        // Stage 9: directory operations. Two flavours per op — the
+        // directory operations. Two flavours per op — the
         // path-wildcard JSON variants for API/curl users, plus a
         // form-urlencoded POST that the catalog page's HTML forms can hit
         // without JavaScript. The form variants 303-redirect on success.
@@ -254,25 +254,25 @@ async fn main() {
         .route("/api/mkdir", post(handlers::mkdir_form))
         .route("/api/rmdir/*path", delete(handlers::rmdir))
         .route("/api/rmdir", post(handlers::rmdir_form))
-        // Stage 11.17: form-friendly file delete (mirror of rmdir_form
+        // form-friendly file delete (mirror of rmdir_form
         // for non-directory entries).
         .route("/api/rm", post(handlers::rm_form))
-        // Stage 12.6: wavelet mix UI plumbing.
+        // wavelet mix UI plumbing.
         .route("/api/mix.png", get(handlers::mix_preview))
         .route("/api/mix-save", post(handlers::mix_save))
-        // Stage 13.4: form-friendly version restore.
+        // form-friendly version restore.
         .route("/api/restore", post(handlers::restore_version_form))
-        // Stage 15.x: form-friendly version deletion (per-row "delete"
+        // .x: form-friendly version deletion (per-row "delete"
         // button on /versions/<name>). Removes the .bin archive and
         // GCs any shards it uniquely held.
         .route("/api/versions/delete", post(handlers::delete_version_form))
         .route("/api/mv", post(handlers::mv))
-        // Stage 11.4: form-friendly file upload from the catalog page.
+        // form-friendly file upload from the catalog page.
         .route(
             "/api/upload",
             post(handlers::upload_form).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
         )
-        // Stage 11.3: bypass axum's 2 MiB default body limit for routes
+        // bypass axum's 2 MiB default body limit for routes
         // that accept media uploads. Realistic photos/audio land in the
         // 5–80 MB range; the default emitted a misleading "multipart
         // parsing" 400 because the body was truncated mid-parse.
@@ -285,7 +285,7 @@ async fn main() {
             post(handlers::escrow_recover).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
         )
         .route("/escrow/download/:path", get(handlers::escrow_download))
-        // Stage 9: c_l_idx leads so the wildcard can capture multi-segment
+        // c_l_idx leads so the wildcard can capture multi-segment
         // object paths after it.
         .route(
             "/api/shard/:c_l_idx/*path",
@@ -293,7 +293,7 @@ async fn main() {
         )
         .route("/preview/*path", get(handlers::get_preview))
         .route("/*path", get(handlers::get_object))
-        // v0.7 streaming PUT: no DefaultBodyLimit — the handler
+        // streaming PUT: no DefaultBodyLimit — the handler
         // streams the body to a tempfile under `<storage>/uploads/`
         // and enforces `HOLOFS_UPLOAD_MAX_SIZE` (default 1 GiB) per
         // request. `DefaultBodyLimit::disable()` overrides the
@@ -309,7 +309,7 @@ async fn main() {
         }));
     // N3: MEDIUM-bucket backpressure. Cap default 64 concurrent
     // decodes / PUT / dir-ops so a burst can't DoS the process.
-    // v0.7: per-IP rate limit stacks on top so a single client
+    // per-IP rate limit stacks on top so a single client
     // can't exhaust MEDIUM permits and freeze out the rest.
     let (medium_sem, medium_rej) = gateway.medium_bucket();
     let rate_limit_medium = rate_limit.clone();
@@ -328,7 +328,7 @@ async fn main() {
         .merge(long_routes)
         .merge(streaming_routes)
         .merge(medium_routes)
-        // Stage 12.0 + 12.1: MCP (Model Context Protocol) server over
+        // + 12.1: MCP (Model Context Protocol) server over
         // Streamable HTTP. The tower service handles POST/GET/DELETE on
         // `/mcp` per the spec — wire it as `nest_service` so axum hands
         // the whole sub-path off to rmcp instead of routing per-method.
@@ -352,7 +352,7 @@ async fn main() {
                 move || view! { <Shell options=opts.clone()/> }
             },
         )
-        // Stage 13.5: serve the leptos wasm/js bundle.
+        // serve the leptos wasm/js bundle.
         // - `Cache-Control: no-cache` forces a 304/200 revalidation
         //   on every page load so a `cargo leptos build` rebuild
         //   isn't shadowed by a stale browser-cached copy.
@@ -375,11 +375,11 @@ async fn main() {
                 ))
                 .service(ServeDir::new(format!("{site_root}/pkg"))),
         )
-        // Stage 11.5: static assets used by the upload form, the help
+        // static assets used by the upload form, the help
         // viewer (Mermaid + KaTeX bootstrap), and anything else dropped
         // into `crates/holofs-web/assets/`.
         //
-        // Stage 11.14: `ServeDir` falls back to the source directory if
+        // `ServeDir` falls back to the source directory if
         // `target/site/assets/` is missing — `cargo leptos build` does
         // not copy the source assets-dir reliably across rebuilds, and
         // we don't want help-init.js / mermaid bootstrap to 404 just
@@ -423,7 +423,7 @@ async fn main() {
     // future resolves; we hand it the same token) for in-flight
     // requests to complete before returning from `.await`.
     let axum_shutdown = shutdown.clone();
-    // v0.7: `with_connect_info` injects the peer SocketAddr into
+    // `with_connect_info` injects the peer SocketAddr into
     // every request's extensions so `rate_limit::client_ip` can
     // extract it. Zero cost when the rate limit is disabled — the
     // middleware short-circuits on `enabled() == false`.

@@ -1,4 +1,4 @@
-//! Stage 7.4 (variant A): admin whitelist.
+//! (variant A): admin whitelist.
 //!
 //! Sybil resistance is rooted in trusting the admin: only nodes whose
 //! `(address, pubkey, zone)` is signed with the admin key count as cluster

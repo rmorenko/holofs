@@ -14,7 +14,7 @@ use crate::ui::Topbar;
 /// `GET /escrow` — static UI: introduces escrow, hosts split + recover forms.
 #[component]
 pub fn EscrowPage() -> impl IntoView {
-    // Stage 11.19b: pass the active locale into the form so the
+    // pass the active locale into the form so the
     // server-rendered split-result page can translate its strings. We
     // capture `current_locale()` at render time — switching locales
     // means re-rendering this page anyway, so a snapshot is fine.
@@ -29,7 +29,7 @@ pub fn EscrowPage() -> impl IntoView {
             <p>{t!("escrow.intro_p1")}</p>
             <p class="mut">{t!("escrow.intro_p2")}</p>
 
-            // Stage 11.20: custom-styled file inputs replace the native
+            // custom-styled file inputs replace the native
             // controls so the "Choose file" button text follows the page
             // locale (native picker uses the OS language) and the form
             // accepts drag-and-drop. Without JS the visually-hidden
@@ -91,7 +91,7 @@ pub fn EscrowPage() -> impl IntoView {
     }
 }
 
-/// Stage 11.19b: split-result body rendered through the same component
+/// split-result body rendered through the same component
 /// system as the rest of the site. The `lang` value is provided into
 /// Leptos context by the caller (`handlers::escrow_split`), so every
 /// `t!()` inside this view picks up the right locale.

@@ -108,14 +108,14 @@ pub struct Cli {
     #[arg(long, env = "HOLOFS_TLS_CA_CERT")]
     pub tls_ca_cert: Option<PathBuf>,
 
-    /// Stage 12.8: enable the CLIP-based semantic search index. On
+    /// enable the CLIP-based semantic search index. On
     /// first use the gateway downloads ~155 MiB of CLIP weights into
     /// `~/.cache/huggingface/hub`; the on-disk index lives at
     /// `<storage>/embeddings.bin` and grows on every image PUT.
     #[arg(long, env = "HOLOFS_ENABLE_EMBED")]
     pub enable_embed: bool,
 
-    /// Stage 13.4: enable per-object version history. PUTs that
+    /// enable per-object version history. PUTs that
     /// replace an existing object archive the prior manifest under
     /// `<storage>/versions/<sanitized_name>/v…bin` and keep the old
     /// shards on cluster nodes so the version stays decodeable.

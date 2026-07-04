@@ -13,11 +13,11 @@ holofs-wire.workspace = true
 tokio.workspace = true
 ed25519-dalek.workspace = true
 rand_core.workspace = true
-# v0.7 at-rest shard encryption.
+# at-rest shard encryption.
 aes-gcm.workspace = true
 hkdf.workspace = true
 sha2.workspace = true
-# Stage 6 — wire-protocol TLS scaffold (server side of node↔gateway link).
+# wire-protocol TLS scaffold (server side of node↔gateway link).
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rcgen = { workspace = true }

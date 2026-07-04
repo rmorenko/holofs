@@ -84,7 +84,7 @@ Wire format: `HOLOFSW1` (see [api.md §3.4](./api.md#34-whitelist-holofsw1)).
 
 ### 2.4. TLS for the wire protocol (`--tls`, `--mtls`)
 
-The gateway↔node binary protocol can be encrypted with rustls (Stage 6).
+The gateway↔node binary protocol can be encrypted with rustls.
 Two opt-in flags control behaviour:
 
 | Flag       | Effect |
@@ -139,7 +139,7 @@ Environment=HOLOFS_DATA_DIR=/var/lib/holofs/node%i
 Environment=HOLOFS_LISTEN=0.0.0.0:91%i
 Environment=HOLOFS_WHITELIST=/etc/holofs/whitelist.holofs
 Environment=HOLOFS_SECRET_KEY=/etc/holofs/keys/node%i.priv
-# Stage 6: enable TLS on the wire protocol. Drop the next four lines for
+# enable TLS on the wire protocol. Drop the next four lines for
 # plain-TCP clusters; set HOLOFS_MTLS=1 for mutual auth.
 Environment=HOLOFS_TLS=1
 Environment=HOLOFS_TLS_CA_CERT=/etc/holofs/ca.crt
@@ -285,7 +285,7 @@ Every variable has a matching CLI flag (`--storage`, `--log`, etc.) — run
 | `HOLOFS_ZONES`              | `5`            | Number of zones to assign                |
 | `HOLOFS_NO_SEED`            | `false`        | Skip the two-PNG demo seed on an empty catalog. Set to `true` when re-uploading from a known sample tree so the seed doesn't collide with your data. |
 
-### 5.5. Reliability (Stage 15.x)
+### 5.5. Reliability
 
 | Variable                    | Default | Description                                              |
 |-----------------------------|---------|----------------------------------------------------------|
@@ -296,7 +296,7 @@ Every variable has a matching CLI flag (`--storage`, `--log`, etc.) — run
 | `HOLOFS_POOL_IDLE_SECS`     | `60`    | Drop pooled entries idle longer than this on `acquire`. |
 | `HOLOFS_POOL_DISABLE`       | `false` | Bypass the keepalive pool — every RPC dials fresh. Useful when chasing wire-level bugs. |
 
-### 5.5.c. Per-IP rate limit (v0.7)
+### 5.5.c. Per-IP rate limit ()
 
 Complements the N3 global backpressure caps. N3 stops the process
 from exploding under any burst — this layer stops a single
@@ -322,7 +322,7 @@ response. Sustained non-zero rate suggests either an abusive
 client (investigate) or an under-provisioned cap (raise
 `rate_limit_rps_per_ip`).
 
-### 5.5.b. Streaming PUT (v0.7)
+### 5.5.b. Streaming PUT ()
 
 | Variable                    | Default   | Description                                              |
 |-----------------------------|-----------|----------------------------------------------------------|
@@ -337,10 +337,10 @@ body size only briefly at ingest time (RLNC / DWT still expects
 `&[u8]`). Full streaming ingest (chunked RLNC) is out of scope
 until the codec supports it.
 
-### 5.6. Reliability layer (v0.6.0 — N1-N8)
+### 5.6. Reliability layer (N1-N8)
 
 Every knob below has a safe default; the gateway boots successfully
-with none of them set. See [CHANGELOG.md](../CHANGELOG.md#060---2026-07-02)
+with none of them set. See [CHANGELOG.md](../CHANGELOG.md)
 for the full behaviour matrix.
 
 | Variable                              | Default | Description                                              |
@@ -365,7 +365,7 @@ LONG 300 s); streaming endpoints (SSE, multipart/x-mixed-replace) +
 | `HOLOFS_ENABLE_EMBED`       | `false` | Mirror of `--enable-embed`. Loads the CLIP-multilingual model on first PUT or first `/api/search`, then maintains `embeddings.bin`. |
 | `HOLOFS_MCP_TOKEN`          | —       | When set, the `/mcp` endpoint requires `Authorization: Bearer <token>` AND flips write tools on. Without the variable the endpoint stays open + read-only. |
 
-### 5.8. TOML configuration file (v0.7)
+### 5.8. TOML configuration file ()
 
 Every env var above (`HOLOFS_*` and `LEPTOS_SITE_ADDR`) is also
 settable through a single TOML config file passed via
@@ -416,7 +416,7 @@ a typo in `medium_concurency` (missing 'r') fails loud at boot
 with the exact key name in the error. This is intentional; a
 silent fallback would defeat the purpose of the file.
 
-### 5.9. At-rest shard encryption (v0.7)
+### 5.9. At-rest shard encryption ()
 
 Enable with `HOLOFS_AT_REST_ENC=1` (or `[security]
 at_rest_encryption = true` in the TOML). When on, every shard file
@@ -474,7 +474,7 @@ counters.
 | `holofs_dedup_savings_pct`                   | gauge   | —                            | `(1 − unique/total) × 100` |
 | `holofs_bytes_total`                         | gauge   | —                            | approximate stored bytes |
 | `holofs_node_admin_killed`                   | gauge   | `node`, `addr`, `zone`       | per-node admin-kill flag |
-| `holofs_auto_repairs_total`                  | counter | —                            | GETs that triggered `decode_with_autorepair`'s retry arm (Stage 14.3) |
+| `holofs_auto_repairs_total`                  | counter | —                            | GETs that triggered `decode_with_autorepair`'s retry arm (3) |
 | `holofs_auto_repair_failures_total`          | counter | —                            | auto-repair passes that themselves failed |
 | `holofs_scrub_runs_total`                    | counter | —                            | background scrub ticks completed (`HOLOFS_SCRUB_INTERVAL`) |
 | `holofs_scrub_repairs_total`                 | counter | —                            | objects the scrub repaired *before* any user hit them |
@@ -532,7 +532,7 @@ groups:
     annotations:
       summary: "node {{ $labels.node }} reputation collapsed (audit mismatches)"
 
-  # v0.6.0 — N-series reliability alerts.
+  # N-series reliability alerts.
 
   - alert: HolofsCatalogPersistFailing
     expr: rate(holofs_catalog_persist_failures_total[10m]) > 0

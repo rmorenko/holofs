@@ -1,4 +1,4 @@
-//! Stage 5: rebalancing on topology change.
+//! rebalancing on topology change.
 //!
 //! Simple case: a new node is added to the cluster. After that the HRW
 //! layout of each (channel, layer) changes — some shards must now live on

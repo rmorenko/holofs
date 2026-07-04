@@ -8,7 +8,6 @@
 //! `ssr`-only because it depends on `holofs_model::manifest::Manifest`
 //! which does not compile to WASM.
 //!
-//! Moved out of `lib.rs` in Phase R2a.1.
 
 use serde::{Deserialize, Serialize};
 

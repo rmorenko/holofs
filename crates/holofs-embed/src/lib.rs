@@ -13,7 +13,7 @@
 //! never search or PUT pay zero cost.
 //!
 //! See `/about` in `holofs-web` for the user-facing pitch; the
-//! progressive-search UI on top of this crate is Stage 12.9.
+//! progressive-search UI on top of this crate is .
 
 #![warn(missing_docs)]
 
@@ -34,7 +34,7 @@ pub use model::Embedder;
 /// [`Index`] and a re-index pass.
 pub const EMBED_DIM: usize = 512;
 
-/// Layer band the embedding was computed against. Stage 12.8 only writes
+/// Layer band the embedding was computed against. only writes
 /// `Coarse` (L0-L2 reconstruction at ~10% of the bytes); 12.9 / 13.3 add
 /// the higher bands when the hierarchical index lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

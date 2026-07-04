@@ -155,7 +155,7 @@ pub fn place_layer_zone_aware(
     Ok(out)
 }
 
-/// Stage 15.1 replicated encoding: pick the top-`replication` nodes
+/// replicated encoding: pick the top-`replication` nodes
 /// for a given block by HRW score, in descending order (highest
 /// score first). Zone-aware placement is deliberately NOT applied
 /// here — replication already spreads a block across R nodes and

@@ -1,4 +1,4 @@
-//! `/diff?a=…&b=…` chunk-diff page (Stage 9 + 11.16).
+//! `/diff?a=…&b=…` chunk-diff page.
 //!
 //! Regression guard against a user-reported bug where clicking the
 //! `diff →` action from `/similar/<name>` rendered the title

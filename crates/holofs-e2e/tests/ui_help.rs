@@ -1,4 +1,4 @@
-//! In-app help / docs viewer (Stage 10).
+//! In-app help / docs viewer.
 //!
 //! `/help` is the index, `/help/<slug>` is an individual rendered
 //! markdown page. Routes are leptos server-fn-backed but rendered

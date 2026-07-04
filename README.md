@@ -125,7 +125,7 @@ Supported object kinds and how they degrade:
 | **Audio**    | 1D Haar DWT + 4 priority layers + RLNC    | Muffled (treble disappears first)                 |
 | **Text**     | UTF-8 chunked + 1 layer + systematic RLNC | Holes at lost positions (the rest stays readable) |
 | **Opaque**   | 1 RLNC layer, no DWT                      | All-or-nothing at the K threshold (Reed-Solomon)  |
-| **Directory** *(Stage 9)* | manifest-as-marker, no shards | path-resolution metadata only                     |
+| **Directory** | manifest-as-marker, no shards | path-resolution metadata only                     |
 
 Upload formats are auto-detected:
 
@@ -134,7 +134,7 @@ Upload formats are auto-detected:
 - **Text**: any UTF-8 (txt, md, html, json, css, csv, …)
 - **Anything else**: opaque mode (PDF, DOCX, ZIP, EXE, DB dumps, …)
 
-### Hierarchical catalog (Stage 9)
+### Hierarchical catalog
 
 Catalog paths are slash-separated. Directories are first-class
 manifest-backed objects with explicit `mkdir` / `rmdir` / `rename` and
@@ -327,18 +327,17 @@ for production health/alerting plumbing.
 ## Dependencies
 
 The full transitive set is pinned in `Cargo.lock` and audited via
-`cargo deny`. Notable additions per stage live in
-[`CHANGELOG.md`](./CHANGELOG.md). Headline runtime deps:
+`cargo deny`. Headline runtime deps:
 
-| Crate | Role | First used |
-|---|---|---|
-| `tokio` | async runtime, TCP | Stage 2 |
-| `axum`, `tower-http`, `leptos`, `leptos_axum` | HTTP + SSR | Stage 4 |
-| `ed25519-dalek`, `rand_core` | node identity | Stage 7.3 |
-| `image`, `symphonia` | universal image / audio decoders | Stage 8 |
-| `rustls`, `tokio-rustls`, `rcgen` | wire TLS + embedded CA | Stage 6 |
-| `clap`, `tracing`, `tracing-subscriber` | CLI + structured logs | Stage 5 |
-| `mime_guess`, `png`, `serde`, `serde_json` | I/O glue | various |
+| Crate | Role |
+|---|---|
+| `tokio` | async runtime, TCP |
+| `axum`, `tower-http`, `leptos`, `leptos_axum` | HTTP + SSR |
+| `ed25519-dalek`, `rand_core` | node identity |
+| `image`, `symphonia` | universal image / audio decoders |
+| `rustls`, `tokio-rustls`, `rcgen` | wire TLS + embedded CA |
+| `clap`, `tracing`, `tracing-subscriber` | CLI + structured logs |
+| `mime_guess`, `png`, `serde`, `serde_json` | I/O glue |
 
 Everything else — SHA-256, GF(256), DWT, RLNC, multipart parser, WAV
 encoder, MinHash, Ed25519 challenge-signing — is hand-rolled in

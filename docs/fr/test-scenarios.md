@@ -1,7 +1,6 @@
 # Scénarios de test
 
 
-> ⚠ **Translation may be stale.** This file was last synced before Stage 12-15 (versioning + deletion, HNSW-backed semantic search, /spotlight ROI, streaming /holo, /diff, /similar, auto-repair-on-read, background scrub, typed RPC layer with timeouts + NoLiveNodes panic-fix, per-folder inline upload). The English source under [../](../) is the canon for any new feature; the [Unreleased] block of [../../CHANGELOG.md](../../CHANGELOG.md) lists every delta this translation does not yet cover.
 
 
 Liste de contrôle manuelle de bout en bout pour holofs. Couvre tous les
@@ -19,19 +18,19 @@ les critères de réussite.
 
 1. [Démarrer le cluster](#1-bring-up-the-cluster)
 2. [CRUD d'objets basique](#2-basic-object-crud)
-3. [Catalogue hiérarchique (étape 9)](#3-hierarchical-catalog-stage-9)
-4. [HTTP Range sur GET (étape 11.1)](#4-http-range-on-get-stage-111)
+3. [Catalogue hiérarchique (étape 9)](#3-hierarchical-catalog)
+4. [HTTP Range sur GET (étape 11.1)](#4-http-range-on-get)
 5. [Dégradation holographique](#5-holographic-degradation)
 6. [Recherche perceptuelle et diff](#6-perceptual-search-and-diff)
 7. [Inspect : audit visuel des shards](#7-inspect-visual-shard-audit)
 8. [Holographic Key Escrow](#8-holographic-key-escrow)
-9. [Visualiseur de docs intégré (étape 10)](#9-in-app-docs-viewer-stage-10)
+9. [Visualiseur de docs intégré (étape 10)](#9-in-app-docs-viewer)
 10. [i18n : changement de langue](#10-i18n-language-switching)
 11. [Persistance et redémarrage](#11-persistence-and-restart)
 12. [Cluster multi-processus](#12-multi-process-cluster)
 13. [TLS / mTLS sur le réseau](#13-tls--mtls-on-the-wire)
 14. [Métriques, journaux, SSE](#14-metrics-logs-sse)
-15. [Vérifications de non-régression étape 11](#15-stage-11-regression-checks)
+15. [Vérifications de non-régression étape 11](-regression-checks)
 
 ---
 
@@ -908,12 +907,12 @@ Chacun des stages suivants a son propre scénario de test dans le
 `docs/test-scenarios.md` anglais (sections 18–25) :
 
 - 18 — Quickstart avec l'arbre d'exemples `tools/test-data/`
-- 19 — Métriques par-fichier sur `/health/<name>` (Stage 12.7)
+- 19 — Métriques par-fichier sur `/health/<name>` (7)
 - 20 — Recherche sémantique CLIP + pilules de bande (Stages 12.8/12.9/13.3)
-- 21 — Colonne robust-copy sur `/similar` (Stage 13.0)
-- 22 — Hologramme streaming via `/preview/stream/<name>` (Stage 13.1)
+- 21 — Colonne robust-copy sur `/similar` (0)
+- 22 — Hologramme streaming via `/preview/stream/<name>` (1)
 - 23 — `/api/spotlight.png?mode=<spatial|coeff>` (Stages 13.2 + 14.1)
-- 24 — Versionnement par objet + `/api/restore` (Stage 13.4)
+- 24 — Versionnement par objet + `/api/restore` (4)
 - 25 — `POST /api/gc` pour shards + embeddings (Stages 14.0/3/4)
 
 Les traductions françaises arriveront.  En attendant,

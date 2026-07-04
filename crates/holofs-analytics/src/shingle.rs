@@ -1,4 +1,4 @@
-//! Stage 10b: bottom-k MinHash for fuzzy similar-text search.
+//! bottom-k MinHash for fuzzy similar-text search.
 //!
 //! Take text → 5-grams (byte-wise) → FNV-1a hash → bottom-K minimum values.
 //! The result is a fixed-size fingerprint (`MINHASH_K = 64` u32 = 256 bytes)

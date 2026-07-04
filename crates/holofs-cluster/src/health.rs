@@ -1,4 +1,4 @@
-//! Stage 5: object health dashboard.
+//! object health dashboard.
 //!
 //! Per object we compute:
 //! - **Redundancy margin** per (channel, layer): how many shards are actually

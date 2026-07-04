@@ -1,4 +1,4 @@
-//! Stage 9: codec for audio files.
+//! codec for audio files.
 //!
 //! **Decode**: via the `symphonia` crate we accept any format — WAV, MP3, FLAC,
 //! OGG/Vorbis, AAC, M4A, AIFF. Any sample rate and bit depth is converted to

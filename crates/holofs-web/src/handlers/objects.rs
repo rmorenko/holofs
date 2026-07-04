@@ -3,7 +3,7 @@
 //! - `GET /*path` — [`get_object`] full-quality decode with Range.
 //! - `GET /preview/*path` — [`get_preview`] L0-only preview with Range.
 //! - `GET /preview/stream/*name` — [`preview_stream`]
-//!   multipart/x-mixed-replace layer-by-layer sharpen (Stage 13.1).
+//!   multipart/x-mixed-replace layer-by-layer sharpen.
 //! - `PUT /*path` — [`put_object`] auto-detect + ingest.
 //! - `DELETE /*path` — [`delete_object`].
 //! - `GET /api/shard/:c_l_idx/*name` — [`get_shard_png`] shard-payload
@@ -11,7 +11,6 @@
 //! - `GET /pkg/holofs_bg.wasm` — [`serve_wasm_alias`] cargo-leptos
 //!   filename mismatch shim.
 //!
-//! Moved out of `handlers.rs` in Phase R2b.3.
 
 use std::sync::Arc;
 
@@ -31,14 +30,14 @@ use super::util::{
     render_shard_as_png,
 };
 
-/// v0.7: hard cap on the streaming PUT body size, in bytes. Enforced
+/// hard cap on the streaming PUT body size, in bytes. Enforced
 /// per-request by [`put_object`] while the body streams to a
 /// tempfile. Distinct from `DefaultBodyLimit` (that layer caps the
 /// axum-side buffered body — which we bypass here since the body
 /// goes straight to disk).
 ///
 /// Configurable via `HOLOFS_UPLOAD_MAX_SIZE=<bytes>` — default 1 GiB
-/// (four times the pre-v0.7 in-RAM cap since disk is cheap).
+/// (four times the in-RAM cap since disk is cheap).
 fn upload_max_size() -> u64 {
     std::env::var("HOLOFS_UPLOAD_MAX_SIZE")
         .ok()
@@ -46,7 +45,7 @@ fn upload_max_size() -> u64 {
         .unwrap_or(1024 * 1024 * 1024)
 }
 
-/// v0.7: monotonically-increasing counter for tempfile names inside
+/// monotonically-increasing counter for tempfile names inside
 /// the same process. Combined with `std::process::id()` this avoids
 /// tmp-name collisions under concurrent PUTs to the same target.
 fn upload_tmp_path(gw: &Arc<Gateway>) -> std::path::PathBuf {
@@ -101,7 +100,7 @@ pub async fn get_preview(
     }
 }
 
-/// Stage 13.1: `GET /preview/stream/<name>` — streaming hologram.
+/// `GET /preview/stream/<name>` — streaming hologram.
 ///
 /// Returns a `multipart/x-mixed-replace` body where each part is the
 /// PNG of the object decoded up to a growing layer ceiling
@@ -198,7 +197,7 @@ pub async fn preview_stream(
 /// `PUT /<name>` — auto-detect kind and ingest. Returns the JSON
 /// `IngestResult`.
 ///
-/// **v0.7 streaming path.** Pre-v0.7 this handler took `body: Bytes`,
+/// **streaming path.** Pre-this handler took `body: Bytes`,
 /// which forced axum to buffer the entire request body into memory
 /// before the handler even ran — a 200 MiB upload from a slow
 /// client held 200 MiB of RSS for the duration of the transfer.
@@ -213,7 +212,7 @@ pub async fn preview_stream(
 /// upload duration. The tempfile is deleted on every exit path
 /// (success, error, over-limit).
 ///
-/// **Stage 15.1 knob.** `?encoding=replicated&block_size=64&r=3`
+/// **knob.** `?encoding=replicated&block_size=64&r=3`
 /// routes the request through
 /// [`Gateway::ingest_bytes_replicated`] instead of the default
 /// RLNC path. Image-only — non-image bodies land as 400 (the
@@ -302,7 +301,7 @@ pub async fn put_object(
     // Read the tempfile back into a Vec so the existing codec path
     // (`ingest_bytes(&[u8])`) works unchanged. Full streaming ingest
     // would require an RLNC/DWT codec pass that operates on chunks
-    // — out of scope for v0.7.
+    // — out of scope for .
     let body_bytes = match tokio::fs::read(&tmp_path).await {
         Ok(v) => v,
         Err(e) => {
@@ -348,7 +347,7 @@ pub async fn put_object(
 /// Query params for [`put_object`]. All optional — an empty query
 /// string yields the historical RLNC behaviour verbatim.
 ///
-/// Stage 15.1: `?encoding=replicated&block_size=64&r=3` routes the
+/// `?encoding=replicated&block_size=64&r=3` routes the
 /// image through the per-block Replicated encoder, unlocking the
 /// bandwidth-aware `/spotlight` fetch for that object.
 #[derive(Debug, Default)]

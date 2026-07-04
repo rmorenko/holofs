@@ -1,4 +1,4 @@
-//! v0.7 — at-rest shard encryption for [`crate::Store`].
+//! at-rest shard encryption for [`crate::Store`].
 //!
 //! Every shard file's payload (RLNC coefficients + encoded chunk
 //! bytes) is optionally sealed with AES-256-GCM before hitting disk.
@@ -29,8 +29,8 @@
 //! [`crate::node_service::write_shard_file`] already writes. On
 //! disk the magic distinguishes the two formats:
 //!
-//! - `HOLOFSS1` — plaintext (pre-v0.7). Payload = coeffs || payload.
-//! - `HOLOFSS2` — sealed (v0.7). Layout:
+//! - `HOLOFSS1` — plaintext (pre-). Payload = coeffs || payload.
+//! - `HOLOFSS2` — sealed (). Layout:
 //!   ```text
 //!   [ 8 B magic "HOLOFSS2" ]
 //!   [ 18 B header (object_id, c, l, lens) ]  <-- plaintext, AAD to GCM
@@ -53,7 +53,7 @@
 //!
 //! ## Rotation
 //!
-//! Not supported in v0.7. Rewriting every shard under a new key is
+//! Not supported in . Rewriting every shard under a new key is
 //! a rebuild-scale operation; the recommendation is to spawn a
 //! fresh node with a fresh identity and let the auto-repair pass
 //! rebalance shards onto it.

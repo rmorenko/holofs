@@ -1,4 +1,4 @@
-//! Stage 11: HTTP `Range` header parsing for partial `GET` responses.
+//! HTTP `Range` header parsing for partial `GET` responses.
 //!
 //! The gateway decodes the whole object into RAM (no progressive decode
 //! plumbing yet), but the response can still be a byte slice — that is

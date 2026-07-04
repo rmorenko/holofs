@@ -76,7 +76,7 @@ graph BT
 needs a separate discussion — it almost always means a type or function is
 in the wrong crate.
 
-### 1.1. Gateway module layout (post v0.6.0)
+### 1.1. Gateway module layout (post )
 
 The `holofs-gateway` crate ships one type — `Gateway` — but its
 implementation is split across 18 sibling modules, each owning one
@@ -102,7 +102,7 @@ etc. without touching the module path.
 | `fingerprint` | Perceptual FP + `similar_to`. |
 | `mix` | Wavelet mix + audio band filter. |
 | `diff` | Byte-perfect chunk-diff analyzer. |
-| `spotlight` | Stage 13.2 + 14.1 ROI composites. |
+| `spotlight` | 2 + 14.1 ROI composites. |
 | `inspect` | `/inspect` view-model + shard payload extraction. |
 | `metrics` | `file_metrics` — storage/dedup + originality + layer energy in one pass. |
 | `health` | Cluster stats, admin toggles, `scrub_tick`, `object_health`. |
@@ -114,12 +114,12 @@ concern they extend, not to `http_gateway.rs`. If a new module is
 needed, it goes alongside the others and gets its own `impl Gateway`
 block; nothing in `http_gateway.rs` should grow again.
 
-### 1.2. Reliability layer (v0.6.0 — N1-N8)
+### 1.2. Reliability layer (N1-N8)
 
 The reliability primitives live in `holofs-web` because they
 compose the HTTP surface, not the gateway state. See
 [operations.md § 5.6](operations.md#56-reliability-layer-v060--n1-n8)
-for the env-var reference and [CHANGELOG.md](../CHANGELOG.md#060---2026-07-02)
+for the env-var reference and [CHANGELOG.md](../CHANGELOG.md)
 for the full behaviour matrix.
 
 | Module | Purpose |
@@ -135,12 +135,12 @@ holofs-web one: `Gateway::persist_catalog` returns
 `Result<(), GatewayError::Persist>` and every writer path (`ingest`,
 `dirops`, `versions`) propagates via `?`.
 
-### 1.3. Web crate module layout (post v0.6.1 — Phase R2)
+### 1.3. Web crate module layout (post )
 
 `holofs-web` was originally two god-files:
 `src/lib.rs` (2487 lines — Leptos SSR components + server_fns + filter)
 and `src/handlers.rs` (1857 lines — 25 axum handlers + ~30 helpers).
-Phase R2 split both into single-purpose sibling modules.
+split both into single-purpose sibling modules.
 
 **Post-R2a: `lib.rs` (253 lines)** — module registry + crate-root
 `pub use` re-exports + [`Shell`] / [`App`] / [`RoutedApp`] top-level
@@ -150,7 +150,7 @@ Everything else moved to:
 | Module | Purpose |
 |---|---|
 | `catalog_types` | `CatalogEntry` view-model shared across SSR + hydrate boundaries. `from_manifest` (SSR-only). |
-| `filter` | Stage 11.17 catalog filter — `CatalogFilter`, `apply_filter`, `compile_glob`, `parse_date_to_unix`, `ymd_to_unix` + seven unit tests. SSR-only. |
+| `filter` | 17 catalog filter — `CatalogFilter`, `apply_filter`, `compile_glob`, `parse_date_to_unix`, `ymd_to_unix` + seven unit tests. SSR-only. |
 | `server_fns` | The three `#[server]` functions (`get_catalog`, `list_dir`, `list_dir_page`) + `ListDirPage` + `TreeSort` + `compare_entries`. |
 | `catalog_ui` | Fifteen Leptos components — `CatalogPage`, `CatalogFocusView`, `FilterBar`, `TreeZoomButtons`, `Breadcrumb`, `CatalogTreeView` + eager/lazy variants, `LazyLevel`, `LazyDirNode`, `CatalogTreeBody`, `TreeNodeView`, `MkdirForm`, `UploadForm`, `ObjectCard`. |
 
@@ -422,7 +422,7 @@ a panic → ERROR log + exponential-backoff (1 → 30 s cap) + restart.
 They also honour a shared `tokio_util::sync::CancellationToken` and
 drain cleanly on SIGTERM / SIGINT (see **N1**).
 
-### Auto-repair-on-read + scrub (Stage 14.3 + 15.x)
+### Auto-repair-on-read + scrub
 
 The GET path is wrapped in `decode_with_autorepair`: on
 `ClientError::LayerLost` it bumps `auto_repairs_total`, runs
@@ -453,7 +453,7 @@ orphaned, and PurgeByHash it *just* as a fresh PUT was about to
 land a manifest pointing at that hash — observed as silent shard
 loss on the §25 concurrency scenario.
 
-### RPC timeouts + retries (Stage 15.x)
+### RPC timeouts + retries
 
 Every wire op (`rpc_attempt`) runs inside `tokio::time::timeout`
 with `HOLOFS_RPC_TIMEOUT_MS` as the budget (default 8 s). On
@@ -476,10 +476,10 @@ the OS-level 60-75 s TCP timeout.
 | Node lies "I have it" without storing       | PoR audit (`MissingShard`)   | reputation drops |
 | Whole rack / zone goes dark                 | health monitor + zone-aware  | object stays decodable up to L_{n-1}/L_{n-2} |
 | Gateway crashes mid-PUT                     | client retry                  | shards already on nodes are dedup'd by hash on retry |
-| Gateway crashes mid-DELETE                  | inconsistent: some nodes purged, some not | `POST /api/gc` (Stage 14.0) scoops up orphan shards on demand; the background scrub catches them between runs |
-| Disk corruption on one shard file           | hash verify on read           | shard discarded → margin drops → auto-repair-on-read (Stage 14.3) re-encodes from donors |
-| Network partition between gateway and node  | `HOLOFS_RPC_TIMEOUT_MS` budget (Stage 15.x) | timed-out RPC retries once on a fresh socket; health monitor → exclude → repair if margin drops |
-| All nodes simultaneously dark               | `place_shard` returns `NoLiveNodes` (Stage 15.x) | gateway 503s with `ClusterDegraded` instead of asserting; client retries when nodes return |
+| Gateway crashes mid-DELETE                  | inconsistent: some nodes purged, some not | `POST /api/gc` (0) scoops up orphan shards on demand; the background scrub catches them between runs |
+| Disk corruption on one shard file           | hash verify on read           | shard discarded → margin drops → auto-repair-on-read (3) re-encodes from donors |
+| Network partition between gateway and node  | `HOLOFS_RPC_TIMEOUT_MS` budget (x) | timed-out RPC retries once on a fresh socket; health monitor → exclude → repair if margin drops |
+| All nodes simultaneously dark               | `place_shard` returns `NoLiveNodes` (x) | gateway 503s with `ClusterDegraded` instead of asserting; client retries when nodes return |
 | Whitelist signature invalid                 | gateway startup check        | refuses to start (fail-fast) |
 
 ### What we don't protect against

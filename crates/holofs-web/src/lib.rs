@@ -71,7 +71,7 @@ pub(crate) use server_fns::compare_entries;
 /// Root component. Renders the full HTML document; in Leptos 0.6 the App
 /// owns the `<html>`/`<head>`/`<body>` shell.
 ///
-/// Stage 10 added i18n: the active locale is provided as
+/// added i18n: the active locale is provided as
 /// [`i18n::LocaleSignal`] via Leptos context here so every nested
 /// component can call `t!("key")` without threading it through props.
 /// Locale source is the `?lang=<code>` query string on the current URL;
@@ -92,7 +92,7 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
             <head>
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-                // Stage 11.13 + 11.26: pre-paint bootstrap. Restores the
+                // + 11.26: pre-paint bootstrap. Restores the
                 // user's last theme (data-theme attribute on <html>) and
                 // the persisted tree zoom (--tree-scale CSS var) before
                 // any styles paint — avoids a flash of the wrong size
@@ -105,7 +105,7 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
                     if(s)r.style.setProperty('--tree-scale',s);\
                     }catch(e){}})();"
                 }</script>
-                // Stage 11.27: shared expand / collapse helpers used by
+                // shared expand / collapse helpers used by
                 // the controls bar (global expand-all) and the per-folder
                 // ⊕ / ⊖ buttons. Expand keeps retrying for a beat after
                 // it stops making progress so lazily-mounted children get
@@ -114,7 +114,7 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
                 // that fetch resolves and renders, so a single querySelectorAll
                 // sweep would miss them.
                 <script>{
-                    // Stage 11.27/28: recursive expand. We keep retrying
+                    // /28: recursive expand. We keep retrying
                     // until no new <details> show up for ~5 seconds in
                     // a row — that's the slack the deepest lazy fetches
                     // need to materialise their inner LazyDirNodes
@@ -122,7 +122,7 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
                     // value (8 × 200ms = 1.6s) wasn't enough for chains
                     // 4-5 levels deep on a busy cluster.
                     //
-                    // Stage 11.30 fix (user-reported "клик ⊖ blinks
+                    // fix (user-reported "клик ⊖ blinks
                     // and re-opens"): a pending step() from the user's
                     // earlier ⊕ click would race a later ⊖ click,
                     // find descendants with open=false, and forcibly
@@ -150,13 +150,13 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
                     })();"
                 }</script>
                 <HydrationScripts options/>
-                // Stage 11.28: catalog-tree sticky H-scrollbar
+                // catalog-tree sticky H-scrollbar
                 // initialiser. Lives in the static head so it runs
                 // on every page; if the tree isn't on the current
                 // page the script is a no-op (init finds no
                 // `.tree-scroll` element).
                 <script defer="defer" src="/assets/tree-hscroll.js"></script>
-                // Stage 16: global "something is loading" indicator
+                // global "something is loading" indicator
                 // — patches fetch/XHR/form-submit so 95 % of the
                 // async UI gets a top-of-viewport progress bar
                 // for free. See `assets/busy-indicator.js` for the
@@ -205,15 +205,15 @@ fn RoutedApp() -> impl IntoView {
             <Route path=path!("/") view=catalog_ui::CatalogPage/>
             <Route path=path!("/health") view=health::HealthIndexPage/>
             <Route path=path!("/health/*name") view=health::HealthDetailPage/>
-            // Stage 9: zoom puts the fixed-format slot in front of the
+            // zoom puts the fixed-format slot in front of the
             // wildcard path so leptos_router accepts the trailing splat.
             <Route path=path!("/inspect-zoom/:c_l_idx/*name") view=inspect::InspectZoomPage/>
             <Route path=path!("/inspect/*name") view=inspect::InspectPage/>
             <Route path=path!("/similar/*name") view=similar::SimilarPage/>
-            // Stage 9: two object paths don't fit a single routable
+            // two object paths don't fit a single routable
             // pattern; diff reads them from the query.
             <Route path=path!("/diff") view=diff::DiffPage/>
-            // Stage 12.6: wavelet-mix composer.
+            // wavelet-mix composer.
             <Route path=path!("/mix") view=mix::MixPage/>
             <Route path=path!("/escrow") view=escrow::EscrowPage/>
             <Route path=path!("/help") view=help::HelpIndexPage/>
@@ -228,7 +228,7 @@ fn RoutedApp() -> impl IntoView {
 }
 
 /// Tiny URL encoder — only escapes the characters that break a path
-/// segment in a browser address bar. Stage 9 added `/` to the allow list
+/// segment in a browser address bar. added `/` to the allow list
 /// so multi-segment catalog paths render as `/a/b/c` rather than
 /// `/a%2Fb%2Fc`. Good enough for object paths; the legacy gateway uses
 /// the same encoding style.

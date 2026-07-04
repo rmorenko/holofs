@@ -1,4 +1,4 @@
-//! Stage 4: file interface.
+//! file interface.
 //!
 //! - [`Directory`] — a `name → manifest` catalog. This is a "directory" in
 //!   spec terms: a set of file entries, each with its own manifest (i.e. CID,

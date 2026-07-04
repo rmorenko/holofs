@@ -72,7 +72,7 @@ pub fn haar_inverse(d: &mut [f32], w: usize, h: usize, levels: usize) {
     }
 }
 
-// === 1D Haar DWT (audio, Stage 9) ========================================
+// === 1D Haar DWT (audio, ) ========================================
 
 /// Multi-level 1D Haar DWT. `n` must be a multiple of `2^levels`.
 pub fn haar_forward_1d(d: &mut [f32], levels: usize) {
@@ -127,7 +127,7 @@ pub fn coeff_layer_1d(i: usize, n: usize) -> usize {
     LEVELS
 }
 
-/// Stage 14.1: spatial → DWT inverse map.
+/// spatial → DWT inverse map.
 ///
 /// Given a spatial ROI `(rx, ry, rw, rh)` in pixel coordinates, return
 /// every DWT-plane position whose Haar coefficient has at least one
@@ -205,7 +205,7 @@ pub fn spatial_to_dwt_positions(
     out
 }
 
-/// Stage 15.0: map a spatial ROI to the per-layer block indices that
+/// map a spatial ROI to the per-layer block indices that
 /// cover it. `layer_positions[l]` is the list of DWT-plane positions
 /// (flat `y*w + x`) packed into layer `l`'s shards in PUT order; this
 /// helper returns, per layer, the *indices into that vector* whose
@@ -218,7 +218,7 @@ pub fn spatial_to_dwt_positions(
 ///
 /// Used by the gateway when an object is `ObjectEncoding::Replicated`
 /// to fetch only the shards covering the ROI, finally delivering the
-/// bandwidth-aware spotlight the Stage 14.1 reverse-map primitive
+/// bandwidth-aware spotlight the reverse-map primitive
 /// promised but couldn't reach with RLNC.
 #[must_use]
 pub fn roi_to_block_ids(
@@ -256,7 +256,7 @@ pub fn roi_to_block_ids(
     out
 }
 
-/// Stage 15.1 companion to [`roi_to_block_ids`]. Same ROI-touched
+/// companion to [`roi_to_block_ids`]. Same ROI-touched
 /// primitive, but the output is *block* ids instead of raw
 /// position-indices. A block of size `block_size` covers the
 /// consecutive slice `layer_positions[l][b*bs .. (b+1)*bs]` of a
@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(coeff_layer(llw, llh, BW, BH), 1);
     }
 
-    // === 1D Haar (Stage 9, audio) ========================================
+    // === 1D Haar ========================================
 
     #[test]
     fn haar_1d_roundtrip() {
@@ -505,7 +505,6 @@ mod tests {
         );
     }
 
-    // === Stage 14.1: spatial → DWT inverse map ============================
 
     #[test]
     fn spatial_to_dwt_empty_roi() {
@@ -617,7 +616,7 @@ mod tests {
     fn roi_to_block_ids_with_stride_corner_is_much_smaller() {
         // A 1×1 corner ROI at block_size=64 must yield strictly
         // fewer blocks than coefficient-level ids for the same ROI
-        // — that's the bandwidth win Stage 15.1 promises.
+        // — that's the bandwidth win promises.
         let (w, h) = (TW, TH);
         let mut positions: Vec<Vec<u32>> = vec![Vec::new(); NLAYERS];
         for y in 0..h {

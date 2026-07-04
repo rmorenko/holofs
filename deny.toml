@@ -12,7 +12,7 @@ ignore = [
     # `paste` and `proc-macro-error2` are still pulled in by `leptos 0.7.x`
     # (via `either_of` and `leptos_macro` respectively). Upstream tracking:
     # https://github.com/leptos-rs/leptos/issues for the eventual drop.
-    # Stage 8's Leptos 0.7 upgrade already shed `proc-macro-error 1.x` and
+    # Leptos 0.7 upgrade already shed `proc-macro-error 1.x` and
     # `rustls-pemfile`, so only these two remain.
     "RUSTSEC-2024-0436", # paste — unmaintained
     "RUSTSEC-2026-0173", # proc-macro-error2 — unmaintained

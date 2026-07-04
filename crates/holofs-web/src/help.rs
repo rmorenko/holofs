@@ -1,4 +1,4 @@
-//! Stage 10: in-app documentation viewer.
+//! in-app documentation viewer.
 //!
 //! Renders the project's markdown docs (everything under `docs/`) into the
 //! UI under `/help`. Mermaid diagrams and KaTeX math get post-processed
@@ -147,8 +147,7 @@ pub fn HelpDocPage() -> impl IntoView {
 
 /// Shared layout: topbar nav + locale-aware sidebar + rendered doc body.
 /// The Mermaid / KaTeX client-side scripts are loaded here so other pages
-/// don't pay their weight. Locale comes from `?lang=` query (Stage 10
-/// scaffold; the i18n layer in 10.2 supersedes this for UI strings).
+/// don't pay their weight. Locale comes from `?lang=` query (/// scaffold; the i18n layer in 10.2 supersedes this for UI strings).
 #[component]
 fn HelpLayout(slug: String) -> impl IntoView {
     let query = leptos_router::hooks::use_query_map();

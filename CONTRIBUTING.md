@@ -139,7 +139,7 @@ New `Gateway` methods belong to their concern's sibling module
 `docs/architecture.md § 1.1` for the map. Nothing should grow
 back into `http_gateway.rs`.
 
-### Where new UI code and handlers go (post v0.6.1 — Phase R2)
+### Where new UI code and handlers go 
 
 `holofs-web` was similarly decomposed. Nothing new should grow
 back into `lib.rs` or `handlers.rs` — both are now pure

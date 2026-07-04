@@ -199,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // === Progressive death + repair =======================================
     // The narrow L3 layer has n=18 with K=16 — mass simultaneous death
     // quickly drops the rank below K and repair loses donors. We follow
-    // Stage 1: kill one → repair → kill next.
+    // kill one → repair → kill next.
     let kill_count = (N_NODES * 50) / 100;
     let live_all: Vec<usize> = (0..N_NODES).collect();
     let mut total_traffic = 0u64;

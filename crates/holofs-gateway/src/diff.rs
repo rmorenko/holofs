@@ -2,14 +2,13 @@
 //!
 //! Two systematic chunks are marked common only when their shard
 //! hashes match — i.e. the underlying source bytes are identical.
-//! Stage 11.7-11.8 experimented with perceptual variants (mean-based,
+//! -11.8 experimented with perceptual variants (mean-based,
 //! then per-coefficient L1) to make blurred copies "look closer",
 //! but every threshold had pathological neighbours: desaturation
 //! that preserves luminance scored higher than blur; mandala
 //! outscored real photos. Perceptual ranking is what
 //! [`Gateway::similar_to`] is for; `/diff` stays the dedup tool.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.10.
 
 use crate::error::GatewayError;
 use crate::Gateway;

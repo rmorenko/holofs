@@ -13,7 +13,6 @@
 //! The form-friendly variants read a `return_to` field to pick the
 //! post-success redirect target — see [`super::util::pick_return_to`].
 //!
-//! Moved out of `handlers.rs` in Phase R2b.4.
 
 use std::sync::Arc;
 
@@ -97,7 +96,7 @@ pub async fn rmdir(
 /// `POST /api/rm` (form-urlencoded `path=`) — form-friendly variant of
 /// `DELETE /<name>` for the ✕ button on file rows. Redirects to
 /// `return_to` (or the parent dir) on success. Mirrors [`rmdir_form`]
-/// but resolves to `remove_object` instead of `rmdir`. Stage 11.17.
+/// but resolves to `remove_object` instead of `rmdir`. .
 pub async fn rm_form(
     Extension(gw): Extension<Arc<Gateway>>,
     body: Bytes,

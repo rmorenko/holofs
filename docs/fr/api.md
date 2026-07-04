@@ -1,7 +1,6 @@
 # Référence de l'API
 
 
-> ⚠ **Translation may be stale.** This file was last synced before Stage 12-15 (versioning + deletion, HNSW-backed semantic search, /spotlight ROI, streaming /holo, /diff, /similar, auto-repair-on-read, background scrub, typed RPC layer with timeouts + NoLiveNodes panic-fix, per-folder inline upload). The English source under [../](../) is the canon for any new feature; the [Unreleased] block of [../../CHANGELOG.md](../../CHANGELOG.md) lists every delta this translation does not yet cover.
 
 
 Trois interfaces externes : **gateway HTTP**, **protocole filaire du node**, et
@@ -580,7 +579,7 @@ décoder, transformer, ré-encoder) :
 
 ## 7. Stages 12.6 – 15.0 — Référence en anglais
 
-Depuis le Stage 12.5, neuf stages supplémentaires ont été
+Depuis le 5, neuf stages supplémentaires ont été
 livrés : per-file metrics (12.7), page `/about` (12.7), recherche
 sémantique CLIP + UI `/search` (12.8/12.9), colonne robust-copy
 (13.0), hologramme streaming (13.1), spotlight ROI (13.2 + 14.1),

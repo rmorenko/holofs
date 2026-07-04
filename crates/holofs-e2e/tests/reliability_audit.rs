@@ -1,4 +1,4 @@
-//! Regression guard for Stage 14.x audit reputation-cascade
+//! Regression guard for .x audit reputation-cascade
 //! (`audit: stop penalising MissingShard …`, commit `a28a83a`).
 //!
 //! Before the fix the auditor treated `MissingShard` as a negative

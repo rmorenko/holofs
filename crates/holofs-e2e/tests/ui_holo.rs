@@ -1,6 +1,6 @@
-//! `/holo/<name>` streaming hologram (Stage 13.1).
+//! `/holo/<name>` streaming hologram.
 //!
-//! The Stage 13.1 feature sends a `multipart/x-mixed-replace` stream
+//! The feature sends a `multipart/x-mixed-replace` stream
 //! of progressively-detailed PNG frames; the browser swaps the
 //! `<img>` payload each time a frame arrives. There is no JS in the
 //! page, so a pure DOM assertion can't tell us that the rendering

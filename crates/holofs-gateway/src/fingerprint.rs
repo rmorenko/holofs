@@ -16,7 +16,6 @@
 //! methods call — one place to change how L0 shards get gathered
 //! and verified.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.15.
 
 use holofs_model::manifest::{Manifest, ObjectKind};
 
@@ -51,7 +50,7 @@ impl Gateway {
             return holofs_analytics::fingerprint::perceptual_fingerprint(manifest, &[]);
         }
         let live = self.effective_live().await;
-        // Stage 11.6: gather L0 for every channel (up to 3 — fingerprint
+        // gather L0 for every channel (up to 3 — fingerprint
         // covers RGB). Per-channel means power the new 45-bit dHash; a
         // single-channel fingerprint clustered too many unrelated images
         // at 95%+ similarity. The per-(name, channel, layer) cache (Stage
@@ -192,7 +191,7 @@ impl Gateway {
                 } else {
                     0.0
                 };
-                // Stage 13.0: compute low / high band overlaps so the
+                // compute low / high band overlaps so the
                 // UI can surface a "robust copy?" warning. Split point
                 // is the midpoint of `nlayers` — for `nlayers=8` that's
                 // L0..=L3 vs L4..=L7. For files with `nlayers < 2`

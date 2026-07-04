@@ -56,12 +56,12 @@
 # Per-object version history cap. `0` = unbounded.
 # versions_keep_last = 3
 
-# v0.7: streaming-PUT body cap in bytes. Body streams to a tempfile
+# streaming-PUT body cap in bytes. Body streams to a tempfile
 # under `<storage>/uploads/` — never buffered in RAM — and the
 # handler enforces this cap while streaming. Default 1 GiB.
 # upload_max_size = 1073741824
 
-# v0.7: per-client-IP rate limit. Token bucket refilled at
+# per-client-IP rate limit. Token bucket refilled at
 # `rate_limit_rps_per_ip` requests/second, capped at `rate_limit_burst`.
 # `0` disables the layer. Only applies to MEDIUM (decode/PUT/dir ops)
 # and LONG (search/spotlight/GC) buckets — SHORT bucket + streaming
@@ -90,10 +90,10 @@
 # token_file = "/etc/holofs/mcp.token"
 
 [security]
-# v0.7: at-rest shard encryption. When true, every shard file written
+# at-rest shard encryption. When true, every shard file written
 # to disk is sealed with AES-256-GCM. The key is derived from the
 # node's identity seed (identity.key) via HKDF-SHA256 — no new secret
-# to manage. Reads accept both the pre-v0.7 plaintext format
+# to manage. Reads accept both the pre-plaintext format
 # (HOLOFSS1) and the sealed format (HOLOFSS2), so enabling on an
 # existing store just seals *new* writes; a full rewrite is out of
 # scope. Env var: HOLOFS_AT_REST_ENC.

@@ -1,4 +1,4 @@
-//! Stage 14.2: in-memory ANN index over the on-disk
+//! in-memory ANN index over the on-disk
 //! [`Index`](crate::Index) records.
 //!
 //! Holds every embedding for the catalog in RAM, grouped by

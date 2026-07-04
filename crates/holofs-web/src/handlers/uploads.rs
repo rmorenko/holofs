@@ -9,7 +9,6 @@
 //!   drag-zone-style form invokes this so users can add files
 //!   without resorting to `curl -X PUT`.
 //!
-//! Moved out of `handlers.rs` in Phase R2b.5.
 
 use std::sync::Arc;
 

@@ -1,4 +1,4 @@
-//! v0.7 — TOML configuration file support.
+//! TOML configuration file support.
 //!
 //! Historically holofs-web took every knob via CLI flag or `HOLOFS_*`
 //! env var. That's fine for one-off runs but noisy in production
@@ -108,9 +108,9 @@ pub struct ReliabilitySection {
     pub audit_interval_secs: Option<u64>,
     pub rpc_timeout_ms: Option<u64>,
     pub versions_keep_last: Option<usize>,
-    /// v0.7 streaming-PUT max body size, in bytes.
+    /// streaming-PUT max body size, in bytes.
     pub upload_max_size: Option<u64>,
-    /// v0.7 per-IP rate-limit refill rate. `0` = disabled.
+    /// per-IP rate-limit refill rate. `0` = disabled.
     pub rate_limit_rps_per_ip: Option<f64>,
     pub rate_limit_burst: Option<f64>,
     pub rate_limit_idle_secs: Option<u64>,

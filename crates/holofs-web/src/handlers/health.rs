@@ -4,13 +4,12 @@
 //!
 //! - `GET /api/stats` — [`api_stats`] JSON snapshot.
 //! - `GET /metrics` — [`metrics`] Prometheus text exposition.
-//! - `POST /api/gc` — [`gc_orphans`] Stage 14.0 orphan-shard sweep.
+//! - `POST /api/gc` — [`gc_orphans`] orphan-shard sweep.
 //! - `POST /admin/node` — [`toggle_node`] admin-kill flip (N6-gated
 //!   by the middleware layer in `main.rs`).
 //! - `GET /api/health/events` — [`health_events`] Server-Sent Events
 //!   stream of [`crate::health::HealthSnapshot`] every 3 s.
 //!
-//! Moved out of `handlers.rs` in Phase R2b.5.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -233,7 +232,7 @@ pub async fn metrics(Extension(gw): Extension<Arc<Gateway>>) -> Response {
         .into_response()
 }
 
-/// Stage 14.0: `POST /api/gc` — sweep orphan shards from every live
+/// `POST /api/gc` — sweep orphan shards from every live
 /// cluster node. Returns the per-node breakdown as JSON.
 pub async fn gc_orphans(Extension(gw): Extension<Arc<Gateway>>) -> Response {
     match gw.gc_orphaned_shards().await {

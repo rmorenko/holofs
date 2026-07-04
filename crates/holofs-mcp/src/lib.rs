@@ -1,6 +1,6 @@
 //! MCP (Model Context Protocol) server endpoint for holofs.
 //!
-//! Stage 12.0 exposes a small set of tools over the Streamable HTTP
+//! exposes a small set of tools over the Streamable HTTP
 //! transport so MCP clients (Claude Desktop, Claude Code, etc.) can
 //! talk to a running holofs cluster without screen scraping the web
 //! UI. The server is mounted inside the existing axum router by
@@ -254,7 +254,7 @@ impl ServerHandler for HolofsHandler {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.protocol_version = ProtocolVersion::default();
-        // Stage 12.3: also advertise `resources/` — every catalog entry
+        // also advertise `resources/` — every catalog entry
         // is addressable via a `holofs:///path` URI and can be read as
         // text (for text-kind) or as a base64 blob (image / audio /
         // opaque). Directories are listed but not readable; the client

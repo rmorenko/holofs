@@ -1,7 +1,6 @@
 # Сценарии тестирования
 
 
-> ⚠ **Translation may be stale.** This file was last synced before Stage 12-15 (versioning + deletion, HNSW-backed semantic search, /spotlight ROI, streaming /holo, /diff, /similar, auto-repair-on-read, background scrub, typed RPC layer with timeouts + NoLiveNodes panic-fix, per-folder inline upload). The English source under [../](../) is the canon for any new feature; the [Unreleased] block of [../../CHANGELOG.md](../../CHANGELOG.md) lists every delta this translation does not yet cover.
 
 
 Ручной чек-лист для проверки holofs end-to-end. Покрывает каждую крупную
@@ -17,19 +16,19 @@
 
 1. [Подготовка кластера](#1-подготовка-кластера)
 2. [Базовый CRUD объектов](#2-базовый-crud-объектов)
-3. [Иерархический каталог (Stage 9)](#3-иерархический-каталог-stage-9)
-4. [HTTP Range на GET (Stage 11.1)](#4-http-range-на-get-stage-111)
+3. [Иерархический каталог](#3-иерархический-каталог)
+4. [HTTP Range на GET (1)](#4-http-range-на-get)
 5. [Голографическая деградация](#5-голографическая-деградация)
 6. [Perceptual-поиск и diff](#6-perceptual-поиск-и-diff)
 7. [Inspect: визуальный осмотр шардов](#7-inspect-визуальный-осмотр-шардов)
 8. [Holographic Key Escrow](#8-holographic-key-escrow)
-9. [Документация в браузере (Stage 10)](#9-документация-в-браузере-stage-10)
+9. [Документация в браузере](#9-документация-в-браузере)
 10. [i18n: переключение языков](#10-i18n-переключение-языков)
 11. [Persistence и рестарт](#11-persistence-и-рестарт)
 12. [Multi-process кластер](#12-multi-process-кластер)
 13. [TLS / mTLS на проводе](#13-tls--mtls-на-проводе)
 14. [Метрики, логи, SSE](#14-метрики-логи-sse)
-15. [Регрессионные чек-пункты Stage 11](#15-регрессионные-чек-пункты-stage-11)
+15. [Регрессионные чек-пункты](#15-регрессионные-чек-пункты)
 
 ---
 
@@ -130,7 +129,7 @@ curl -s http://127.0.0.1:8787/api/stats | python3 -m json.tool | grep dedup
 
 ---
 
-## 3. Иерархический каталог (Stage 9)
+## 3. Иерархический каталог
 
 **Цель:** проверить mkdir, navigate по подпапкам, корректные ошибки при
 переполнении, rename, rmdir.
@@ -179,7 +178,7 @@ img.png должна быть кликабельной, форма «+ folder» 
 
 ---
 
-## 4. HTTP Range на GET (Stage 11.1)
+## 4. HTTP Range на GET
 
 **Цель:** убедиться, что partial GET работает корректно — это нужно для
 audio scrubbing, resume больших скачиваний, будущего video seek.
@@ -302,8 +301,7 @@ UI рисует зелёные клетки (одинаковые chunks) и к�
 ## 7. Inspect: визуальный осмотр шардов
 
 **Цель:** убедиться, что grid отображает все 444 шарда (3 канала × 4
-слоя × 26..64 шардов) без пропусков. Регрессионный чек для Stage 11.2.
-
+слоя × 26..64 шардов) без пропусков. Регрессионный чек для 
 1. Открыть `http://127.0.0.1:8787/inspect/mandala.png`.
 2. Прокрутить — для каждого канала (R, G, B) должно быть 4 секции
    (layers 0..3), каждая с правильным количеством миниатюр:
@@ -312,7 +310,7 @@ UI рисует зелёные клетки (одинаковые chunks) и к�
    - L2 — 26 шардов (16 + 10)
    - L3 — 18 шардов (16 + 2)
 3. **Все 444 миниатюры должны нарисоваться** (не должно быть «битых»
-   `<img>` с alt-текстом). До Stage 11.2 под нагрузкой ~8% выпадали.
+   `<img>` с alt-текстом). До 2 под нагрузкой ~8% выпадали.
 4. Кликни любую миниатюру → попадёшь на zoom-страницу
    `/inspect-zoom/<c_l_idx>/<name>` с большой PNG, hex coeffs, payload.
 
@@ -369,7 +367,7 @@ cmp /tmp/secret.txt /tmp/recovered.txt && echo "escrow roundtrip OK"
 
 ---
 
-## 9. Документация в браузере (Stage 10)
+## 9. Документация в браузере
 
 **Цель:** проверить in-app docs viewer, рендер Mermaid и KaTeX.
 
@@ -568,8 +566,7 @@ curl -N http://127.0.0.1:8787/api/health/events
 
 ---
 
-## 15. Регрессионные чек-пункты Stage 11
-
+## 15. Регрессионные чек-пункты 
 Эти три проверки целятся в недавно зафикшенные проблемы — стоит пройти
 после каждого изменения в гейтвее или ingest-пайплайне.
 
@@ -592,7 +589,7 @@ curl -i -H "Range: bytes=0-99" http://127.0.0.1:8787/photo.png \
 grep -E "/api/shard/" /tmp/holofs-cluster.log | grep -v "status=200" | wc -l
 ```
 
-Должно быть **0**. До Stage 11.2 здесь было ~41.
+Должно быть **0**. До 2 здесь было ~41.
 
 ### 11.3 Большие multipart-аплоады
 
@@ -612,9 +609,9 @@ curl -i -X PUT --data-binary @/tmp/30mb.bin \
 
 ---
 
-## 16. Регрессионные чек-пункты Stage 11.16 – 12
+## 16. Регрессионные чек-пункты – 12
 
-### 16.1 Scope похожих (Stage 11.16)
+### 16.1 Scope похожих
 
 Три пилюли scope сверху `/similar/<name>`: **все файлы** / **текущая
 папка** / **текущая папка (рекурсивно)**.
@@ -636,7 +633,7 @@ curl -s 'http://127.0.0.1:8787/similar/check.txt?scope=tree' \
 Scope «липкий» — клик по соседу перебрасывает на его `/similar` с
 сохранением `?scope=` (и `?lang=`).
 
-### 16.2 Фильтр каталога + удаление файлов (Stage 11.17)
+### 16.2 Фильтр каталога + удаление файлов
 
 Server-side фильтр на `/` и `/?p=<prefix>` через три query-параметра:
 `q` (glob по имени, `*` = подстановка, по basename, без учёта регистра),
@@ -670,7 +667,7 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 
 В строке файла дерева рисуется маленькая кнопка `✕` с подтверждением.
 
-### 16.3 Локализованный date picker (Stage 11.18)
+### 16.3 Локализованный date picker
 
 Нативный `<input type="date">` фильтра несёт атрибут `lang` равный
 локали страницы; в Chromium-браузерах его подменяет оверлей flatpickr
@@ -681,7 +678,7 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 русски. Переключиться на `/?lang=fr`, повторить — по французски. Само
 `value=…` всё равно идёт как `YYYY-MM-DD`, независимо от локали.
 
-### 16.4 Smoke-тест MCP-сервера (Stage 12)
+### 16.4 Smoke-тест MCP-сервера
 
 Запустить кластер с токеном, чтобы включить write-инструменты:
 
@@ -753,11 +750,11 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
   | grep -oE '"uri":"holofs:///[^"]+"' | head -5
 ```
 
-Подключение в Claude Code — см. [api.md §5](./api.md#5-mcp-сервер-stage-12).
+Подключение в Claude Code — см. [api.md §5](./api.md#5-mcp-сервер).
 
 ---
 
-## 17. Wavelet-операции (Stage 12.5)
+## 17. Wavelet-операции
 
 Обе операции работают через тот же MCP-эндпоинт (`/mcp`) — оставайся
 в той же сессии что и в §16.4. Перед стартом кластера задай
@@ -909,14 +906,14 @@ tools/test-data/upload-samples.sh
 tools/test-data/run-tests.sh
 ```
 
-Покрывает Stage 9 (каталог), 12.6 (mix), 12.7 (metrics + /about),
+Покрывает (каталог), 12.6 (mix), 12.7 (metrics + /about),
 12.8/9 (search), 13.0 (robust-copy), 13.1 (streaming),
 13.2/14.1 (spotlight modes), 13.4 (versions), 14.0/3 (GC).
 Финал: `N / M passed`, exit-code 0 только если всё зелёное.
 
 ---
 
-## 19. Per-file metrics (Stage 12.7)
+## 19. Per-file metrics
 
 `GET /health/<name>` показывает блок "Unique metrics": dedup,
 originality (overall + по слоям), layer-energy distribution,
@@ -943,7 +940,7 @@ curl -s -X POST -d 'name=photos/landscapes/mountain.png' \
 `shared_total`) с ненулевым `shared_per_layer[0]` — LL-band
 (layer-0) систематические шарды переживают локализованный угловой
 watermark и совпадают побайтно. У остальных файлов
-`shared_per_layer[0] == 0`. Это и есть пейлоад для Stage 13.0
+`shared_per_layer[0] == 0`. Это и есть пейлоад для 0
 robust-copy. Про caveat на формулу score см. §21.
 
 ---
@@ -982,7 +979,7 @@ band-бейджем (синий = coarse, фиолетовый = mid, розов
 
 ---
 
-## 21. Robust-copy (Stage 13.0)
+## 21. Robust-copy
 
 Цель: проверить детект "structure matches, detail differs"
 (водяные знаки / перекодировки / лёгкая ретушь).
@@ -1012,12 +1009,11 @@ gateway upscale-ит 256×256 PNG до своего рабочего 512×512 п
 
 ---
 
-## 22. Streaming hologram (Stage 13.1)
+## 22. Streaming hologram
 
 ```sh
 curl -sI 'http://127.0.0.1:8787/preview/stream/photos/abstract/mandala-a.png'
-# Content-Type: multipart/x-mixed-replace; boundary=hololayer-2026-06-25
-```
+# Content-Type: multipart/x-mixed-replace; boundary=hololayer-```
 
 В браузере: `/holo/photos/abstract/mandala-a.png`, **force-reload**
 (Cmd+Shift+R) чтобы обойти PNG-кэш. Картинка должна заметно
@@ -1042,7 +1038,7 @@ md5 /tmp/spot-*.png   # хеши должны отличаться
 
 Headers: `x-holofs-roi-px`, `x-holofs-decode-ms`,
 `x-holofs-bytes-downloaded`. Последний станет реальной экономией
-трафика после Stage 15.1 (per-block encoding для replicated
+трафика после 1 (per-block encoding для replicated
 объектов).
 
 UI: `/spotlight?a=<image>` — пиллы выбора mode + preset-кнопки +
@@ -1050,7 +1046,7 @@ custom-coordinates форма.
 
 ---
 
-## 24. Per-object versioning (Stage 13.4)
+## 24. Per-object versioning
 
 **Prereq:** `--enable-versions`. Storage растёт пока флаг включён;
 `POST /api/gc` чистит.

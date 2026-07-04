@@ -2,17 +2,15 @@
 //!
 //! - `GET /api/fingerprint/*path` — [`api_fingerprint`] JSON
 //!   perceptual-hash lookup.
-//! - `GET /api/mix.png?a=&b=&split=` — [`mix_preview`] Stage 12.6
-//!   wavelet-mix hybrid PNG (streamed as the `<img src>` on the
+//! - `GET /api/mix.png?a=&b=&split=` — [`mix_preview`] //!   wavelet-mix hybrid PNG (streamed as the `<img src>` on the
 //!   `/mix` page).
 //! - `POST /api/mix-save` — [`mix_save`] build the hybrid and
 //!   ingest it under `dest`, redirecting to the catalog page with
 //!   the destination's parent opened.
 //! - `GET /api/spotlight.png?name=&x=&y=&w=&h=&mode=` —
-//!   [`spotlight_png`] Stage 13.2 (spatial) / Stage 14.1 (coeff)
+//!   [`spotlight_png`] (spatial) / (coeff)
 //!   composite render.
 //!
-//! Moved out of `handlers.rs` in Phase R2b.5.
 
 use std::sync::Arc;
 
@@ -40,7 +38,7 @@ pub async fn api_fingerprint(
     }
 }
 
-/// Stage 12.6: `GET /api/mix.png?a=&b=&split=` — stream the
+/// `GET /api/mix.png?a=&b=&split=` — stream the
 /// wavelet-mix hybrid PNG. Used by the `/mix` page as the preview
 /// `<img src>`; the gateway does the actual decode + IDWT + PNG
 /// encode. Returns `400` with a plain-text body on parameter or
@@ -76,7 +74,7 @@ pub async fn mix_preview(
     }
 }
 
-/// Stage 12.6: `POST /api/mix-save` (form: a, b, split, dest) —
+/// `POST /api/mix-save` (form: a, b, split, dest) —
 /// builds the hybrid and ingests it into the catalog at `dest`,
 /// then 303-redirects to the catalog with `?open=<parent>` so the
 /// new entry is visible.
@@ -125,12 +123,11 @@ pub async fn mix_save(
     redirect_to(&target)
 }
 
-/// Stage 13.2: `GET /api/spotlight.png?name=...&x=N&y=N&w=N&h=N` —
+/// `GET /api/spotlight.png?name=...&x=N&y=N&w=N&h=N` —
 /// composited PNG (L0 blur outside the ROI, full resolution inside).
 /// All ROI params are floats in `[0, 1]` normalised against the
-/// image width / height. `?mode=coeff` selects the Stage 14.1
-/// Haar-coefficient-mask variant; default (`spatial` / anything
-/// else) keeps the Stage 13.2 two-pass spatial composite.
+/// image width / height. `?mode=coeff` selects the /// Haar-coefficient-mask variant; default (`spatial` / anything
+/// else) keeps the two-pass spatial composite.
 pub async fn spotlight_png(
     RawQuery(raw): RawQuery,
     Extension(gw): Extension<Arc<Gateway>>,

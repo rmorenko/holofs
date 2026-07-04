@@ -1,4 +1,4 @@
-// Stage 11.28: sticky horizontal scrollbar for the catalog tree.
+// sticky horizontal scrollbar for the catalog tree.
 //
 // The tree lives in a `.tree-scroll` viewport with bounded
 // height; its native horizontal scrollbar is hidden via CSS. A

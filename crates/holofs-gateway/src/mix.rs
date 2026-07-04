@@ -1,4 +1,4 @@
-//! Stage 12.5 — coefficient-space compositions.
+//! coefficient-space compositions.
 //!
 //! Two operations that consume decoded DWT layers and re-render:
 //!
@@ -11,7 +11,6 @@
 //!   caller can emit lowpass / highpass / single-band cuts without
 //!   rebuilding the file.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.9.
 
 use std::time::Instant;
 
@@ -60,7 +59,7 @@ pub struct FilteredAudio {
 }
 
 impl Gateway {
-    /// Stage 12.5: wavelet mix. Build a hybrid PNG where DWT layers
+    /// wavelet mix. Build a hybrid PNG where DWT layers
     /// `0..=split` of every channel come from `name_a` and layers
     /// `>split` from `name_b`. Both objects must be images that share
     /// width / height / channels / k / nlayers / per-layer sym_len and
@@ -115,7 +114,7 @@ impl Gateway {
         })
     }
 
-    /// Stage 12.5: audio layer filter. Decode the object but include
+    /// audio layer filter. Decode the object but include
     /// coefficients only from layers whose `keep[layer]` bit is set —
     /// missing layers contribute zero before the inverse Haar. Each
     /// layer roughly maps to a frequency band (L0 = bass envelope, the

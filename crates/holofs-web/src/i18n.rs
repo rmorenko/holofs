@@ -1,4 +1,4 @@
-//! Stage 10: UI internationalisation.
+//! UI internationalisation.
 //!
 //! Lightweight hand-rolled i18n with a single in-memory translation map.
 //! Translations live in [`TRANSLATIONS`] (one row per English key, one
@@ -131,7 +131,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("catalog.back_to_tree",
         ["back to tree", "к дереву", "zurück zur Baumansicht",
          "retour à l'arbre", "volver al árbol"]),
-    // Stage 11.21 / 11.22 — lazy tree
+    // / 11.22 — lazy tree
     ("tree.load_more",
         ["load more", "загрузить ещё", "mehr laden",
          "charger plus", "cargar más"]),
@@ -240,7 +240,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("card.action.similar",
         ["similar", "похожие", "ähnlich", "similaires", "similares"]),
 
-    // ---- catalog filter bar (Stage 11.17) -------------------------------
+    // ---- catalog filter bar -------------------------------
     ("filter.name_label",
         ["filter by name", "фильтр по имени", "Filter nach Name",
          "filtre par nom", "filtro por nombre"]),
@@ -265,7 +265,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("file.delete",
         ["delete", "удалить", "löschen", "supprimer", "eliminar"]),
 
-    // ---- similar page: scope picker (Stage 11.16) ----------------------
+    // ---- similar page: scope picker ----------------------
     ("similar.scope.label",
         ["scope:", "область:", "Bereich:", "portée :", "ámbito:"]),
     ("similar.scope.all",
@@ -297,7 +297,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("escrow.btn.recover",
         ["recover", "восстановить", "wiederherstellen", "récupérer", "recuperar"]),
 
-    // ---- escrow page intro + form labels (Stage 11.19b) ----------------
+    // ---- escrow page intro + form labels ----------------
     ("escrow.intro_p1",
         ["Split any file into n shares so that any k of them can reconstruct \
           it (Shamir-style secret sharing on RLNC). Distribute the shares \
@@ -376,7 +376,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
          "{n} Dateien gewählt", "{n} fichiers choisis",
          "{n} archivos elegidos"]),
 
-    // ---- escrow split-result page (Stage 11.19b) ------------------------
+    // ---- escrow split-result page ------------------------
     ("escrow.result.title",
         ["file split into {n} shares · need {k} to recover",
          "файл разделён на {n} долей · нужно {k} для восстановления",
@@ -434,7 +434,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
         ["not found", "не найдено", "nicht gefunden",
          "introuvable", "no encontrado"]),
 
-    // ---- /mix page (Stage 12.6) -----------------------------------------
+    // ---- /mix page -----------------------------------------
     ("mix.link_label",
         ["mix →", "микс →", "Mix →", "mix →", "mix →"]),
     ("mix.title_prefix",
@@ -502,7 +502,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("generic.back_to_catalog",
         ["catalog", "каталог", "Katalog", "catalogue", "catálogo"]),
 
-    // ---- /similar page (Stage 11.19) ------------------------------------
+    // ---- /similar page ------------------------------------
     ("similar.title_prefix",
         ["find similar to", "похожие на", "ähnlich zu",
          "similaires à", "similares a"]),
@@ -640,7 +640,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
         ["← all shards", "← все шарды", "← alle Shards",
          "← tous les shards", "← todos los fragmentos"]),
 
-    // ---- /diff page (Stage 11.19) ---------------------------------------
+    // ---- /diff page ---------------------------------------
     ("diff.loading",
         ["loading diff…", "загрузка diff…", "Lade Diff…",
          "chargement du diff…", "cargando diff…"]),
@@ -776,7 +776,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
         ["← similar to a", "← похожие на a", "← ähnlich zu a",
          "← similaires à a", "← similares a a"]),
 
-    // ---- /health page (Stage 11.19) -------------------------------------
+    // ---- /health page -------------------------------------
     ("health.loading",
         ["loading health…", "загрузка состояния…", "Lade Status…",
          "chargement de la santé…", "cargando estado…"]),
@@ -866,7 +866,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
          "panne d'une zone entière (anti-affinity)",
          "fallo de zona completa (anti-affinity)"]),
 
-    // ---- /inspect page (Stage 11.19) ------------------------------------
+    // ---- /inspect page ------------------------------------
     ("inspect.loading",
         ["loading shards…", "загрузка шардов…", "Lade Shards…",
          "chargement des shards…", "cargando fragmentos…"]),
@@ -1001,7 +1001,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
         ["high frequencies", "высокие частоты", "Hochfrequenzen",
          "fréquences hautes", "frecuencias altas"]),
 
-    // ---- Stage 12.7: per-file unique metrics on /health/<name> ---------
+    // ---- per-file unique metrics on /health/<name> ---------
     ("health.metrics_h",
         ["Unique metrics",
          "Уникальные метрики",
@@ -1127,7 +1127,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
          "Aucune réutilisation et aucune couche décodable — ce fichier est totalement isolé dans le catalogue.",
          "Sin reutilización ni capas decodificables — este archivo está aislado en el catálogo."]),
 
-    // ---- Stage 12.7: /about marketing page -----------------------------
+    // ---- /about marketing page -----------------------------
     ("nav.about",
         ["why holofs", "зачем holofs", "warum holofs",
          "pourquoi holofs", "por qué holofs"]),
@@ -1306,7 +1306,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
         ["Open the catalog →", "Открыть каталог →", "Katalog öffnen →",
          "Ouvrir le catalogue →", "Abrir el catálogo →"]),
 
-    // ---- Stage 12.9: /search semantic search page ----------------------
+    // ---- /search semantic search page ----------------------
     ("nav.search",
         ["search", "поиск", "Suche", "recherche", "buscar"]),
     ("search.title",
@@ -1350,7 +1350,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
          "Keine Treffer über der Schwelle. Versuchen Sie eine allgemeinere Beschreibung.",
          "Aucun résultat au-dessus du seuil. Essayez une description plus large.",
          "Sin coincidencias por encima del umbral. Pruebe una descripción más amplia."]),
-    // ---- Stage 13.0: robust-copy column on /similar/<name> --------------
+    // ---- robust-copy column on /similar/<name> --------------
     ("similar.robust_copy_blurb",
         ["Robust-copy column = low-layer overlap minus high-layer overlap. A score ≥30 flags files that preserve the target's structure (silhouette / composition) while perturbing the detail layers — the signature of a watermarked or re-encoded copy.",
          "Колонка robust-copy = совпадение на нижних слоях минус на верхних. Значения ≥30 — файлы, у которых структура (силуэт / композиция) совпадает, а детали отличаются — характерный почерк водяного знака или перекодирования.",
@@ -1373,7 +1373,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
         ["robust copy?", "копия?", "Robust-Kopie?",
          "copie robuste ?", "¿copia robusta?"]),
 
-    // ---- Stage 13.4: /versions/<name> per-object history --------------
+    // ---- /versions/<name> per-object history --------------
     ("versions.link_label",
         ["versions →", "версии →", "Versionen →",
          "versions →", "versiones →"]),
@@ -1436,7 +1436,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
          "Supprimer cette version définitivement ? Ses shards uniques seront récupérés par le GC.",
          "¿Eliminar esta versión permanentemente? Sus shards exclusivos se recolectarán por GC."]),
 
-    // ---- Stage 13.2: /spotlight ROI page -------------------------------
+    // ---- /spotlight ROI page -------------------------------
     ("spotlight.link_label",
         ["spotlight →", "spotlight →", "spotlight →",
          "spotlight →", "spotlight →"]),
@@ -1508,7 +1508,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
          "ROI (x, y, l, h) =",
          "ROI (x, y, an, al) ="]),
 
-    // ---- Stage 13.1: /holo/<name> streaming-hologram demo --------------
+    // ---- /holo/<name> streaming-hologram demo --------------
     ("holo.link_label",
         ["holo →", "holo →", "holo →", "holo →", "holo →"]),
     ("holo.title_prefix",
@@ -1563,7 +1563,7 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
         ["why holofs", "зачем holofs", "warum holofs",
          "pourquoi holofs", "por qué holofs"]),
 
-    // ---- Stage 13.3: hierarchical layer-band index ---------------------
+    // ---- hierarchical layer-band index ---------------------
     ("search.band_label",
         ["search band:", "слой поиска:", "Suchschicht:",
          "couche de recherche :", "capa de búsqueda:"]),

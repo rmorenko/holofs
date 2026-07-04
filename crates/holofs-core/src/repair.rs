@@ -1,4 +1,4 @@
-//! Stage 1: RLNC node regeneration.
+//! RLNC node regeneration.
 //!
 //! A new/replaced node fetches d live shards of a layer from peers and bakes
 //! fresh shards as random linear combinations of those donors. File-level

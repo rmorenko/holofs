@@ -1,4 +1,4 @@
-//! Stage 13.4 — form-friendly version-history axum handlers.
+//! form-friendly version-history axum handlers.
 //!
 //! - `POST /api/restore` — [`restore_version_form`]. Body
 //!   `name=<path>&id=<version_id>&return_to=<url>`. On success
@@ -8,7 +8,6 @@
 //!   303-redirects to `return_to`. The deleted version's uniquely-
 //!   owned shards are GC'd from the cluster in the same call.
 //!
-//! Moved out of `handlers.rs` in Phase R2b.5.
 
 use std::sync::Arc;
 
@@ -21,7 +20,7 @@ use super::util::{
     bad_request, error_to_response, parse_urlencoded_field, redirect_to, url_encode_simple,
 };
 
-/// Stage 13.4: `POST /api/restore` — form-friendly version restore.
+/// `POST /api/restore` — form-friendly version restore.
 /// Body: `name=<path>&id=<version_id>&return_to=<url>`. On success
 /// 303-redirects to `return_to` (defaults to `/versions/<name>`).
 pub async fn restore_version_form(

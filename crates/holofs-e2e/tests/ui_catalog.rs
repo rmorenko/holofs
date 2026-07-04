@@ -2,7 +2,7 @@
 //!
 //! These checks are the canary for hydration regressions: if WASM
 //! hydrate silently fails (the `/pkg/holofs_bg.wasm` 404 we hit
-//! during Stage 13.5), the lazy folder rows never expand and these
+//! during ), the lazy folder rows never expand and these
 //! tests fail at the first `.click()`.
 
 use std::time::Duration;

@@ -1,6 +1,6 @@
-//! Stage 15.1 sizing-rule bench harness.
+//! sizing-rule bench harness.
 //!
-//! The Stage 15.0 rollback was caused by shipping an encoding that
+//! The rollback was caused by shipping an encoding that
 //! produced ~786k shards per PUT before anyone benchmarked it —
 //! the disk-backed store pinned at 99% CPU and the PUT never
 //! returned. This harness is the guardrail against a repeat: it

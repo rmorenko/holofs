@@ -334,7 +334,7 @@ fn HealthIndexBody(data: HealthIndex) -> impl IntoView {
             </tbody>
         </table>
 
-        // Stage 11.23: the per-object list used to live here as a flat
+        // the per-object list used to live here as a flat
         // `<ul>`, but the catalog page already lists every object with
         // a per-row `health` action — this list duplicated it with
         // less metadata and no UI actions. Keep a one-line summary

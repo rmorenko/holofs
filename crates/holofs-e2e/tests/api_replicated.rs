@@ -1,4 +1,4 @@
-//! Stage 15.1: HTTP surface for the per-block Replicated encoding.
+//! HTTP surface for the per-block Replicated encoding.
 //!
 //! The Rust API (`Gateway::ingest_bytes_replicated`) is covered by
 //! the CLI-level distributed integration tests. This suite pins the

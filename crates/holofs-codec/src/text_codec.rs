@@ -1,4 +1,4 @@
-//! Stage 8: codec for text files.
+//! codec for text files.
 //!
 //! The text is split into exactly K chunks along **UTF-8 character boundaries**
 //! (multibyte characters are not cut). Chunks are zero-padded to a common

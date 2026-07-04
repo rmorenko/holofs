@@ -21,7 +21,7 @@
 #   /binaries/                   opaque blobs (random + tar.gz)
 #
 # All PUTs run sequentially with a 300 ms pause to keep the
-# per-node connection pool healthy (see the 2026-07-03 findings
+# per-node connection pool healthy (see thefindings
 # in project_deferred.md).
 
 set -e

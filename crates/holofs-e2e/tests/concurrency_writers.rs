@@ -1,7 +1,7 @@
 //! Concurrency tests: parallel PUT / GET / DELETE.
 //!
 //! These tests stress the gateway's per-object locking and the
-//! Stage 15.2 `purge_orphans_of` path. None of them rely on UI
+//! `purge_orphans_of` path. None of them rely on UI
 //! rendering; they all hit the gateway's HTTP API directly to keep
 //! the wall-clock cost low.
 

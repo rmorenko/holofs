@@ -23,7 +23,6 @@
 //! filter helpers live in [`crate::filter`]. This module owns UI
 //! only.
 //!
-//! Moved out of `lib.rs` in Phase R2a.2.
 
 use leptos::prelude::*;
 use leptos_meta::*;
@@ -49,7 +48,7 @@ pub fn CatalogPage() -> impl IntoView {
     use leptos_router::hooks::use_query_map;
     let query = use_query_map();
     view! {
-        // Stage 11.28: tag `<body>` so the catalog page can opt into
+        // tag `<body>` so the catalog page can opt into
         // `body { overflow: hidden; height: 100vh }` — kills the
         // window-level vertical scroll. Other routes (help, similar
         // etc.) without this class keep normal page scrolling.
@@ -142,7 +141,7 @@ fn CatalogFocusView(prefix: String) -> impl IntoView {
     }
 }
 
-/// Stage 11.26: shared `−` / `+` zoom buttons for the tree controls
+/// shared `−` / `+` zoom buttons for the tree controls
 /// bar. Stores the scale in `localStorage` under `holofs-tree-scale`
 /// and updates the `--tree-scale` CSS variable on `<html>`, which
 /// every tree font-size / spacing rule multiplies into via `calc()`.
@@ -180,7 +179,7 @@ fn TreeZoomButtons() -> impl IntoView {
     }
 }
 
-/// Stage 11.17: server-side catalog filter bar. Renders a GET form that
+/// server-side catalog filter bar. Renders a GET form that
 /// submits `?q=&from=&to=` (plus the current `?p=<prefix>` for focus
 /// mode) so the page reloads with a filtered listing. The submit target
 /// is the same path the user is on, which preserves the focus / tree
@@ -199,7 +198,7 @@ fn FilterBar(prefix: String) -> impl IntoView {
     let has_filter = !q_init.is_empty() || !from_init.is_empty() || !to_init.is_empty();
     let prefix_for_hidden = prefix.clone();
     view! {
-        // Stage 11.18: progressive enhancement — flatpickr replaces the
+        // progressive enhancement — flatpickr replaces the
         // native date picker with a cross-browser one whose UI follows
         // the page locale. We pull the lib + the 4 non-English locale
         // bundles from jsdelivr (same CDN pattern as the help page's
@@ -230,7 +229,7 @@ fn FilterBar(prefix: String) -> impl IntoView {
                 value=q_init
                 aria-label={t!("filter.name_label")}
             />
-            // Stage 11.17 follow-up: pin `lang` on the date inputs so the
+            // follow-up: pin `lang` on the date inputs so the
             // browser's native picker (calendar overlay, mm/dd order,
             // weekday names) follows the page locale instead of the
             // OS / browser language. `current_locale()` reads the live
@@ -267,8 +266,8 @@ fn clear_filter_href(prefix: &str) -> String {
 /// - **Filter active** (`?q=*` / `?from=*` / `?to=*`): eager —
 ///   `get_catalog` returns every matching entry plus ancestor
 ///   directories so the surviving tree paths stay navigable. Same
-///   behaviour as Stage 11.17.
-/// - **No filter**: lazy (Stage 11.21 / 11.22). Initial fetch is
+///   behaviour as .
+/// - **No filter**: lazy. Initial fetch is
 ///   `list_dir_page("", 0, PAGE_SIZE)`; folders render closed and load
 ///   their children only when the user opens the `<details>`. Each
 ///   level paginates with an IntersectionObserver-driven sentinel.
@@ -301,7 +300,7 @@ fn CatalogTreeView(#[prop(into)] prefix: String) -> impl IntoView {
     let prefix_lazy = prefix.clone();
 
     view! {
-        // Stage 15.x: when the tree root is not the catalog root,
+        // .x: when the tree root is not the catalog root,
         // show a breadcrumb so the user can navigate back up.
         {(!prefix_breadcrumb.is_empty()).then(|| view! {
             <Breadcrumb prefix=prefix_breadcrumb.clone()/>
@@ -327,7 +326,7 @@ fn CatalogTreeView(#[prop(into)] prefix: String) -> impl IntoView {
 }
 
 /// Eager tree: pulls the entire (filtered) catalog and builds the
-/// tree client-side. Preserves Stage 11.17 behaviour for filter mode
+/// tree client-side. Preserves behaviour for filter mode
 /// — when the user types `q=*.png` we need to walk the whole catalog
 /// to find matches, so paginated lazy loading buys us nothing.
 #[component]
@@ -363,7 +362,7 @@ fn CatalogTreeEager(
 /// in one shot but a 10 000-entry root paginates instead of blocking.
 const LAZY_PAGE_SIZE: u32 = 200;
 
-/// Lazy tree (Stage 11.21 / 11.22). Only the root level is fetched
+/// Lazy tree. Only the root level is fetched
 /// upfront via `list_dir_page("", 0, PAGE_SIZE)`; every directory
 /// `<details>` triggers its own `list_dir_page(path, …)` the first
 /// time it opens. The same controls bar (expand-all / sort / mkdir)
@@ -518,7 +517,7 @@ fn CatalogTreeLazyShell(
                 />
             </ul>
         </div>
-        // Stage 11.28: sticky horizontal scrollbar proxy. The native
+        // sticky horizontal scrollbar proxy. The native
         // bar on `.tree-scroll` is hidden via CSS; this div is the
         // visible one, glued to the viewport bottom via `position:
         // sticky`. Inner spacer width is filled in by JS so the
@@ -748,7 +747,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
         t!("folder.confirm_delete").replace('\'', "\\'")
     );
 
-    // Stage 11.24: Resource-based lazy loading turned out to be
+    // Resource-based lazy loading turned out to be
     // brittle because the SSR cached an "empty" value for closed
     // folders (open_sig=false → loader short-circuits) and Leptos
     // didn't reliably re-run the loader on hydrate when the source
@@ -761,7 +760,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
     // streams a populated subtree. Deeper levels stay quiet until
     // the user clicks.
     //
-    // Stage 11.25: also auto-open any folder whose path is an
+    // also auto-open any folder whose path is an
     // ancestor of (or equal to) the `?open=<path>` query param. This
     // is how the mkdir form returns the user to the tree with the
     // freshly-created folder visible — return_to=`/?open=<parent>`
@@ -778,7 +777,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
     let auto_open = !open_target.is_empty()
         && (open_target == path || open_target.starts_with(&format!("{path}/")));
     let initial_open = depth == 0 || auto_open;
-    // Stage 11.25: the target node (exact match with `?open=`) is
+    // the target node (exact match with `?open=`) is
     // where the user just acted (mkdir), so we scroll it into view
     // once it hydrates. Ancestor chain auto-opens but doesn't grab
     // scroll focus — that would yank the page upward in the middle
@@ -819,7 +818,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
         |(p, srt)| async move { list_dir_page(p, 0, LAZY_PAGE_SIZE, srt).await },
     );
 
-    // Stage 11.25: scroll the open-target folder into view once it
+    // scroll the open-target folder into view once it
     // mounts on the client. Without this the redirect after mkdir
     // dumps the user at the top of the page even though the right
     // `<details>` is already expanded somewhere below.
@@ -895,7 +894,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                     </span>
                     <span class="tree-sep">"·"</span>
                     <span class="tree-actions">
-                        // Stage 11.27: per-folder ⊕ / ⊖ buttons.
+                        // per-folder ⊕ / ⊖ buttons.
                         // `holofsExpandAll(closest details)` opens
                         // this folder and every descendant — the
                         // helper retries until lazy fetches settle.
@@ -925,7 +924,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                             onclick="event.stopPropagation()"
                         >
                             <input type="hidden" name="parent" value=path_for_form/>
-                            // Stage 11.25: land back on the tree view
+                            // land back on the tree view
                             // with this folder expanded so the new
                             // child is visible — `?open=<path>`
                             // unrolls the `<details>` chain down to
@@ -983,7 +982,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                     </span>
                 </summary>
                 <ul class="tree-children">
-                    // Stage 11.24: render the resource's value directly
+                    // render the resource's value directly
                     // instead of inside `<Suspense>`. The Suspense
                     // streamed an empty template on SSR (because
                     // `open_sig=false` short-circuits the loader); on
@@ -1117,7 +1116,7 @@ fn CatalogTreeBody(entries: Vec<CatalogEntry>, sort: TreeSort) -> impl IntoView 
                 }).collect_view()}
             </ul>
         </div>
-        // Stage 11.28: sticky H-scroll proxy. See the LazyShell
+        // sticky H-scroll proxy. See the LazyShell
         // version for background; the init script lives in `Shell`
         // (top-level <head>) because `<script>` tags injected via
         // streamed Suspense templates don't execute per HTML5 spec.
@@ -1238,7 +1237,7 @@ fn build_tree(entries: Vec<CatalogEntry>, sort: TreeSort) -> TreeNode {
                 }
                 TreeSort::Date => {
                     // Newest first. `created_at_unix == 0` means
-                    // "unknown" (legacy manifest before Stage 11.12) and
+                    // "unknown" (legacy manifest before ) and
                     // we shove those to the bottom of the bucket so the
                     // populated timestamps surface up top.
                     let a_t = a.entry.as_ref().map_or(0u64, |e| e.created_at_unix);
@@ -1290,7 +1289,7 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
             "text" => "📝",
             _ => "📦",
         };
-        // Stage 11.17: confirm dialog before the form POSTs. The
+        // confirm dialog before the form POSTs. The
         // translated string is interpolated raw so we double single
         // quotes to keep it inside the JS string literal.
         let file_confirm_js = format!(
@@ -1370,7 +1369,7 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                         </span>
                         <span class="tree-sep">"·"</span>
                         <span class="tree-actions">
-                            // Stage 11.27: same per-folder ⊕ / ⊖ as
+                            // same per-folder ⊕ / ⊖ as
                             // the lazy view. Eager mode just lets the
                             // helper walk an in-DOM tree — no fetch
                             // retries actually fire because all
@@ -1399,7 +1398,7 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                                 onclick="event.stopPropagation()"
                             >
                                 <input type="hidden" name="parent" value=path.clone()/>
-                                // Stage 11.25: same `?open=` trick the
+                                // same `?open=` trick the
                                 // lazy tree uses — keeps the user on
                                 // the tree view with this folder
                                 // pre-expanded.
@@ -1529,7 +1528,7 @@ fn MkdirForm(parent: String) -> impl IntoView {
 /// destination directory baked in as a hidden field; on success the
 /// server 303-redirects back to `/?p=<parent>` so the new tile shows up.
 ///
-/// Stage 11.4 polish: the native `<input type="file">` is visually-hidden;
+/// polish: the native `<input type="file">` is visually-hidden;
 /// a styled `<label>` takes its place as the click target, and a sibling
 /// `<span>` shows the chosen filename (updated by `upload-init.js`).
 /// The same script wires drag-and-drop on the surrounding `.upload-form`
@@ -1562,8 +1561,7 @@ fn UploadForm(parent: String) -> impl IntoView {
 }
 
 /// One card in the catalog grid. Visual structure mirrors the legacy
-/// gateway's HTML: thumb on top, metadata table, actions row. Stage 9
-/// added the `parent` prop so the basename ("img.jpg" out of
+/// gateway's HTML: thumb on top, metadata table, actions row. /// added the `parent` prop so the basename ("img.jpg" out of
 /// "photos/2026/img.jpg") shows in the tile while every link still uses
 /// the full path.
 #[component]
@@ -1654,7 +1652,7 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
                 <div class="row mut cid"><code>{cid_short}</code></div>
             </div>
             <div class="actions">
-                // Stage 11.29: rel=external bypasses Leptos Router
+                // rel=external bypasses Leptos Router
                 // interception. The primary link and preview hit
                 // axum-only routes (raw bytes / image preview); the
                 // rest are real Leptos pages but SPA navigation

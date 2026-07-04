@@ -14,7 +14,6 @@
 //!   node-by-node. Called by DELETE and PUT-replace so shared
 //!   `data_cid` neighbours stay decodeable.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.13.
 
 use holofs_client::{
     get_object_blocks, get_object_up_to_layer, repair_node, repair_node_replicated, ClientError,
@@ -36,7 +35,7 @@ impl Gateway {
     /// once. The second LayerLost is permanent — we surface it.
     ///
     /// Why this exists: the old audit-reputation bug
-    /// (Stage 14.x) silently emptied half the catalog's images
+    /// silently emptied half the catalog's images
     /// overnight; even after we stopped the cascade, the only
     /// path back was a manual `curl -X PUT` per affected file.
     /// Auto-repair-on-read heals those holes inline whenever a

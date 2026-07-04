@@ -1,6 +1,6 @@
-//! v0.7 — per-client-IP rate limit middleware.
+//! per-client-IP rate limit middleware.
 //!
-//! N3 backpressure (v0.6.0) is a **global** cap per route bucket:
+//! N3 backpressure () is a **global** cap per route bucket:
 //! MEDIUM = 64 concurrent decodes, LONG = 8 concurrent scans, etc.
 //! Under that ceiling a single misbehaving client can still starve
 //! every other caller — it will keep grabbing permits as they free
@@ -15,7 +15,7 @@
 //! layer, so even a compliant client can't blow past the global
 //! backpressure caps.
 //!
-//! Both knobs default to 0 (disabled) so pre-v0.7 clusters and
+//! Both knobs default to 0 (disabled) so pre-clusters and
 //! private deployments don't get surprise 429s. Set both to enable
 //! (typical prod tune for a small dev cluster:
 //! `rps_per_ip = 20, burst = 40`).

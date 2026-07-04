@@ -1,4 +1,4 @@
-//! Stage 12.7 — per-file business-meaningful metrics.
+//! per-file business-meaningful metrics.
 //!
 //! [`Gateway::file_metrics`] collapses three signal classes into one
 //! server roundtrip:
@@ -13,7 +13,6 @@
 //!   and sums squared coefficient magnitudes so the UI can render a
 //!   detail score and (for audio) a bass / mid / treble split.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.14.
 
 use holofs_client::layer_energies;
 use holofs_model::manifest::ObjectKind;
@@ -107,7 +106,7 @@ pub struct AudioBandEnergy {
 }
 
 impl Gateway {
-    /// Stage 12.7: per-file metrics for `/health/<name>`.
+    /// per-file metrics for `/health/<name>`.
     ///
     /// Three classes of signal collapsed into one server roundtrip:
     ///

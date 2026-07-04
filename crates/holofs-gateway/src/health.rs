@@ -13,7 +13,6 @@
 //!   catalog, queries every live node's hash inventory once, and
 //!   heals any object whose expected hashes are missing.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.12.
 
 use std::sync::Arc;
 
@@ -142,7 +141,7 @@ impl Gateway {
     /// repair cost diffuse, while still catching damage well before
     /// a user notices.
     ///
-    /// v0.7 epoch-GC: no longer takes `gc_barrier`. Any shards this
+    /// epoch-GC: no longer takes `gc_barrier`. Any shards this
     /// pass writes via `repair_object_inplace` get a fresh epoch
     /// from `Store::put`, so a concurrent full-GC pass can't purge
     /// them mid-flight.
@@ -225,7 +224,7 @@ impl Gateway {
 
         // Repair the affected objects one at a time. `repair_object_inplace`
         // re-snapshots `live` inside and persists the mutated manifest.
-        // Under v0.7 epoch-GC any fresh shard it writes carries a
+        // Under epoch-GC any fresh shard it writes carries a
         // post-snapshot epoch, so a concurrent full-GC pass can't
         // purge it even if the orphan diff briefly thinks it should.
         let mut repaired_ok = 0u64;

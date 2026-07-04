@@ -9,8 +9,6 @@
 //! [`partial_response`], [`unsatisfiable_response`]) live here too —
 //! they share the same `X-Holofs-*` header vocabulary.
 //!
-//! Moved out of `handlers.rs` in Phase R2b.2.
-//!
 //! [`stats_to_json`] and [`fingerprint_to_json`] format the two
 //! JSON view-model responses (`/api/stats`, `/api/fingerprint/*`).
 

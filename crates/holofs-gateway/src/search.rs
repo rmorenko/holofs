@@ -1,4 +1,4 @@
-//! Stage 12.8 — CLIP-based semantic search.
+//! CLIP-based semantic search.
 //!
 //! Owns the on-line embedding pipeline: `ensure_embedder` loads
 //! CLIP-multilingual on first use, `embed_object` decodes an image
@@ -32,7 +32,7 @@ pub(crate) struct EmbedState {
     pub(crate) enabled: bool,
     pub(crate) index_path: Option<std::path::PathBuf>,
     pub(crate) embedder: Option<Arc<holofs_embed::Embedder>>,
-    /// Stage 14.2: in-memory ANN index. `None` until the first
+    /// in-memory ANN index. `None` until the first
     /// `semantic_search` after a PUT (or after a startup) — then
     /// built from the entire `embeddings.bin`. Bumped to `None` by
     /// `ann_generation` mismatches so the next query rebuilds.
@@ -84,7 +84,7 @@ pub struct SemanticHit {
     /// so the UI usually shows them as 0..100 percentiles instead of
     /// raw values.
     pub score: f32,
-    /// Stage 13.3: which layer band produced the winning score. For
+    /// which layer band produced the winning score. For
     /// queries filtered to one band this is always that band; for
     /// `SearchBand::Any` it's whichever of the three scored best.
     pub band: SearchBand,
@@ -133,7 +133,7 @@ impl Gateway {
     ///     wrong kind),
     ///   * `Err(...)` — decode / inference failure.
     pub async fn embed_object(&self, name: &str) -> Result<bool, GatewayError> {
-        // v0.7 epoch-GC: `gc_barrier` was narrowed to just the
+        // epoch-GC: `gc_barrier` was narrowed to just the
         // embeddings.bin path. GC's tail rewrites embeddings.bin
         // under `gc_barrier.write`; our append (also a write to
         // that file) takes the read guard so the two never
@@ -154,13 +154,13 @@ impl Gateway {
             .get(name)
             .cloned()
             .ok_or(GatewayError::NotFound)?;
-        // Stage 12.8 only embeds images. Audio / text get their own
+        // only embeds images. Audio / text get their own
         // embedding pipeline in a future stage.
         if manifest.kind != ObjectKind::Image {
             return Ok(false);
         }
 
-        // Stage 13.3: embed three layer bands per image so the
+        // embed three layer bands per image so the
         // /search page can route queries by abstraction level.
         // Coarse = L0 (silhouette / colour blob), Mid = L0-L2
         // (silhouette + low-freq detail), Full = all layers
@@ -240,7 +240,7 @@ impl Gateway {
             any_new = true;
         }
         if any_new {
-            // Stage 14.2: bump the ANN generation so the next
+            // bump the ANN generation so the next
             // semantic_search call rebuilds (or — for small bands —
             // re-loads the in-memory record vec). The rebuild itself
             // is lazy; we just signal staleness here.
@@ -251,7 +251,7 @@ impl Gateway {
 
     /// Semantic search backed by [`holofs_embed::HnswIndex`].
     ///
-    /// Stage 14.2: previously a brute-force flat scan over
+    /// previously a brute-force flat scan over
     /// `embeddings.bin` on every query. Now lazily builds an
     /// in-memory ANN index, cached across queries until the next
     /// PUT bumps `ann_generation`. Small bands still fall back to

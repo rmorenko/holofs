@@ -1,7 +1,6 @@
 # API-Referenz
 
 
-> ⚠ **Translation may be stale.** This file was last synced before Stage 12-15 (versioning + deletion, HNSW-backed semantic search, /spotlight ROI, streaming /holo, /diff, /similar, auto-repair-on-read, background scrub, typed RPC layer with timeouts + NoLiveNodes panic-fix, per-folder inline upload). The English source under [../](../) is the canon for any new feature; the [Unreleased] block of [../../CHANGELOG.md](../../CHANGELOG.md) lists every delta this translation does not yet cover.
 
 
 Drei externe Schnittstellen: **HTTP-gateway**, **node-Wire-Protokoll** und
@@ -13,15 +12,15 @@ Drei externe Schnittstellen: **HTTP-gateway**, **node-Wire-Protokoll** und
 2. [Wire-Protokoll (TCP)](#2-wire-protocol-tcp)
 3. [On-Disk-Formate](#3-on-disk-formats)
 4. [Konventionen der Antwortheader](#4-response-header-conventions)
-5. [MCP-Server (Stage 12)](#5-mcp-server-stage-12)
-6. [Wavelet-Operationen (Stage 12.5)](#6-wavelet-operationen-stage-125)
+5. [MCP-Server](#5-mcp-server)
+6. [Wavelet-Operationen (5)](#6-wavelet-operationen)
 
 ---
 
 ## 1. HTTP-gateway
 
 Basis-URL: `http://<addr>:8787/` (HTTPS über das eigene TLS-Gerüst des gateways
-aus Stage 6 — `HOLOFS_TLS=1`, mTLS via `HOLOFS_MTLS=1`).
+aus `HOLOFS_TLS=1`, mTLS via `HOLOFS_MTLS=1`).
 
 > **Stage-9-Aktualisierung.** Pfade werden durch Schrägstriche getrennt und
 > sind als Wildcards adressierbar (`/photos/2026/img.jpg`). Die reservierten
@@ -40,7 +39,7 @@ aus Stage 6 — `HOLOFS_TLS=1`, mTLS via `HOLOFS_MTLS=1`).
 | `PUT`    | `/<path>`                  | Rohbytes hochladen, Art automatisch erkannt. Übergeordnetes Verzeichnis muss existieren (via `mkdir`) | body = Datei |
 | `DELETE` | `/<path>`                  | Objekt entfernen + Purge auf allen nodes. Verweigert Verzeichniseinträge (`rmdir` verwenden) | —             |
 
-### Verzeichnisoperationen (Stage 9)
+### Verzeichnisoperationen
 
 Zwei Varianten jeder Katalogmutation: eine Wildcard-JSON-Variante für
 programmatische / `curl`-Aufrufer und ein form-urlencoded-POST, das die
@@ -78,7 +77,7 @@ Statuscode-Zuordnung für die Verzeichnisoperationen:
 | audio     | `audio/wav` (16-Bit-PCM, mono/stereo wie gespeichert)       |
 | text      | Text-Content-Type je nach Erweiterung, Body enthält Lückenmarker, wenn shards unvollständig sind |
 | opaque    | originaler Content-Type + `Content-Disposition: attachment` |
-| directory | `409 Conflict` — Verzeichnisse haben keinen Payload (Stage 9) |
+| directory | `409 Conflict` — Verzeichnisse haben keinen Payload |
 
 ### Clusterzustand
 
@@ -112,7 +111,7 @@ tragen jedoch nichts zu `shards_total` / `bytes_total` bei.
 | Methode | Pfad                          | Beschreibung                                 |
 |---------|-------------------------------|----------------------------------------------|
 | `GET`   | `/similar/<path>`             | Top-10 ähnlicher Objekte + objektübergreifende Überlappung |
-| `GET`   | `/diff?a=<a>&b=<b>`           | Per-Chunk-Diff-Visualisierung. Zwei Objektpfade passen nicht in eine einzige Route, daher hat Stage 9 sie in den Query-String verschoben |
+| `GET`   | `/diff?a=<a>&b=<b>`           | Per-Chunk-Diff-Visualisierung. Zwei Objektpfade passen nicht in eine einzige Route, daher hat sie in den Query-String verschoben |
 | `GET`   | `/api/fingerprint/<path>`     | JSON: 16-Byte-perzeptueller Hash (image/audio) oder erste 16 Byte der CID (text/opaque) |
 
 `/api/fingerprint/<name>` liefert:
@@ -128,7 +127,7 @@ tragen jedoch nichts zu `shards_total` / `bytes_total` bei.
 ### Shard-Inspektion
 
 Das Tripel `c_l_idx` identifiziert einen shard innerhalb eines Objekts als
-`<channel>_<layer>_<idx>`. Stage 9 hat die URL umgeordnet, sodass das feste
+`<channel>_<layer>_<idx>`. hat die URL umgeordnet, sodass das feste
 Tripel vor dem Wildcard-Objektpfad steht.
 
 | Methode | Pfad                                                     | Beschreibung |
@@ -222,7 +221,7 @@ Dateien werden durch eine 8-Byte-Magic an Offset 0 identifiziert.
 
 ### 3.1. Manifest (`HOLOFSM7`, legacy `HOLOFSM6` beim Lesen akzeptiert)
 
-Stage 9 hat die Magic auf `HOLOFSM7` angehoben, um zu signalisieren, dass ein
+hat die Magic auf `HOLOFSM7` angehoben, um zu signalisieren, dass ein
 Eintrag den Diskriminator `ObjectKind::Directory` (Tag `4`) tragen kann. Das
 Wire-Layout ist byte-für-byte identisch zu `HOLOFSM6`; lediglich die Menge der
 zulässigen `kind`-Werte ist gewachsen. Alte `HOLOFSM6`-Dateien lassen sich
@@ -372,7 +371,7 @@ Eigene `X-Holofs-*`-Header bei Objektantworten:
 
 ---
 
-## 5. MCP-Server (Stage 12)
+## 5. MCP-Server
 
 Das Gateway stellt einen **Model-Context-Protocol**-Endpunkt unter
 `POST /mcp` per Streamable-HTTP-Transport (Spezifikation Rev.
@@ -495,7 +494,7 @@ curl -s -X POST http://127.0.0.1:8787/mcp \
 
 ---
 
-## 6. Wavelet-Operationen (Stage 12.5)
+## 6. Wavelet-Operationen
 
 Diese beiden Operationen nutzen aus, dass holofs jedes Bild- und
 Audio-Objekt im Wavelet- (DWT-) Bereich speichert, aufgeteilt nach
@@ -504,7 +503,7 @@ zu drehen erlaubt es, ein Objekt zu *transformieren*, ohne zu
 dekodieren, neu zu kodieren oder eine zweite Kopie der Quelldaten
 abzulegen.
 
-Beide Operationen sind in Stage 12.5 nur über MCP zugänglich — HTTP-
+Beide Operationen sind in 5 nur über MCP zugänglich — HTTP-
 Routen lassen sich später nachreichen, aber `claude mcp` + curl decken
 dieselben Anwendungsfälle ab.
 
@@ -583,7 +582,7 @@ transformieren, neu kodieren):
 
 ## 7. Stages 12.6 – 15.0 — Reference auf Englisch
 
-Seit Stage 12.5 sind neun zusätzliche Stages gelandet: per-file
+Seit 5 sind neun zusätzliche Stages gelandet: per-file
 metrics (12.7), `/about` page (12.7), CLIP semantic search +
 `/search` UI (12.8/12.9), robust-copy column (13.0), streaming
 hologram (13.1), ROI spotlight (13.2 + 14.1), hierarchical band

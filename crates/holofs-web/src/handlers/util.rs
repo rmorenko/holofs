@@ -8,7 +8,6 @@
 //! reach in via `use super::util::...` — nothing external calls
 //! them.
 //!
-//! Moved out of `handlers.rs` in Phase R2b.2.
 
 use axum::body::Body;
 use axum::http::{header, HeaderName, HeaderValue, StatusCode};
@@ -121,21 +120,21 @@ pub(crate) fn error_to_response(e: GatewayError) -> Response {
 const RESERVED_TOP_SEGMENTS: &[&str] = &[
     "health", "escrow", "preview", "inspect", "similar", "diff", "admin", "api",
     "metrics", "pkg",
-    // Stage 10: in-app docs viewer + zoom variant of /inspect.
+    // in-app docs viewer + zoom variant of /inspect.
     "help", "inspect-zoom",
-    // Stage 11.5: static-asset prefix served by ServeDir.
+    // static-asset prefix served by ServeDir.
     "assets",
-    // Stage 12.6: wavelet-mix composer page.
+    // wavelet-mix composer page.
     "mix",
-    // Stage 12.7: pitch / marketing page.
+    // pitch / marketing page.
     "about",
-    // Stage 12.9: semantic search page.
+    // semantic search page.
     "search",
-    // Stage 13.1: streaming hologram demo page.
+    // streaming hologram demo page.
     "holo",
-    // Stage 13.2: ROI spotlight composite page.
+    // ROI spotlight composite page.
     "spotlight",
-    // Stage 13.4: per-object version history page.
+    // per-object version history page.
     "versions",
 ];
 
@@ -155,7 +154,7 @@ pub(crate) fn is_reserved_name(name: &str) -> bool {
 }
 
 /// Names accepted by `PUT /<path>` and the directory-op endpoints.
-/// Slash is allowed (paths are multi-segment after Stage 9); only
+/// Slash is allowed (paths are multi-segment after ); only
 /// the top-level segment is checked against the reserved list.
 /// Structural validation (dot/double-slash/length) is the gateway's
 /// job — `Gateway::ingest_bytes` runs `holofs_model::path::validate`
@@ -180,7 +179,7 @@ pub(crate) fn parse_urlencoded_field(body: &str, field: &str) -> Option<String> 
 
 /// Decode `+` → space and `%XX` → byte for a single form field.
 ///
-/// Stage 11.13: bytes flow through a `Vec<u8>` rather than being
+/// bytes flow through a `Vec<u8>` rather than being
 /// pushed straight into a `String`. The old code did
 /// `out.push(byte as char)`, which treated each decoded byte as a
 /// Unicode code point — fine for ASCII, garbage for any multi-byte

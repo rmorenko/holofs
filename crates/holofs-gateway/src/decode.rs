@@ -12,7 +12,6 @@
 //! cache because their formats are cheap to re-encode and we
 //! haven't seen the same access-pattern hotspots.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.17.
 
 use std::sync::Arc;
 use std::time::Instant;

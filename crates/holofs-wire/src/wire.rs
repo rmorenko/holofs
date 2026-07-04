@@ -59,7 +59,7 @@ pub enum Request {
         object_id: u64,
     },
     Stat,
-    /// Stage 7.1: Proof of Retrievability. Asks for a shard by hash;
+    /// Proof of Retrievability. Asks for a shard by hash;
     /// if the node actually stores it, returns it; otherwise `AuditResp { shard: None }`.
     /// The client verifies `sha256(shard) == shard_hash`.
     Audit {
@@ -68,22 +68,22 @@ pub enum Request {
         layer: u8,
         shard_hash: Hash,
     },
-    /// Stage 7.3: handshake challenge. The node replies with `AuthChallengeOk { signature }`,
+    /// handshake challenge. The node replies with `AuthChallengeOk { signature }`,
     /// where `signature = sign(node_secret, b"holofs-auth-v1" || nonce)`.
     /// The client verifies it against the node's pubkey (from the whitelist).
     AuthChallenge {
         nonce: [u8; 32],
     },
-    /// Stage 14.0: enumerate every shard hash this node holds. Used by
+    /// enumerate every shard hash this node holds. Used by
     /// the gateway's GC pass; node replies with [`Response::Hashes`].
     ListHashes,
-    /// Stage 14.0: delete every shard whose hash is in `hashes`. The
+    /// delete every shard whose hash is in `hashes`. The
     /// node replies with [`Response::Ack`] regardless of whether the
     /// hashes actually existed (idempotent).
     PurgeByHash {
         hashes: Vec<Hash>,
     },
-    /// Stage 15.0: batched PUT — store every shard in `shards` under
+    /// batched PUT — store every shard in `shards` under
     /// the same `(object_id, channel, layer)` bucket. Single Ack on
     /// success. Used by the replicated-encoding path where a single
     /// `(object_id, channel, layer)` can carry thousands of one-
@@ -95,13 +95,13 @@ pub enum Request {
         layer: u8,
         shards: Vec<Shard>,
     },
-    /// v0.7 epoch-GC: ask the node for its current write-epoch (wall
+    /// epoch-GC: ask the node for its current write-epoch (wall
     /// clock, milliseconds since UNIX_EPOCH). The gateway snapshots
     /// this once at the start of a GC pass and uses it to gate
     /// [`Request::PurgeByHashUpTo`] — shards written after the
     /// snapshot are protected from concurrent purge.
     CurrentEpoch,
-    /// v0.7 epoch-GC: same semantics as [`Request::PurgeByHash`] but
+    /// epoch-GC: same semantics as [`Request::PurgeByHash`] but
     /// the node only removes hashes whose stored write-epoch is
     /// ≤ `max_epoch`. Fresh writes that landed after the snapshot
     /// (epoch > max_epoch) survive.
@@ -119,18 +119,18 @@ pub enum Response {
     StatResp {
         total_shards: u32,
     },
-    /// Stage 7.1: reply to `Request::Audit`. `None` means the node does not hold this shard.
+    /// reply to `Request::Audit`. `None` means the node does not hold this shard.
     AuditResp {
         shard: Option<Shard>,
     },
-    /// Stage 7.3: reply to `AuthChallenge`. Signature over the nonce under the auth domain.
+    /// reply to `AuthChallenge`. Signature over the nonce under the auth domain.
     AuthChallengeOk {
         signature: [u8; 64],
     },
-    /// Stage 14.0: enumeration response — every shard hash this node
+    /// enumeration response — every shard hash this node
     /// currently holds, no ordering guarantees.
     Hashes(Vec<Hash>),
-    /// v0.7 epoch-GC: reply to [`Request::CurrentEpoch`].
+    /// epoch-GC: reply to [`Request::CurrentEpoch`].
     Epoch {
         epoch: u64,
     },
@@ -147,7 +147,7 @@ const OP_AUTH: u8 = 0x06;
 const OP_LIST_HASHES: u8 = 0x07;
 const OP_PURGE_BY_HASH: u8 = 0x08;
 const OP_PUT_BATCH: u8 = 0x09;
-// v0.7 epoch-GC ops.
+// epoch-GC ops.
 const OP_CURRENT_EPOCH: u8 = 0x0a;
 const OP_PURGE_BY_HASH_UP_TO: u8 = 0x0b;
 
@@ -158,7 +158,7 @@ const RSP_STAT: u8 = 0x03;
 const RSP_AUDIT: u8 = 0x04;
 const RSP_AUTH: u8 = 0x05;
 const RSP_HASHES: u8 = 0x06;
-// v0.7 epoch-GC: raw u64 write-epoch (ms since UNIX_EPOCH).
+// epoch-GC: raw u64 write-epoch (ms since UNIX_EPOCH).
 const RSP_EPOCH: u8 = 0x07;
 const RSP_ERR: u8 = 0xff;
 

@@ -1,4 +1,4 @@
-//! `/about` marketing page (Stage 12.7).
+//! `/about` marketing page.
 //!
 //! Lightweight rendering checks — the page is static SSR with no
 //! hydration needs, so this also serves as the simplest possible

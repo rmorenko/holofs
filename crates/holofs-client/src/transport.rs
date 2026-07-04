@@ -1,6 +1,6 @@
 //! Transport layer for client→node connections.
 //!
-//! Stage 6 introduced optional TLS on the wire protocol. The actual switch
+//! introduced optional TLS on the wire protocol. The actual switch
 //! is a process-wide setting: at bootstrap the binary calls
 //! [`set_tls_config`] with either `None` (plain TCP — legacy default) or
 //! `Some(Arc<ClientConfig>)` (TLS, optionally with a client cert for mTLS).

@@ -1,4 +1,4 @@
-//! Stage 8 holographic key escrow — axum handlers.
+//! holographic key escrow — axum handlers.
 //!
 //! Three routes wrap the [`holofs_gateway::Gateway`] escrow API:
 //!
@@ -14,7 +14,6 @@
 //! `bad_request_owned` (also used by the multipart-body upload
 //! handlers) lives in [`super`] and is re-imported here.
 //!
-//! Moved out of `handlers.rs` in Phase R2b.1.
 
 use std::sync::Arc;
 
@@ -38,7 +37,7 @@ pub async fn escrow_split(
     let mut filename = String::from("secret.bin");
     let mut k: usize = 3;
     let mut n: usize = 5;
-    // Stage 11.19b: the form ships a hidden `lang` field carrying the
+    // the form ships a hidden `lang` field carrying the
     // current page locale so the server-rendered result page matches
     // the language the user saw on `/escrow`. Falls back to `en` when
     // the field is absent or unknown.
@@ -165,7 +164,7 @@ fn escrow_split_html(res: EscrowSplitResult, lang: &str) -> Response {
     let lang_for_view = lang_owned.clone();
     let lang_for_shell = lang_owned.clone();
 
-    // Stage 11.19b: render through the same `view!` pipeline the rest
+    // render through the same `view!` pipeline the rest
     // of the site uses, then wrap in a manual document shell. We need
     // the manual shell because this response isn't routed through the
     // Leptos router — it's a direct POST result, so we can't reuse the

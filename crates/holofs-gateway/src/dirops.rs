@@ -11,7 +11,6 @@
 //!   every descendant path.
 //! - [`Gateway::list_dir`] — immediate-children listing.
 //!
-//! Moved out of `http_gateway.rs` in Phase R1b.11.
 
 use holofs_model::manifest::{Manifest, ObjectKind};
 use holofs_model::path as catalog_path;
@@ -77,7 +76,7 @@ impl Gateway {
         self.invalidate_cache(name).await;
         self.persist_catalog().await?;
         let live = self.effective_live().await;
-        // Stage 15.2 fix: purge ONLY the shards unique to `manifest`.
+        // fix: purge ONLY the shards unique to `manifest`.
         // The legacy `purge_object(&manifest, &live)` deleted the
         // entire `(object_id, *, *)` bucket on each node, which broke
         // any other catalog entry that happened to share the same

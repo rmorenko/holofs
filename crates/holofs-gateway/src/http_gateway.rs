@@ -84,19 +84,19 @@ pub struct Gateway {
     /// Optional path to the catalog file. If set, the catalog is saved
     /// atomically on each change (PUT/DELETE).
     pub(crate) catalog_path: Option<std::path::PathBuf>,
-    /// Stage 12.8: optional semantic-search embeddings index. `None`
+    /// optional semantic-search embeddings index. `None`
     /// when the server was started without `--enable-embed`. When set,
     /// every PUT fires a fire-and-forget background task that embeds
     /// the new object via CLIP and appends to the on-disk index.
     pub(crate) embed: Arc<Mutex<EmbedState>>,
-    /// Stage 13.4: optional per-object version history. When enabled
+    /// optional per-object version history. When enabled
     /// every PUT that *replaces* an existing object writes the prior
     /// manifest as a side file under `versions_dir/<sanitized>/v…bin`
     /// and skips the usual shard purge so the historical version
     /// remains decodeable. Trade-off: cluster storage monotonically
     /// grows while the feature is on (no GC yet).
     pub(crate) versions: Arc<Mutex<VersionsState>>,
-    /// Stage 14.4: serialisation barrier between catalog-mutating
+    /// serialisation barrier between catalog-mutating
     /// writers and the orphan-shard GC pass.
     ///
     /// Writers (`ingest_bytes`, `restore_version`, `embed_object`)
@@ -126,7 +126,7 @@ pub struct Gateway {
     pub(crate) cluster: Arc<ClusterInfo>,
     /// Cache keyed by (name, max_decoded_layer) → ready PNG + metrics.
     pub(crate) cache: Mutex<HashMap<(String, u8), Arc<CachedFile>>>,
-    /// Stage 11.2: per-`(name, channel, layer)` shard cache. `shard_payload`
+    /// per-`(name, channel, layer)` shard cache. `shard_payload`
     /// previously called `gather_layer` for every cell on `/inspect/<name>`
     /// — under the inspect grid's ~444 concurrent renders that saturated
     /// the cluster and produced spurious 404s for cells whose layer fetch
@@ -197,7 +197,7 @@ pub struct Gateway {
     pub(crate) admin_auth_missing_total: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) admin_auth_bad_total: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) admin_auth_disabled_total: Arc<std::sync::atomic::AtomicU64>,
-    /// v0.7: 429 responses caused by the per-IP rate limit
+    /// 429 responses caused by the per-IP rate limit
     /// middleware. Zero when the limit is disabled
     /// (`HOLOFS_RATE_LIMIT_RPS_PER_IP=0`). Emitted in `/metrics`
     /// as `holofs_rate_limit_rejected_total`.
@@ -411,7 +411,7 @@ impl Gateway {
         )
     }
 
-    /// Stage 12.8: turn on the CLIP-based semantic-search index. Pass
+    /// turn on the CLIP-based semantic-search index. Pass
     /// the on-disk path for the append-only `embeddings.bin` file.
     /// Idempotent; calling twice with different paths swaps the active
     /// index (any pre-existing embedder handle is dropped).
@@ -428,7 +428,7 @@ impl Gateway {
         self.embed.lock().await.enabled
     }
 
-    /// Stage 13.4: turn on per-object version history. `dir` is the
+    /// turn on per-object version history. `dir` is the
     /// root under which `versions/<sanitized_name>/v…bin` files are
     /// written; we create it lazily on the first versioned PUT.
     pub async fn enable_versions(&self, dir: std::path::PathBuf) {
@@ -521,7 +521,7 @@ impl Gateway {
 
     /// Drop cached decoded objects for `name` (every layer variant). Called
     /// after a successful PUT or DELETE so a subsequent GET re-decodes from
-    /// the new shard layout. Stage 11.2: also drops the per-layer
+    /// the new shard layout. also drops the per-layer
     /// shard-payload cache so the next inspect render pulls fresh shards.
     pub async fn invalidate_cache(&self, name: &str) {
         let mut cache = self.cache.lock().await;

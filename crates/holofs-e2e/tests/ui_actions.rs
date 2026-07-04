@@ -1,4 +1,4 @@
-//! Per-image action links inside catalog tree leaves (Stage 11.16+).
+//! Per-image action links inside catalog tree leaves.
 //!
 //! Every image card carries a row of links: `preview`, `shards`,
 //! `similar`, `health`, `mix`, `holo`, `spotlight`, `versions`,

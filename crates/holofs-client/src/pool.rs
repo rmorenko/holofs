@@ -140,7 +140,7 @@ fn release(addr: &str, stream: TransportStream) {
 
 /// Returned by [`acquire`]. Wraps a [`TransportStream`].
 ///
-/// **Drop semantics** (2026-07-03 rework): the default is to
+/// **Drop semantics**rework): the default is to
 /// **discard** the underlying stream, NOT recycle it. A caller
 /// that has completed a clean, on-frame-boundary exchange must
 /// signal that explicitly with [`Pooled::mark_clean`]; only then
@@ -155,7 +155,7 @@ fn release(addr: &str, stream: TransportStream) {
 /// "recycle" turned every such cancellation into pool
 /// contamination: the next borrower would read the tail of some
 /// other caller's response and surface it as
-/// `UnexpectedResponse` (see the 2026-07-03 field bug —
+/// `UnexpectedResponse` (see the—
 /// "got Shards([])" on a PUT after a monitor-loop cancellation).
 ///
 /// Making the default "discard" flips the safety story: forgetting
@@ -368,7 +368,7 @@ mod tests {
             .expect("write");
         let buf = read_frame(&mut pooled).await.expect("read");
         let resp = Response::decode(&buf).expect("decode");
-        // Explicit opt-in — since 2026-07-03 the pool defaults
+        // Explicit opt-in — sincethe pool defaults
         // to "discard on drop"; only sockets that had a
         // successful frame exchange should recycle.
         pooled.mark_clean();

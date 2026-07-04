@@ -1,8 +1,8 @@
-//! Stage 7.3: Ed25519 node identity.
+//! Ed25519 node identity.
 //!
 //! On startup each node either generates a keypair or loads one from
 //! `<storage_dir>/identity.key`. The public key is distributed via
-//! [`crate::whitelist::Whitelist`] (Stage 7.4), which doubles as the
+//! [`crate::whitelist::Whitelist`], which doubles as the
 //! "single source of truth" about cluster membership.
 //!
 //! Handshake (optional, on top of the existing wire protocol):
@@ -17,7 +17,7 @@
 //!
 //! This is the **identity** layer: the guarantee that "node 7 is the one
 //! to whom the admin issued this key". On top of it sits the whitelist
-//! (Stage 7.4) — the guarantee that "this key is actually a cluster member".
+//! — the guarantee that "this key is actually a cluster member".
 
 use std::fs;
 use std::io;

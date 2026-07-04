@@ -83,7 +83,7 @@ flowchart LR
 |--------------------|---------------------------------|-----------------|-----------------|
 | User → Edge        | Application-level (cookies, JWT) | TLS 1.3         | Out of scope    |
 | Edge → Gateway     | None today (planned: mTLS)      | None / mTLS     | Bind gateway to private VLAN |
-| Gateway ↔ Node     | Ed25519 challenge-response (+ optional mTLS) | Plain TCP, or rustls TLS via `--tls` (Stage 6) | Wire-protocol nonce + signed handshake; `--mtls` adds X.509 cert verification |
+| Gateway ↔ Node     | Ed25519 challenge-response (+ optional mTLS) | Plain TCP, or rustls TLS via `--tls` | Wire-protocol nonce + signed handshake; `--mtls` adds X.509 cert verification |
 | Operator → Cluster | Admin Ed25519 signs whitelist   | Out-of-band     | Keep admin key offline / HSM |
 
 ---
@@ -140,7 +140,7 @@ mitigations in this document target it.
 | # | Threat                                              | Mitigation |
 |---|-----------------------------------------------------|------------|
 | I1 | Single node reading "its" shards reveals plaintext | An individual shard is `coeffs · chunks` over GF(2⁸), a random linear combination of chunks. Recovering plaintext from fewer than `K` independent shards requires solving an underdetermined linear system — information-theoretically infeasible **for a single random shard**. |
-| I2 | Adversary collects ≥ K shards of one object        | RLNC over public GF(2⁸) is **not** an encryption scheme. Any K linearly independent shards reconstruct payload. Mitigation: **at-rest encryption per node** (planned Stage 7) and **placement diversity** — under `RendezvousZoneAware`, K shards span ≥ K different nodes in ≥ ⌈K/zone_count⌉ zones, so reading them requires compromising that many. |
+| I2 | Adversary collects ≥ K shards of one object        | RLNC over public GF(2⁸) is **not** an encryption scheme. Any K linearly independent shards reconstruct payload. Mitigation: **at-rest encryption per node** and **placement diversity** — under `RendezvousZoneAware`, K shards span ≥ K different nodes in ≥ ⌈K/zone_count⌉ zones, so reading them requires compromising that many. |
 | I3 | Metadata leak: name + kind + size                  | Manifest stores object name and content type in plaintext. Sensitive deployments should hash or pseudonymise names before upload. |
 | I4 | Side channels (cache, network timing)              | Not mitigated in 0.1 — use dedicated CPUs / network for sensitive deployments. |
 | I5 | Backup leak                                        | Backups inherit the same threat: they must be encrypted at rest (`restic --pass-file`, S3 SSE-KMS). |
@@ -151,12 +151,12 @@ mitigations in this document target it.
 | # | Threat                                              | Mitigation |
 |---|-----------------------------------------------------|------------|
 | D1 | Flood gateway with uploads                         | Gateway must run behind a rate-limiting reverse proxy. Wire-frame size is capped at `MAX_FRAME = 64 MiB` on every node. |
-| D2 | Single node refuses requests                       | RLNC has ≥ K-of-N redundancy per layer. Auto-repair-on-read (Stage 14.3) + background scrub (Stage 15.x) detect and resurrect shards onto live nodes. |
+| D2 | Single node refuses requests                       | RLNC has ≥ K-of-N redundancy per layer. Auto-repair-on-read (3) + background scrub (x) detect and resurrect shards onto live nodes. |
 | D3 | Coordinated half-cluster outage                    | Margin is sized for **any one zone + scattered single failures** (see [theory.md §3](./theory.md#3-priority-layers)). Larger outages degrade gracefully: L3 (cosmetic detail) lost first, then L2, L1. |
-| D4 | "Sleeper" node accepts puts but never returns gets | Audit task issues random `Audit(shard_hash)` probes — a non-responsive or wrong-answering node drops reputation and stops being chosen for placement. Stage 14.x change: `MissingShard` is treated as neutral (no reputation hit), to avoid a dedup-collision feedback loop that previously kicked healthy nodes out of the live set. |
+| D4 | "Sleeper" node accepts puts but never returns gets | Audit task issues random `Audit(shard_hash)` probes — a non-responsive or wrong-answering node drops reputation and stops being chosen for placement. x change: `MissingShard` is treated as neutral (no reputation hit), to avoid a dedup-collision feedback loop that previously kicked healthy nodes out of the live set. |
 | D5 | Slow-loris on TCP                                  | Per-RPC `tokio::time::timeout` budget (`HOLOFS_RPC_TIMEOUT_MS`, default 8 s, `0` disables). A timed-out RPC poisons the pooled stream and retries once on a fresh socket via `is_likely_transient`. Caps user-visible latency at 8 s + one retry instead of the OS-level 60-75 s TCP timeout. |
 | D6 | Memory exhaustion via huge frame                   | Frames > `MAX_FRAME` are rejected before allocation. |
-| D7 | All nodes simultaneously dark (e.g. boot race, fleet-wide deploy) | Stage 15.x: `placement::place` returns `Result<_, NoLiveNodes>` instead of asserting; gateway surfaces a clean `503 ServiceUnavailable` (`GatewayError::ClusterDegraded`) instead of panicking. Previously a single un-typed `assert!` in `place_shard` could crash the gateway process via a single PUT during a fleet outage. |
+| D7 | All nodes simultaneously dark (e.g. boot race, fleet-wide deploy) | x: `placement::place` returns `Result<_, NoLiveNodes>` instead of asserting; gateway surfaces a clean `503 ServiceUnavailable` (`GatewayError::ClusterDegraded`) instead of panicking. Previously a single un-typed `assert!` in `place_shard` could crash the gateway process via a single PUT during a fleet outage. |
 | D8 | Concurrent-request flood exhausts axum runtime     | **v0.6.0 N3** — MEDIUM (default cap 64) and LONG (default cap 8) route buckets carry a `tokio::sync::Semaphore` guard. On saturation the middleware returns `503 Service Unavailable` immediately (rather than piling tasks onto the runtime). Configurable via `HOLOFS_MEDIUM_CONCURRENCY` / `HOLOFS_LONG_CONCURRENCY`. Rejections count toward `holofs_backpressure_rejected_total{bucket}`. |
 | D9 | Slow handler ties up the axum task queue          | **v0.6.0 N7** — per-bucket deadlines (SHORT 10 s / MEDIUM 60 s / LONG 5 min) enforced by a `tokio::time::timeout` middleware. Elapsed → `504 Gateway Timeout`; `holofs_handler_timeouts_total{bucket}` bumped. Streaming endpoints + MCP intentionally unbudgeted. |
 | D10 | Silent kill of a background loop by panic         | **v0.6.0 N2** — every long-running loop (monitor / auditor / scrub / reputation-persist) is spawned inside `supervised_spawn`, which catches panics via `JoinError` and restarts with exponential backoff (1 → 30 s). Restarts count toward `holofs_supervised_task_restarts_total{task}`. |
@@ -186,7 +186,7 @@ operators must consider.
 | **I**dentifiability | Object names are stored verbatim.       | Hash / pseudonymise names client-side. |
 | **N**on-repudiation | Audit logs identify nodes serving content. | Acceptable in trusted ops contexts. |
 | **D**etectability  | Existence of an object is inferable from `/api/stats`. | Authenticated `/api/stats` only. |
-| **D**isclosure     | See §4.4 — I1–I6.                       | Stage 7 at-rest encryption. |
+| **D**isclosure     | See §4.4 — I1–I6.                       | at-rest encryption. |
 | **U**nawareness    | Dedup means *another tenant's* upload may produce the same `data_cid`. | Single-tenant deployments only when this matters. |
 | **N**oncompliance  | GDPR "right to erasure" — `DELETE /<name>` issues `Purge` to all nodes; but **shards may have been backed up off-site**. | Document backup retention; expose `holofs-admin shred` for forensic-grade erasure. |
 
@@ -206,9 +206,8 @@ controls if needed:
 3. **Tamper-evident audit log.** Reputation tracks node misbehavior but
    does not produce a signed, append-only log.
 4. **Cryptographic anti-replay on wire frames.** Only the `AuthChallenge`
-   carries a nonce. Stage 7 adds per-session keying.
-5. **Quantum resistance.** Ed25519 and SHA-256 are pre-quantum. Stage 8
-   evaluates PQ migration.
+   carries a nonce. adds per-session keying.
+5. **Quantum resistance.** Ed25519 and SHA-256 are pre-quantum.    evaluates PQ migration.
 
 ---
 
@@ -216,13 +215,13 @@ controls if needed:
 
 | Risk                                                | Severity | Likelihood | Compensating control |
 |-----------------------------------------------------|:--------:|:----------:|----------------------|
-| Wire traffic in cleartext on shared LAN             | Low      | Low        | Mitigated by `--tls` (rustls TLS 1.2/1.3, Stage 6). Operators that do not set `--tls` should restrict to a private VLAN. |
+| Wire traffic in cleartext on shared LAN             | Low      | Low        | Mitigated by `--tls` (rustls TLS 1.2/1.3). Operators that do not set `--tls` should restrict to a private VLAN. |
 | Compromise of admin key                             | Critical | Low        | Offline storage; quarterly rotation drill |
 | Wire-frame replay (non-handshake)                   | Medium   | Low        | Hash binding limits damage to integrity, not confidentiality |
 | Side-channel attacks on shared CPU                  | Medium   | Low        | Dedicated nodes for sensitive workloads |
 | Backup leak                                         | High     | Medium     | Encrypt backups (`restic`, SSE-KMS) |
 | GDPR erasure incomplete due to backups              | Medium   | Medium     | Documented retention policy + customer disclosure |
-| Operator compromise via supply chain                | High     | Low        | Reproducible builds + signed releases (Stage 8) |
+| Operator compromise via supply chain                | High     | Low        | Reproducible builds + signed releases |
 
 Each risk has an owner (`@holofs/security`) and a planned mitigation
 release. Track via GitHub issues with label `security`.

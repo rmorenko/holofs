@@ -1,4 +1,4 @@
-//! Stage 11.9: end-to-end property tests for the perceptual-similarity
+//! end-to-end property tests for the perceptual-similarity
 //! pipeline.
 //!
 //! The unit tests inside `fingerprint.rs` cover individual helpers
@@ -536,7 +536,7 @@ fn opaque_kind_fingerprint_falls_back_to_cid() {
 // ===== Realistic scenario from the demo cluster ============================
 
 /// Replays the exact mandala-vs-photo discrimination that motivated
-/// Stage 11.6's re-anchoring. We construct a "photo"-like gradient and
+/// re-anchoring. We construct a "photo"-like gradient and
 /// a "mandala"-like roughly-uniform pattern with means in the 100-130
 /// band; the old `(1 − h/45) · 100` formula gave both ≈ 50-70 %; the
 /// re-anchored scale should now flag mandala as essentially uncorrelated.

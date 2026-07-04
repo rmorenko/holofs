@@ -1,4 +1,4 @@
-//! Stage 7.1: Proof of Retrievability.
+//! Proof of Retrievability.
 //!
 //! The client periodically asks nodes for a specific shard by hash. If the
 //! node really stores it, it returns the shard, and the client verifies
@@ -150,8 +150,7 @@ pub async fn tick_once(
     // zero shards, so they're never auditable. Including them as the
     // canonical "first entry" used to derive `live_all` would yield an
     // empty live set and panic inside `place_shard`'s zone-aware
-    // placement (see holofs-cluster issue tracker; pre-Stage 14.3
-    // bug).
+    // placement (see holofs-cluster issue tracker; pre-    // bug).
     let snapshot: Vec<(String, holofs_model::manifest::Manifest)> = {
         use holofs_model::manifest::ObjectKind;
         let cat = catalog.lock().await;

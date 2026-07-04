@@ -380,7 +380,7 @@ fn ZoomBody(data: ZoomView) -> impl IntoView {
     let enc = crate::url_encode(&name);
     let kind_class = if is_systematic { "sys" } else { "rlnc" };
     let kind_label = if is_systematic { "SYSTEMATIC" } else { "RLNC" };
-    // Stage 11.19: the long descriptive blurb (sys vs RLNC explanation)
+    // the long descriptive blurb (sys vs RLNC explanation)
     // stays in English for now. Translating "coeffs = e_i = one in the
     // i-th position" meaningfully needs domain-specific phrasing that
     // we can pass through later as a polish step.

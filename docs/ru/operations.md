@@ -1,7 +1,6 @@
 # Руководство по эксплуатации
 
 
-> ⚠ **Translation may be stale.** This file was last synced before Stage 12-15 (versioning + deletion, HNSW-backed semantic search, /spotlight ROI, streaming /holo, /diff, /similar, auto-repair-on-read, background scrub, typed RPC layer with timeouts + NoLiveNodes panic-fix, per-folder inline upload). The English source under [../](../) is the canon for any new feature; the [Unreleased] block of [../../CHANGELOG.md](../../CHANGELOG.md) lists every delta this translation does not yet cover.
 
 
 Это руководство описывает, как **развернуть**, **мониторить**, **резервно
@@ -89,7 +88,7 @@ holofs-admin whitelist build \
 
 ### 2.4. TLS для проводного протокола (`--tls`, `--mtls`)
 
-Бинарный протокол gateway↔node можно шифровать с помощью rustls (Stage 6).
+Бинарный протокол gateway↔node можно шифровать с помощью rustls.
 Два опциональных флага управляют поведением:
 
 | Флаг       | Эффект |
@@ -147,7 +146,7 @@ Environment=HOLOFS_DATA_DIR=/var/lib/holofs/node%i
 Environment=HOLOFS_LISTEN=0.0.0.0:91%i
 Environment=HOLOFS_WHITELIST=/etc/holofs/whitelist.holofs
 Environment=HOLOFS_SECRET_KEY=/etc/holofs/keys/node%i.priv
-# Stage 6: enable TLS on the wire protocol. Drop the next four lines for
+# enable TLS on the wire protocol. Drop the next four lines for
 # plain-TCP clusters; set HOLOFS_MTLS=1 for mutual auth.
 Environment=HOLOFS_TLS=1
 Environment=HOLOFS_TLS_CA_CERT=/etc/holofs/ca.crt

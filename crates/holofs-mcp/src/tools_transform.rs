@@ -1,4 +1,4 @@
-//! Wavelet-domain transform tools (Stage 12.5).
+//! Wavelet-domain transform tools.
 //!
 //! Both tools operate at the shard level, so the work happens entirely
 //! in the frequency domain — no rebuild of the source. By default they

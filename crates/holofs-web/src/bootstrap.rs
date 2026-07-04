@@ -55,11 +55,11 @@ pub struct BootstrapConfig {
     pub no_seed: bool,
     /// rustls TLS settings for the node↔gateway wire protocol.
     pub tls: TlsOptions,
-    /// Stage 12.8: enable CLIP-based semantic search. Index lives at
+    /// enable CLIP-based semantic search. Index lives at
     /// `<storage>/embeddings.bin`; first inference downloads ~155 MiB
     /// of model weights into `~/.cache/huggingface/hub`.
     pub enable_embed: bool,
-    /// Stage 13.4: enable per-object version history. Side files under
+    /// enable per-object version history. Side files under
     /// `<storage>/versions/<sanitized_name>/`; prior shards kept live
     /// on the cluster across PUTs.
     pub enable_versions: bool,
@@ -245,7 +245,7 @@ pub async fn bootstrap_cluster(
         .clone()
         .unwrap_or_else(|| config.storage.join("catalog.bin"));
     let mut directory = Directory::load_or_empty(&catalog_path)?;
-    // Stage 9 migration: legacy catalogs stored objects under nested keys
+    // migration: legacy catalogs stored objects under nested keys
     // (`docs/note.txt`) but never wrote explicit `Directory` markers. The
     // new tree-shaped UI requires markers for every prefix, so fill in
     // anything missing and persist before the gateway opens for traffic.
@@ -351,7 +351,7 @@ pub async fn bootstrap_cluster(
         warn!("Arc<Gateway> refcount already > 1 after construction; backpressure caps stayed at defaults");
     }
     info!(medium_cap, long_cap, "N3 backpressure caps applied");
-    // Stage 12.8: wire the CLIP semantic-search index when the operator
+    // wire the CLIP semantic-search index when the operator
     // opted in. We don't pre-load the model here — that happens lazily
     // on first PUT / first search to keep boot cheap.
     if config.enable_embed {
@@ -359,7 +359,7 @@ pub async fn bootstrap_cluster(
         gateway.enable_embed(embed_path.clone()).await;
         info!(?embed_path, "semantic-search index enabled");
     }
-    // Stage 13.4: wire per-object version history when the operator
+    // wire per-object version history when the operator
     // opted in. Side files live at `<storage>/versions/<name>/v…bin`;
     // prior shards stay live on the cluster across PUTs.
     if config.enable_versions {
@@ -590,7 +590,7 @@ pub async fn bootstrap_cluster(
 }
 
 /// Build an image manifest for the seed step. Copy of the helper in
-/// `holofs-http.rs`; both files will be deduplicated in Stage 4d when the
+/// `holofs-http.rs`; both files will be deduplicated in when the
 /// legacy gateway binary is retired.
 async fn put_named(
     gf: &Gf,

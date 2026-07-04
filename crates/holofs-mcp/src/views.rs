@@ -72,7 +72,7 @@ pub struct ReadTextOut {
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SimilarIn {
     pub path: String,
-    /// `"all"` (default) | `"folder"` | `"tree"`. See Stage 11.16.
+    /// `"all"` (default) | `"folder"` | `"tree"`.
     #[serde(default)]
     pub scope: Option<String>,
 }
