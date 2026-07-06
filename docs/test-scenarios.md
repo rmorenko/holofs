@@ -6,8 +6,8 @@ CRUD, hierarchical catalog, HTTP Range, holographic degradation,
 perceptual search, escrow, persistence, and i18n. Each scenario lists
 commands, expected result, and success markers.
 
-> Targets prototype v0.4.0. CLI flags, env vars, and paths reflect the
-> code at time of writing; if anything drifts, check
+> Targets 1.0.0. CLI flags, env vars, and paths reflect the code at time
+> of writing; if anything drifts, check
 > [docs/operations.md](./operations.md) or `cargo run -p holofs-web -- --help`.
 
 ## Contents
@@ -47,7 +47,7 @@ cargo run --release --bin holofs-web -- \
 Expected log lines:
 
 ```
-INFO holofs_web: starting holofs-web version=0.4.0 addr=127.0.0.1:8787
+INFO holofs_web: starting holofs-web version=1.0.0 addr=127.0.0.1:8787
 INFO holofs_web::bootstrap: embedded cluster ready n_nodes=40 n_zones=4
 INFO holofs_web::bootstrap: catalog loaded objects=0
 INFO holofs_web: listening addr=127.0.0.1:8787

@@ -297,9 +297,8 @@ cargo install cargo-llvm-cov
 cargo llvm-cov --workspace --exclude holofs-e2e --summary-only \
   --ignore-filename-regex \
   'tests/|holofs-e2e/|holofs-web/|holofs-cli/src/bin/|holofs-gateway/src/http_gateway\.rs|holofs-mcp/src/lib\.rs|holofs-embed/src/(model|text)\.rs|holofs-codec/src/image_io\.rs'
-# TOTAL ≈ 91% line coverage across the measurable surface (v0.5.0
-# baseline; v0.6.0 refactor moved a lot of code around without
-# changing behaviour, so the number is approximately preserved).
+# TOTAL ≈ 91% line coverage across the measurable surface (1.0.0
+# baseline).
 ```
 
 The CI matrix runs the same set on stable + beta on Linux / macOS /

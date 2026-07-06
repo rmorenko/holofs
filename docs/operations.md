@@ -803,10 +803,10 @@ bad signature is logged and the old list is kept.
 ### 10.5. Rolling upgrade
 
 Holofs guarantees wire-protocol compatibility within a minor version
-(`0.x → 0.x+1` is safe). For k8s:
+(`1.x → 1.x+1` is safe). For k8s:
 
 ```sh
-helm upgrade holofs ./deploy/helm/holofs --set image.tag=0.2.0
+helm upgrade holofs ./deploy/helm/holofs --set image.tag=1.0.0
 ```
 
 The StatefulSet rolls one pod at a time, waits for readiness, then
