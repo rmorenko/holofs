@@ -136,17 +136,8 @@ After=network.target
 Type=simple
 User=holofs
 Group=holofs
-Environment=HOLOFS_DATA_DIR=/var/lib/holofs/node%i
-Environment=HOLOFS_LISTEN=0.0.0.0:91%i
-Environment=HOLOFS_WHITELIST=/etc/holofs/whitelist.holofs
-Environment=HOLOFS_SECRET_KEY=/etc/holofs/keys/node%i.priv
-# enable TLS on the wire protocol. Drop the next four lines for
-# plain-TCP clusters; set HOLOFS_MTLS=1 for mutual auth.
-Environment=HOLOFS_TLS=1
-Environment=HOLOFS_TLS_CA_CERT=/etc/holofs/ca.crt
-Environment=HOLOFS_TLS_CERT=/etc/holofs/node%i.crt
-Environment=HOLOFS_TLS_KEY=/etc/holofs/node%i.key
-ExecStart=/usr/local/bin/holofs-node
+Environment=HOLOFS_STORAGE_DIR=/var/lib/holofs/node%i
+ExecStart=/usr/local/bin/holofs-node 0.0.0.0:91%i --storage /var/lib/holofs/node%i
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65536
@@ -164,11 +155,11 @@ Then `systemctl enable --now holofs-node@00 holofs-node@01 …`.
 ### 3.1. Pull image
 
 ```sh
-docker pull ghcr.io/holofs/holofs:0.1.0
+docker pull ghcr.io/holofs/holofs:1.0.0
 ```
 
-The Dockerfile is multi-stage: rust:1.75-slim → debian:bookworm-slim. The
-runtime image runs as **non-root uid 10001**, with `tini` as PID 1.
+The Dockerfile is multi-stage: rust:1.81-slim-bookworm → debian:bookworm-slim.
+The runtime image runs as **non-root uid 10001**, with `tini` as PID 1.
 
 ### 3.2. Single-host cluster (embedded)
 
@@ -176,10 +167,8 @@ runtime image runs as **non-root uid 10001**, with `tini` as PID 1.
 docker run -d \
   --name holofs \
   -p 8787:8787 \
-  -v /srv/holofs:/var/lib/holofs \
-  -e HOLOFS_N_NODES=40 \
-  -e HOLOFS_DATA_DIR=/var/lib/holofs \
-  ghcr.io/holofs/holofs:0.1.0 holofs-cluster
+  -v /srv/holofs:/data \
+  ghcr.io/holofs/holofs:1.0.0
 ```
 
 ### 3.3. Multi-process via Compose
