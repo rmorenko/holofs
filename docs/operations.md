@@ -29,7 +29,7 @@ and **plan capacity** for a holofs cluster in production.
 
 **Recommended production target:** ≥ 5 zones × ≥ 4 hosts × 1–2 nodes per host.
 This survives **any one full-zone outage** plus simultaneous single-node
-failures in remaining zones (see [theory.md §3](./theory.md#3-priority-layers)).
+failures in remaining zones (see [theory.md §4](./theory.md#4-priority-layers-and-holographic-degradation)).
 
 ---
 
@@ -627,7 +627,7 @@ roughly **9.25×** (counting metadata, ~9.4×).
 
 **Tune for cheaper storage:** lower `R_0` (catastrophic-loss redundancy)
 to `2.0` and `R_1..3` to `[1.5, 1.2, 1.05]` — overhead drops to ~5.75×.
-See [theory.md §3](./theory.md#3-priority-layers) for the survival-margin
+See [theory.md §4](./theory.md#4-priority-layers-and-holographic-degradation) for the survival-margin
 trade-off.
 
 ### 7.2. CPU planning

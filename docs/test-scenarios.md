@@ -26,7 +26,7 @@ commands, expected result, and success markers.
 12. [Multi-process cluster](#12-multi-process-cluster)
 13. [TLS / mTLS on the wire](#13-tls--mtls-on-the-wire)
 14. [Metrics, logs, SSE](#14-metrics-logs-sse)
-15. [regression checks](-regression-checks)
+15. [Regression checks](#15-regression-checks)
 
 ---
 

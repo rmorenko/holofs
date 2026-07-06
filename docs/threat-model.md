@@ -144,7 +144,7 @@ mitigations in this document target it.
 | I3 | Metadata leak: name + kind + size                  | Manifest stores object name and content type in plaintext. Sensitive deployments should hash or pseudonymise names before upload. |
 | I4 | Side channels (cache, network timing)              | Not mitigated in 0.1 — use dedicated CPUs / network for sensitive deployments. |
 | I5 | Backup leak                                        | Backups inherit the same threat: they must be encrypted at rest (`restic --pass-file`, S3 SSE-KMS). |
-| I6 | Holoshare leak                                     | An individual `.holoshare` file is one share of a `(k,n)` Shamir-via-RLNC split. Possessing fewer than `k` is information-theoretic safe (see [theory.md §8](./theory.md#8-shamir-via-rlnc-key-escrow)). |
+| I6 | Holoshare leak                                     | An individual `.holoshare` file is one share of a `(k,n)` Shamir-via-RLNC split. Possessing fewer than `k` is information-theoretic safe (see [theory.md §8](./theory.md#8-shamir-secret-sharing--rlnc)). |
 
 ### 4.5. Denial of service
 
@@ -152,7 +152,7 @@ mitigations in this document target it.
 |---|-----------------------------------------------------|------------|
 | D1 | Flood gateway with uploads                         | Gateway must run behind a rate-limiting reverse proxy. Wire-frame size is capped at `MAX_FRAME = 64 MiB` on every node. |
 | D2 | Single node refuses requests                       | RLNC has ≥ K-of-N redundancy per layer. Auto-repair-on-read (3) + background scrub (x) detect and resurrect shards onto live nodes. |
-| D3 | Coordinated half-cluster outage                    | Margin is sized for **any one zone + scattered single failures** (see [theory.md §3](./theory.md#3-priority-layers)). Larger outages degrade gracefully: L3 (cosmetic detail) lost first, then L2, L1. |
+| D3 | Coordinated half-cluster outage                    | Margin is sized for **any one zone + scattered single failures** (see [theory.md §4](./theory.md#4-priority-layers-and-holographic-degradation)). Larger outages degrade gracefully: L3 (cosmetic detail) lost first, then L2, L1. |
 | D4 | "Sleeper" node accepts puts but never returns gets | Audit task issues random `Audit(shard_hash)` probes — a non-responsive or wrong-answering node drops reputation and stops being chosen for placement. x change: `MissingShard` is treated as neutral (no reputation hit), to avoid a dedup-collision feedback loop that previously kicked healthy nodes out of the live set. |
 | D5 | Slow-loris on TCP                                  | Per-RPC `tokio::time::timeout` budget (`HOLOFS_RPC_TIMEOUT_MS`, default 8 s, `0` disables). A timed-out RPC poisons the pooled stream and retries once on a fresh socket via `is_likely_transient`. Caps user-visible latency at 8 s + one retry instead of the OS-level 60-75 s TCP timeout. |
 | D6 | Memory exhaustion via huge frame                   | Frames > `MAX_FRAME` are rejected before allocation. |

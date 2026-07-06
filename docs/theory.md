@@ -8,7 +8,7 @@ relevant formulas, intuition, and references to the literature.
 
 ## Contents
 
-1. [Galois field GF(2⁸)](#1-galois-field-gf28)
+1. [Galois field GF(2⁸)](#1-galois-field-gf2)
 2. [Random Linear Network Coding (RLNC)](#2-random-linear-network-coding-rlnc)
 3. [Haar Discrete Wavelet Transform](#3-haar-discrete-wavelet-transform)
 4. [Priority layers and holographic degradation](#4-priority-layers-and-holographic-degradation)
