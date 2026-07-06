@@ -140,10 +140,7 @@ After=network.target
 Type=simple
 User=holofs
 Group=holofs
-Environment=HOLOFS_DATA_DIR=/var/lib/holofs/node%i
-Environment=HOLOFS_LISTEN=0.0.0.0:91%i
-Environment=HOLOFS_WHITELIST=/etc/holofs/whitelist.holofs
-Environment=HOLOFS_SECRET_KEY=/etc/holofs/keys/node%i.priv
+Environment=HOLOFS_STORAGE_DIR=/var/lib/holofs/node%i
 # включить TLS на сетевом протоколе. Уберите следующие четыре строки для
 # plain-TCP кластеров; поставьте HOLOFS_MTLS=1 для взаимной аутентификации.
 Environment=HOLOFS_TLS=1
@@ -168,10 +165,10 @@ WantedBy=multi-user.target
 ### 3.1. Скачать образ
 
 ```sh
-docker pull ghcr.io/holofs/holofs:0.1.0
+docker pull ghcr.io/holofs/holofs:1.0.0
 ```
 
-Dockerfile многоступенчатый: rust:1.75-slim → debian:bookworm-slim.
+Dockerfile многоступенчатый: rust:1.81-slim-bookworm → debian:bookworm-slim.
 Runtime-образ работает под **non-root uid 10001**, с `tini` как PID 1.
 
 ### 3.2. Single-host кластер (embedded)
@@ -180,10 +177,8 @@ Runtime-образ работает под **non-root uid 10001**, с `tini` к�
 docker run -d \
   --name holofs \
   -p 8787:8787 \
-  -v /srv/holofs:/var/lib/holofs \
-  -e HOLOFS_N_NODES=40 \
-  -e HOLOFS_DATA_DIR=/var/lib/holofs \
-  ghcr.io/holofs/holofs:0.1.0 holofs-cluster
+  -v /srv/holofs:/data \
+  ghcr.io/holofs/holofs:1.0.0
 ```
 
 ### 3.3. Multi-process через Compose
@@ -824,10 +819,10 @@ killall -SIGHUP holofs-node holofs-web
 ### 10.5. Rolling upgrade
 
 Holofs гарантирует wire-совместимость в пределах одного minor
-(`0.x → 0.x+1` безопасно). Для k8s:
+(`1.x → 1.x+1` безопасно). Для k8s:
 
 ```sh
-helm upgrade holofs ./deploy/helm/holofs --set image.tag=0.2.0
+helm upgrade holofs ./deploy/helm/holofs --set image.tag=1.0.0
 ```
 
 StatefulSet раскатывает по одному под'у, ждёт readiness, затем

@@ -6,7 +6,7 @@ CRUD, иерархический каталог, HTTP Range, голографи�
 перцептуальный поиск, эскроу, устойчивость и i18n. Каждый сценарий
 содержит команды, ожидаемый результат и маркеры успеха.
 
-> Ориентировано на прототип v0.4.0. Флаги CLI, переменные окружения и
+> Ориентировано на 1.0.0. Флаги CLI, переменные окружения и
 > пути отражают код на момент написания; если что-то расходится, сверьтесь
 > с [docs/ru/operations.md](./operations.md) или
 > `cargo run -p holofs-web -- --help`.
@@ -48,7 +48,7 @@ cargo run --release --bin holofs-web -- \
 Ожидаемые строки лога:
 
 ```
-INFO holofs_web: starting holofs-web version=0.4.0 addr=127.0.0.1:8787
+INFO holofs_web: starting holofs-web version=1.0.0 addr=127.0.0.1:8787
 INFO holofs_web::bootstrap: embedded cluster ready n_nodes=40 n_zones=4
 INFO holofs_web::bootstrap: catalog loaded objects=0
 INFO holofs_web: listening addr=127.0.0.1:8787

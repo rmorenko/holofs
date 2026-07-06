@@ -139,10 +139,7 @@ After=network.target
 Type=simple
 User=holofs
 Group=holofs
-Environment=HOLOFS_DATA_DIR=/var/lib/holofs/node%i
-Environment=HOLOFS_LISTEN=0.0.0.0:91%i
-Environment=HOLOFS_WHITELIST=/etc/holofs/whitelist.holofs
-Environment=HOLOFS_SECRET_KEY=/etc/holofs/keys/node%i.priv
+Environment=HOLOFS_STORAGE_DIR=/var/lib/holofs/node%i
 # habilita TLS sobre el protocolo de cable. Elimina las siguientes cuatro
 # líneas para clústeres de TCP plano; define HOLOFS_MTLS=1 para autenticación mutua.
 Environment=HOLOFS_TLS=1
@@ -167,10 +164,10 @@ Luego `systemctl enable --now holofs-node@00 holofs-node@01 …`.
 ### 3.1. Descargar imagen
 
 ```sh
-docker pull ghcr.io/holofs/holofs:0.1.0
+docker pull ghcr.io/holofs/holofs:1.0.0
 ```
 
-El Dockerfile es multi-etapa: rust:1.75-slim → debian:bookworm-slim.
+El Dockerfile es multi-etapa: rust:1.81-slim-bookworm → debian:bookworm-slim.
 La imagen de runtime se ejecuta como **uid 10001 no-root**, con `tini`
 como PID 1.
 
@@ -180,10 +177,8 @@ como PID 1.
 docker run -d \
   --name holofs \
   -p 8787:8787 \
-  -v /srv/holofs:/var/lib/holofs \
-  -e HOLOFS_N_NODES=40 \
-  -e HOLOFS_DATA_DIR=/var/lib/holofs \
-  ghcr.io/holofs/holofs:0.1.0 holofs-cluster
+  -v /srv/holofs:/data \
+  ghcr.io/holofs/holofs:1.0.0
 ```
 
 ### 3.3. Multi-proceso vía Compose
@@ -841,10 +836,10 @@ vieja.
 ### 10.5. Actualización en rolling
 
 Holofs garantiza compatibilidad del protocolo de cable dentro de una
-versión menor (`0.x → 0.x+1` es seguro). Para k8s:
+versión menor (`1.x → 1.x+1` es seguro). Para k8s:
 
 ```sh
-helm upgrade holofs ./deploy/helm/holofs --set image.tag=0.2.0
+helm upgrade holofs ./deploy/helm/holofs --set image.tag=1.0.0
 ```
 
 El StatefulSet rueda un pod a la vez, espera a la disponibilidad,

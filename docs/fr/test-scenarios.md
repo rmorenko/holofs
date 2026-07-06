@@ -7,7 +7,7 @@ Range, dégradation holographique, recherche perceptuelle, séquestre,
 persistance et i18n. Chaque scénario liste les commandes, le résultat
 attendu et les marqueurs de succès.
 
-> Cible prototype v0.4.0. Les drapeaux CLI, variables d'environnement
+> Cible 1.0.0. Les drapeaux CLI, variables d'environnement
 > et chemins reflètent le code au moment de la rédaction ; si quelque
 > chose dérive, consulter [docs/fr/operations.md](./operations.md) ou
 > `cargo run -p holofs-web -- --help`.
@@ -50,7 +50,7 @@ cargo run --release --bin holofs-web -- \
 Lignes de log attendues :
 
 ```
-INFO holofs_web: starting holofs-web version=0.4.0 addr=127.0.0.1:8787
+INFO holofs_web: starting holofs-web version=1.0.0 addr=127.0.0.1:8787
 INFO holofs_web::bootstrap: embedded cluster ready n_nodes=40 n_zones=4
 INFO holofs_web::bootstrap: catalog loaded objects=0
 INFO holofs_web: listening addr=127.0.0.1:8787

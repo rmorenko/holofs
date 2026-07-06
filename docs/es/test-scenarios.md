@@ -7,7 +7,7 @@ degradación holográfica, búsqueda perceptual, escrow, persistencia e
 i18n. Cada escenario lista comandos, resultado esperado y marcadores
 de éxito.
 
-> Apunta al prototipo v0.4.0. Los flags CLI, env vars y rutas reflejan
+> Apunta a 1.0.0. Los flags CLI, env vars y rutas reflejan
 > el código al momento de escritura; si algo deriva, consulta
 > [docs/es/operations.md](./operations.md) o
 > `cargo run -p holofs-web -- --help`.
@@ -49,7 +49,7 @@ cargo run --release --bin holofs-web -- \
 Líneas de log esperadas:
 
 ```
-INFO holofs_web: starting holofs-web version=0.4.0 addr=127.0.0.1:8787
+INFO holofs_web: starting holofs-web version=1.0.0 addr=127.0.0.1:8787
 INFO holofs_web::bootstrap: embedded cluster ready n_nodes=40 n_zones=4
 INFO holofs_web::bootstrap: catalog loaded objects=0
 INFO holofs_web: listening addr=127.0.0.1:8787

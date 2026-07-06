@@ -5,7 +5,7 @@ Subsystem ab — CRUD, hierarchischer Katalog, HTTP-Range, holografische
 Degradation, perzeptuelle Suche, Escrow, Persistenz und i18n. Jedes
 Szenario listet Kommandos, erwartetes Ergebnis und Erfolgsmarker.
 
-> Zielt auf Prototyp v0.4.0. CLI-Flags, Env-Vars und Pfade spiegeln
+> Zielt auf 1.0.0. CLI-Flags, Env-Vars und Pfade spiegeln
 > den Code zum Zeitpunkt des Verfassens wider; sollte etwas driften,
 > siehe [docs/operations.md](./operations.md) oder
 > `cargo run -p holofs-web -- --help`.
@@ -59,7 +59,7 @@ cargo run --release --bin holofs-web -- \
 Erwartete Log-Zeilen:
 
 ```
-INFO holofs_web: starting holofs-web version=0.4.0 addr=127.0.0.1:8787
+INFO holofs_web: starting holofs-web version=1.0.0 addr=127.0.0.1:8787
 INFO holofs_web::bootstrap: embedded cluster ready n_nodes=40 n_zones=4
 INFO holofs_web::bootstrap: catalog loaded objects=0
 INFO holofs_web: listening addr=127.0.0.1:8787

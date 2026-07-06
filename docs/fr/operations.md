@@ -142,10 +142,7 @@ After=network.target
 Type=simple
 User=holofs
 Group=holofs
-Environment=HOLOFS_DATA_DIR=/var/lib/holofs/node%i
-Environment=HOLOFS_LISTEN=0.0.0.0:91%i
-Environment=HOLOFS_WHITELIST=/etc/holofs/whitelist.holofs
-Environment=HOLOFS_SECRET_KEY=/etc/holofs/keys/node%i.priv
+Environment=HOLOFS_STORAGE_DIR=/var/lib/holofs/node%i
 # activer TLS sur le protocole filaire. Retirer les quatre lignes suivantes pour
 # des clusters TCP en clair ; définir HOLOFS_MTLS=1 pour l'authentification mutuelle.
 Environment=HOLOFS_TLS=1
@@ -170,10 +167,10 @@ Puis `systemctl enable --now holofs-node@00 holofs-node@01 …`.
 ### 3.1. Récupérer l'image
 
 ```sh
-docker pull ghcr.io/holofs/holofs:0.1.0
+docker pull ghcr.io/holofs/holofs:1.0.0
 ```
 
-Le Dockerfile est multi-étages : rust:1.75-slim → debian:bookworm-slim.
+Le Dockerfile est multi-étages : rust:1.81-slim-bookworm → debian:bookworm-slim.
 L'image d'exécution tourne en **uid 10001 non-root**, avec `tini`
 comme PID 1.
 
@@ -183,10 +180,8 @@ comme PID 1.
 docker run -d \
   --name holofs \
   -p 8787:8787 \
-  -v /srv/holofs:/var/lib/holofs \
-  -e HOLOFS_N_NODES=40 \
-  -e HOLOFS_DATA_DIR=/var/lib/holofs \
-  ghcr.io/holofs/holofs:0.1.0 holofs-cluster
+  -v /srv/holofs:/data \
+  ghcr.io/holofs/holofs:1.0.0
 ```
 
 ### 3.3. Multi-processus via Compose
@@ -846,10 +841,10 @@ liste est conservée.
 ### 10.5. Mise à jour progressive
 
 Holofs garantit la compatibilité du protocole filaire dans une
-version mineure (`0.x → 0.x+1` est sûr). Pour k8s :
+version mineure (`1.x → 1.x+1` est sûr). Pour k8s :
 
 ```sh
-helm upgrade holofs ./deploy/helm/holofs --set image.tag=0.2.0
+helm upgrade holofs ./deploy/helm/holofs --set image.tag=1.0.0
 ```
 
 Le StatefulSet roule un pod à la fois, attend la readiness, puis
