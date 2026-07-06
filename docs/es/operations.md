@@ -48,7 +48,7 @@ más fallos simultáneos de nodos individuales en las zonas restantes
 
 ```sh
 # MSRV fijado: 1.75
-rustup install 1.75.0
+rustup install 1.81.0
 cargo build --release --workspace
 ```
 
@@ -68,18 +68,27 @@ Binarios producidos bajo `target/release/`:
 ### 2.3. Whitelist (requerido en producción)
 
 ```sh
-# 1. Generar pares de claves Ed25519 por nodo
-holofs-admin keygen --out keys/
+# 1. Generar un par de claves admin (offline; sólo la pubkey se
+#    distribuye).
+holofs-admin gen-key admin.key
+holofs-admin pubkey admin.key   # imprime ADMIN_PUBKEY_HEX
 
-# 2. Construir la whitelist
-holofs-admin whitelist build \
-    --node 10.0.1.10:9100 --pubkey keys/node1.pub --zone 0 \
-    --node 10.0.1.11:9100 --pubkey keys/node2.pub --zone 1 \
-    --node 10.0.2.10:9100 --pubkey keys/node3.pub --zone 2 \
-    --admin-key keys/admin.priv \
+# 2. Arrancar cada nodo una vez para que materialice su propio
+#    identity.key e imprima su pubkey — recoger estas cadenas hex.
+holofs-node 10.0.1.10:9100 --storage /var/lib/holofs/node00
+# → holofs-node addr=10.0.1.10:9100 pubkey=NODE0_PUBKEY_HEX
+
+# 3. Firmar la whitelist. Cada --node es ADDR=PUBKEY_HEX:ZONE.
+holofs-admin sign-whitelist \
+    --admin admin.key \
+    --node 10.0.1.10:9100=NODE0_PUBKEY_HEX:0 \
+    --node 10.0.1.11:9100=NODE1_PUBKEY_HEX:0 \
+    --node 10.0.2.10:9100=NODE2_PUBKEY_HEX:1 \
     --out whitelist.holofs
 
-# 3. Distribuir whitelist.holofs a cada nodo + gateway
+# 4. Distribuir whitelist.holofs a cada nodo + gateway. Verificar:
+holofs-admin verify-whitelist whitelist.holofs --admin-pubkey ADMIN_PUBKEY_HEX
+holofs-admin show-whitelist   whitelist.holofs
 ```
 
 Formato de cable: `HOLOFSW1` (véase [api.md §3.4](./api.md#34-whitelist-holofsw1)).
@@ -185,16 +194,14 @@ docker run -d \
 
 ```yaml
 services:
-  node-0: { ... environment: { HOLOFS_LISTEN: 0.0.0.0:9100, HOLOFS_ZONE: 0 } }
-  node-1: { ... environment: { HOLOFS_LISTEN: 0.0.0.0:9101, HOLOFS_ZONE: 0 } }
-  ...
-  gateway:
-    command: holofs-web
+  holofs:
+    image: ghcr.io/holofs/holofs:1.0.0
+    volumes: ["/srv/holofs:/data"]
     environment:
-      HOLOFS_NODES: node-0:9100,node-1:9101,...
-      HOLOFS_WHITELIST: /etc/holofs/whitelist.holofs
+      HOLOFS_LOG_FORMAT: json
+      HOLOFS_ENABLE_EMBED: "1"
+      HOLOFS_ENABLE_VERSIONS: "1"
     ports: ["8787:8787"]
-    depends_on: [node-0, node-1, ...]
 ```
 
 ---
@@ -240,53 +247,63 @@ readinessProbe: { httpGet: { path: /health,  port: http }, periodSeconds: 10 }
 Toda la configuración es vía variables de entorno (los flags CLI
 también se aceptan; los flags ganan).
 
-### 5.1. Común a todos los binarios
+### 5.1. Gateway (`holofs-web`)
+
+| Variable                    | Por defecto               | Descripción                                  |
+|-----------------------------|---------------------------|----------------------------------------------|
+| `HOLOFS_STORAGE_DIR`        | `./holofs-data`           | Raíz de almacenamiento para shards, catálogo, manifiestos. |
+| `HOLOFS_CATALOG`            | `<storage>/catalog.bin`   | Sobrescribir la ruta del archivo de catálogo. |
+| `HOLOFS_CONFIG`             | (unset)                   | Ruta a un archivo TOML de configuración (§5.7). |
+| `HOLOFS_LOG`                | `info,holofs_web=debug`   | Spec de filtro `tracing`.                    |
+| `HOLOFS_LOG_FORMAT`         | `text`                    | `text` \| `json` (producción: `json`).       |
+| `LEPTOS_SITE_ADDR`          | `127.0.0.1:8787`          | Dirección HTTP de escucha (`--addr`).        |
+| `HOLOFS_METRICS_LISTEN`     | (unset)                   | Dirección de escucha Prometheus separada opcional. |
+| `HOLOFS_SEED_PHOTO`         | (unset)                   | Ruta a un PNG que se siembra como `photo.png` en el primer arranque. |
+| `HOLOFS_NO_SEED`            | `false`                   | Omitir el seed de demo de dos PNG en un catálogo vacío. |
+
+Cada variable de esta tabla tiene un flag CLI equivalente
+(`--storage`, `--log`, `--addr`, etc.) — `holofs-web --help` es la
+lista canónica. Los flags tienen precedencia sobre las env vars.
+
+### 5.2. `holofs-node` standalone
+
+El daemon de nodo standalone solo acepta argumentos posicionales y
+**no** lee ninguna env var `HOLOFS_*` — es deliberadamente mínimo
+para que el mismo binario funcione bajo systemd, docker o
+invocación manual.
+
+```text
+holofs-node [ADDR] [--storage DIR]
+```
+
+`ADDR` por defecto `127.0.0.1:5000`. `--storage DIR` activa la
+identidad persistente + shards en disco; sin él el nodo corre en
+memoria y regenera su pubkey en cada arranque (solo dev/demo).
+
+### 5.3. Gateway en modo distribuido (whitelist + TLS)
 
 | Variable                    | Por defecto    | Descripción                                  |
 |-----------------------------|----------------|----------------------------------------------|
-| `HOLOFS_STORAGE_DIR`        | `./holofs-data` | Raíz de almacenamiento para shards, catálogo, manifiestos |
-| `HOLOFS_LOG`                | `info,holofs_web=debug` | Spec de filtro `tracing`             |
-| `HOLOFS_LOG_FORMAT`         | `text`         | `text` \| `json` (producción: `json`)         |
-| `HOLOFS_TELEMETRY_OTLP`     | (off)          | Endpoint OTLP, p. ej. `http://otel:4317` (planificado) |
-| `HOLOFS_METRICS_LISTEN`     | (unset)        | Dirección de escucha Prometheus separada opcional (por defecto: servir en puerto principal) |
-
-Cada variable tiene un flag CLI equivalente (`--storage`, `--log`,
-etc.) — ejecuta `holofs-web --help` para la lista completa. Los flags
-tienen precedencia sobre las env vars.
-
-### 5.2. Específico de nodo
-
-| Variable                    | Por defecto    | Descripción                              |
-|-----------------------------|----------------|------------------------------------------|
-| `HOLOFS_LISTEN`             | `0.0.0.0:9100` | Dirección de bind del protocolo de cable |
-| `HOLOFS_ZONE`               | `0`            | ID de zona (usado por placement zone-aware) |
-| `HOLOFS_SECRET_KEY`         | —              | Ruta al secreto Ed25519 (32 bytes)       |
-| `HOLOFS_WHITELIST`          | —              | Ruta a la whitelist firmada              |
-| `HOLOFS_MAX_DISK_GB`        | `unlimited`    | Rehusa Put una vez excedido              |
-
-### 5.3. Específico de gateway
-
-| Variable                    | Por defecto    | Descripción                              |
-|-----------------------------|----------------|------------------------------------------|
-| `HOLOFS_NODES`              | —              | CSV de `addr:port` (bootstrap inicial)   |
-| `HOLOFS_MONITOR_INTERVAL`   | `15`           | Período de sondeo de salud (segundos)    |
-| `HOLOFS_AUDIT_INTERVAL`     | `30`           | Período de auditoría en segundo plano (segundos) |
-| `HOLOFS_REPAIR_INTERVAL`    | `60`           | Barrido de reparación en segundo plano   |
+| `HOLOFS_WHITELIST`          | —              | Ruta a una whitelist firmada (§2.3). Cambia el binario a modo distribuido. |
+| `HOLOFS_ADMIN_PUBKEY`       | —              | Hex de 64 caracteres de la pubkey admin que firmó la whitelist. |
 | `HOLOFS_TLS`                | (off)          | Cifra el protocolo de cable (gateway↔nodos) con rustls. El modo embebido auto-genera una CA autofirmada. |
 | `HOLOFS_MTLS`               | (off)          | Implica `HOLOFS_TLS=1`. El servidor también requiere + verifica un cert de cliente. |
-| `HOLOFS_TLS_CERT`           | —              | Modo distribuido: ruta al cert de hoja PEM |
-| `HOLOFS_TLS_KEY`            | —              | Modo distribuido: ruta a la clave PEM correspondiente |
-| `HOLOFS_TLS_CA_CERT`        | —              | Modo distribuido: ruta a la raíz de confianza CA PEM |
-| `HOLOFS_PLACEMENT`          | `rendezvous`   | `roundrobin` \| `rendezvous` \| `rendezvous-zone` |
+| `HOLOFS_TLS_CERT`           | —              | Modo distribuido: ruta al cert de hoja PEM.  |
+| `HOLOFS_TLS_KEY`            | —              | Modo distribuido: ruta a la clave PEM correspondiente. |
+| `HOLOFS_TLS_CA_CERT`        | —              | Modo distribuido: ruta a la raíz de confianza CA PEM. |
 
 ### 5.4. Clúster embebido
 
-| Variable                    | Por defecto    | Descripción                              |
-|-----------------------------|----------------|------------------------------------------|
-| `HOLOFS_N_NODES`            | `40`           | Número de nodos en proceso               |
-| `HOLOFS_EMBED_BASE_PORT`    | `9100`         | Puerto base estable (evita churn efímero) |
-| `HOLOFS_ZONES`              | `5`            | Número de zonas a asignar                |
-| `HOLOFS_NO_SEED`            | `false`        | Omitir el seed de demo de dos PNG en un catálogo vacío. Poner a `true` cuando se re-suba desde un árbol de muestra conocido para que el seed no colisione con tus datos. |
+Los tamaños de la topología embebida (`holofs-web` sin
+`--whitelist`) son constantes de compilación: `N_NODES = 40`,
+`NLAYERS = 4`, `K = 16`, `LEVELS = 3`. Sólo el puerto base y el
+comportamiento del seed son ajustables en runtime.
+
+| Variable                    | Por defecto | Descripción                                     |
+|-----------------------------|-------------|-------------------------------------------------|
+| `HOLOFS_EMBED_BASE_PORT`    | `9100`      | Puerto base estable para los nodos en proceso; cada nodo enlaza `base + idx`. Ponlo para evitar el churn de puertos efímeros. |
+| `HOLOFS_NO_SEED`            | `false`     | Omitir el seed de demo de dos PNG en un catálogo vacío. Poner a `true` cuando se re-suba desde un árbol de muestra conocido para que el seed no colisione con tus datos. |
+| `HOLOFS_W` / `HOLOFS_H`     | `512`       | Dimensiones del frame (ambos deben ser un múltiplo positivo de `2^LEVELS = 8`). |
 
 ### 5.5. Fiabilidad
 
@@ -760,9 +777,10 @@ Ejecutar trimestralmente. Escenarios sugeridos:
 1. **Simulacro de kill de zona** — `kubectl drain` todos los pods en una
    etiqueta de zona; aseverar que ningún objeto se vuelve inaccesible
    y la reparación se completa en < 10 min.
-2. **Simulacro de restauración en frío** — desde un clúster k8s fresco,
-   ejecutar `holofs-admin import-all` contra un bucket de backup;
-   medir RTO.
+2. **Simulacro de restauración en frío** — en un clúster k8s fresco,
+   restaurar `<storage>/` desde el bucket de backup (`restic restore`
+   / `rclone copy`), levantar el gateway, verificar `/api/stats` y un
+   GET puntual; medir RTO.
 3. **Simulacro de rotación de clave** — firmar una nueva whitelist con
    la clave de admin, hot-reload sin downtime.
 
@@ -773,38 +791,48 @@ Ejecutar trimestralmente. Escenarios sugeridos:
 ### 10.1. Añadir un nodo
 
 ```sh
-# 1. Generar nueva clave de nodo
-holofs-admin keygen --out keys/node41.priv
+# 1. Arrancar el nuevo nodo una vez para que materialice su identity
+#    e imprima su pubkey. El directorio storage debe estar vacío.
+holofs-node 10.0.3.10:9100 --storage /var/lib/holofs/node41
+# → holofs-node addr=10.0.3.10:9100 pubkey=NEW_PUBKEY_HEX
 
-# 2. Re-firmar whitelist con nueva entrada
-holofs-admin whitelist add \
-  --whitelist whitelist.holofs \
-  --node 10.0.3.10:9100 --pubkey keys/node41.pub --zone 4 \
-  --admin-key keys/admin.priv \
-  --out whitelist.holofs.new
+# 2. Re-firmar la whitelist con el conjunto *completo* de nodos
+#    (sign-whitelist siempre regenera el archivo desde cero).
+holofs-admin sign-whitelist \
+  --admin admin.key \
+  --node 10.0.1.10:9100=NODE0_PUBKEY_HEX:0 \
+  ... \
+  --node 10.0.3.10:9100=NEW_PUBKEY_HEX:4 \
+  --out whitelist.holofs
 
-# 3. Distribuir, hot-reload, luego iniciar el nodo
+# 3. Distribuir whitelist.holofs a cada nodo + gateway; SIGHUP.
 ```
 
 El catálogo permanece sin cambios; los placements futuros pueden
 elegir el nuevo nodo vía HRW. Los objetos existentes **no** se
-rebalancean automáticamente — ejecutar `holofs-admin rebalance` para
-migrar shards (opcional; no es necesario para la corrección).
+rebalancean automáticamente — el scrub en segundo plano
+(`HOLOFS_SCRUB_INTERVAL`) y la auto-reparación en lectura migran
+los shards gradualmente.
 
 ### 10.2. Eliminar (decomisar) un nodo
 
+No hay un comando `drain` dedicado — decomisar es una edición de la
+whitelist + apagar el demonio; el bucle de reparación del clúster
+restaura los shards perdidos.
+
 ```sh
-# 1. Drenar — rehúsa nuevos Puts, termina en-vuelo
-holofs-admin node drain 10.0.1.10:9100
+# 1. Re-firmar whitelist sin el nodo que sale.
+holofs-admin sign-whitelist \
+  --admin admin.key \
+  --node 10.0.1.11:9100=NODE1_PUBKEY_HEX:0 \
+  ... \
+  --out whitelist.holofs
 
-# 2. Esperar a que la reparación redistribuya sus shards
-holofs-admin node status 10.0.1.10:9100
-# → "drained, 0 shards remaining"
-
-# 3. Quitar de la whitelist
-holofs-admin whitelist remove --node 10.0.1.10:9100 …
-
-# 4. Apagar la unidad systemd
+# 2. Distribuir + SIGHUP cada nodo + gateway restante.
+# 3. Observar cómo `holofs_repair_completed_total` sube: el scrub
+#    reubica los shards del nodo que se fue en los supervivientes.
+# 4. Una vez que /api/stats muestre los objetos totalmente reparados,
+#    apagar el viejo demonio.
 systemctl stop holofs-node@10
 ```
 

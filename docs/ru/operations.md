@@ -47,8 +47,8 @@
 ### 2.2. Сборка из исходников
 
 ```sh
-# Закреплённый MSRV: 1.75
-rustup install 1.75.0
+# Закреплённый MSRV: 1.81
+rustup install 1.81.0
 cargo build --release --workspace
 ```
 
@@ -68,18 +68,26 @@ cargo build --release --workspace
 ### 2.3. Whitelist (обязателен в проде)
 
 ```sh
-# 1. Сгенерировать per-node Ed25519 keypair
-holofs-admin keygen --out keys/
+# 1. Сгенерировать admin-keypair (хранится офлайн; наружу — только pubkey).
+holofs-admin gen-key admin.key
+holofs-admin pubkey admin.key   # печатает ADMIN_PUBKEY_HEX
 
-# 2. Собрать whitelist
-holofs-admin whitelist build \
-    --node 10.0.1.10:9100 --pubkey keys/node1.pub --zone 0 \
-    --node 10.0.1.11:9100 --pubkey keys/node2.pub --zone 1 \
-    --node 10.0.2.10:9100 --pubkey keys/node3.pub --zone 2 \
-    --admin-key keys/admin.priv \
+# 2. Единожды поднять каждую ноду — она создаст свой identity.key и
+#    выведет свой pubkey; соберите эти hex-строки.
+holofs-node 10.0.1.10:9100 --storage /var/lib/holofs/node00
+# → holofs-node addr=10.0.1.10:9100 pubkey=NODE0_PUBKEY_HEX
+
+# 3. Подписать whitelist. Каждый --node в формате ADDR=PUBKEY_HEX:ZONE.
+holofs-admin sign-whitelist \
+    --admin admin.key \
+    --node 10.0.1.10:9100=NODE0_PUBKEY_HEX:0 \
+    --node 10.0.1.11:9100=NODE1_PUBKEY_HEX:0 \
+    --node 10.0.2.10:9100=NODE2_PUBKEY_HEX:1 \
     --out whitelist.holofs
 
-# 3. Раскатить whitelist.holofs на каждую ноду + gateway
+# 4. Раскатить whitelist.holofs на каждую ноду + gateway. Проверить:
+holofs-admin verify-whitelist whitelist.holofs --admin-pubkey ADMIN_PUBKEY_HEX
+holofs-admin show-whitelist   whitelist.holofs
 ```
 
 Формат: `HOLOFSW1` (см. [api.md §3.4](./api.md#34-whitelist-holofsw1)).
@@ -185,16 +193,14 @@ docker run -d \
 
 ```yaml
 services:
-  node-0: { ... environment: { HOLOFS_LISTEN: 0.0.0.0:9100, HOLOFS_ZONE: 0 } }
-  node-1: { ... environment: { HOLOFS_LISTEN: 0.0.0.0:9101, HOLOFS_ZONE: 0 } }
-  ...
-  gateway:
-    command: holofs-web
+  holofs:
+    image: ghcr.io/holofs/holofs:1.0.0
+    volumes: ["/srv/holofs:/data"]
     environment:
-      HOLOFS_NODES: node-0:9100,node-1:9101,...
-      HOLOFS_WHITELIST: /etc/holofs/whitelist.holofs
+      HOLOFS_LOG_FORMAT: json
+      HOLOFS_ENABLE_EMBED: "1"
+      HOLOFS_ENABLE_VERSIONS: "1"
     ports: ["8787:8787"]
-    depends_on: [node-0, node-1, ...]
 ```
 
 ---
@@ -240,53 +246,64 @@ readinessProbe: { httpGet: { path: /health,  port: http }, periodSeconds: 10 }
 Вся конфигурация — через env-var (CLI-флаги тоже принимаются; флаги
 выигрывают).
 
-### 5.1. Общие для всех бинарников
+### 5.1. Gateway (`holofs-web`)
 
-| Переменная                  | По умолчанию              | Описание                                 |
-|-----------------------------|---------------------------|------------------------------------------|
-| `HOLOFS_STORAGE_DIR`        | `./holofs-data`           | Корень storage для шардов, каталога, манифестов |
-| `HOLOFS_LOG`                | `info,holofs_web=debug`   | Спецификация фильтра `tracing`          |
-| `HOLOFS_LOG_FORMAT`         | `text`                    | `text` \| `json` (прод: `json`)          |
-| `HOLOFS_TELEMETRY_OTLP`     | (off)                     | OTLP-эндпоинт, например `http://otel:4317` (планируется) |
-| `HOLOFS_METRICS_LISTEN`     | (не задано)               | Опциональный отдельный listen-адрес для Prometheus (по умолчанию — на основном порту) |
+| Переменная                  | По умолчанию              | Описание                                     |
+|-----------------------------|---------------------------|----------------------------------------------|
+| `HOLOFS_STORAGE_DIR`        | `./holofs-data`           | Корень storage для шардов, каталога, манифестов. |
+| `HOLOFS_CATALOG`            | `<storage>/catalog.bin`   | Переопределить путь до файла каталога.       |
+| `HOLOFS_CONFIG`             | (не задано)               | Путь до TOML-конфига (§5.7).                 |
+| `HOLOFS_LOG`                | `info,holofs_web=debug`   | Спецификация фильтра `tracing`.              |
+| `HOLOFS_LOG_FORMAT`         | `text`                    | `text` \| `json` (прод: `json`).             |
+| `LEPTOS_SITE_ADDR`          | `127.0.0.1:8787`          | HTTP listen-адрес (`--addr`).                |
+| `HOLOFS_METRICS_LISTEN`     | (не задано)               | Опциональный отдельный listen-адрес для Prometheus. |
+| `HOLOFS_SEED_PHOTO`         | (не задано)               | Путь до PNG, которым засеять `photo.png` на первом старте. |
+| `HOLOFS_NO_SEED`            | `false`                   | Пропустить two-PNG демо-seed на пустом каталоге. |
 
-У каждой переменной есть соответствующий CLI-флаг (`--storage`,
-`--log`, и т. д.) — запустите `holofs-web --help` для полного списка.
-Флаги имеют приоритет над env-var.
+У каждой переменной из таблицы есть соответствующий CLI-флаг
+(`--storage`, `--log`, `--addr`, и т. д.) — запустите `holofs-web
+--help` для полного канонического списка. Флаги имеют приоритет над
+env-var.
 
-### 5.2. Специфичные для нод
+### 5.2. Standalone `holofs-node`
 
-| Переменная                  | По умолчанию   | Описание                                 |
-|-----------------------------|----------------|------------------------------------------|
-| `HOLOFS_LISTEN`             | `0.0.0.0:9100` | Bind-адрес сетевого протокола            |
-| `HOLOFS_ZONE`               | `0`            | ID зоны (используется zone-aware placement) |
-| `HOLOFS_SECRET_KEY`         | —              | Путь до Ed25519-секрета (32 байта)       |
-| `HOLOFS_WHITELIST`          | —              | Путь до подписанного whitelist           |
-| `HOLOFS_MAX_DISK_GB`        | `unlimited`    | Отказ в Put при превышении               |
+Standalone-демон ноды принимает только позиционные аргументы и **не**
+читает никаких `HOLOFS_*` env-var — это намеренно минималистично,
+чтобы один и тот же бинарь работал под systemd, docker и в ручном
+запуске.
 
-### 5.3. Специфичные для gateway
+```text
+holofs-node [ADDR] [--storage DIR]
+```
 
-| Переменная                  | По умолчанию   | Описание                                 |
-|-----------------------------|----------------|------------------------------------------|
-| `HOLOFS_NODES`              | —              | CSV из `addr:port` (initial bootstrap)   |
-| `HOLOFS_MONITOR_INTERVAL`   | `15`           | Период health-опроса (секунд)            |
-| `HOLOFS_AUDIT_INTERVAL`     | `30`           | Период фонового аудита (секунд)          |
-| `HOLOFS_REPAIR_INTERVAL`    | `60`           | Sweep фоновой починки                    |
+`ADDR` по умолчанию `127.0.0.1:5000`. `--storage DIR` включает
+персистентную identity + шарды на диске; без него нода работает
+in-memory и перегенерирует свой pubkey на каждом старте (только для
+dev/demo).
+
+### 5.3. Distributed-режим gateway (whitelist + TLS)
+
+| Переменная                  | По умолчанию   | Описание                                     |
+|-----------------------------|----------------|----------------------------------------------|
+| `HOLOFS_WHITELIST`          | —              | Путь до подписанного whitelist (§2.3). Переключает бинарь в distributed-режим. |
+| `HOLOFS_ADMIN_PUBKEY`       | —              | 64-символьный hex admin-pubkey, которым подписан whitelist. |
 | `HOLOFS_TLS`                | (off)          | Шифровать сетевой протокол (gateway↔ноды) через rustls. Embedded-режим автоматически генерирует self-signed CA. |
 | `HOLOFS_MTLS`               | (off)          | Подразумевает `HOLOFS_TLS=1`. Сервер также требует + проверяет client-cert. |
-| `HOLOFS_TLS_CERT`           | —              | Distributed-режим: путь до PEM leaf-cert |
-| `HOLOFS_TLS_KEY`            | —              | Distributed-режим: путь до соответствующего PEM key |
-| `HOLOFS_TLS_CA_CERT`        | —              | Distributed-режим: путь до PEM CA-trust root |
-| `HOLOFS_PLACEMENT`          | `rendezvous`   | `roundrobin` \| `rendezvous` \| `rendezvous-zone` |
+| `HOLOFS_TLS_CERT`           | —              | Distributed-режим: путь до PEM leaf-cert.    |
+| `HOLOFS_TLS_KEY`            | —              | Distributed-режим: путь до соответствующего PEM key. |
+| `HOLOFS_TLS_CA_CERT`        | —              | Distributed-режим: путь до PEM CA-trust root. |
 
 ### 5.4. Embedded-кластер
 
-| Переменная                  | По умолчанию   | Описание                                 |
-|-----------------------------|----------------|------------------------------------------|
-| `HOLOFS_N_NODES`            | `40`           | Число in-process нод                     |
-| `HOLOFS_EMBED_BASE_PORT`    | `9100`         | Стабильный base-port (без ephemeral churn) |
-| `HOLOFS_ZONES`              | `5`            | Число зон для назначения                 |
-| `HOLOFS_NO_SEED`            | `false`        | Пропустить two-PNG демо-seed на пустом каталоге. Ставьте `true` при перезагрузке с известного sample-дерева, чтобы seed не коллизился с вашими данными. |
+Размеры embedded-топологии (`holofs-web` без `--whitelist`) —
+compile-time константы: `N_NODES = 40`, `NLAYERS = 4`, `K = 16`,
+`LEVELS = 3`. Только базовый порт и seed настраиваются в рантайме.
+
+| Переменная                  | По умолчанию | Описание                                        |
+|-----------------------------|--------------|-------------------------------------------------|
+| `HOLOFS_EMBED_BASE_PORT`    | `9100`       | Стабильный base-port для in-process нод; каждая нода биндит `base + idx`. Задавайте, чтобы избежать ephemeral-port churn. |
+| `HOLOFS_NO_SEED`            | `false`      | Пропустить two-PNG демо-seed на пустом каталоге. Ставьте `true` при перезагрузке с известного sample-дерева, чтобы seed не коллизился с вашими данными. |
+| `HOLOFS_W` / `HOLOFS_H`     | `512`        | Размеры кадра (оба должны быть положительным кратным `2^LEVELS = 8`). |
 
 ### 5.5. Надёжность
 
@@ -746,8 +763,9 @@ flowchart TD
 1. **Zone-kill drill** — `kubectl drain` всех подов в одной zone-label;
    убедиться, что ни один объект не стал недоступен и repair завершил
    работу за < 10 мин.
-2. **Cold-restore drill** — на свежем k8s-кластере запустить
-   `holofs-admin import-all` против backup-bucket'а; замерить RTO.
+2. **Cold-restore drill** — на свежем k8s-кластере восстановить
+   `<storage>/` из backup-bucket'а (`restic restore` / `rclone copy`),
+   поднять gateway, проверить `/api/stats` и spot-GET; замерить RTO.
 3. **Ротация ключей** — подписать новый whitelist admin-ключом,
    hot-reload без downtime.
 
@@ -758,38 +776,46 @@ flowchart TD
 ### 10.1. Добавить ноду
 
 ```sh
-# 1. Сгенерировать новый node-ключ
-holofs-admin keygen --out keys/node41.priv
+# 1. Единожды поднять новую ноду, чтобы она создала свой identity
+#    и вывела pubkey. Storage-директория должна быть пустой.
+holofs-node 10.0.3.10:9100 --storage /var/lib/holofs/node41
+# → holofs-node addr=10.0.3.10:9100 pubkey=NEW_PUBKEY_HEX
 
-# 2. Переподписать whitelist с новой записью
-holofs-admin whitelist add \
-  --whitelist whitelist.holofs \
-  --node 10.0.3.10:9100 --pubkey keys/node41.pub --zone 4 \
-  --admin-key keys/admin.priv \
-  --out whitelist.holofs.new
+# 2. Переподписать whitelist с *полным* новым списком нод
+#    (sign-whitelist каждый раз генерит файл с нуля).
+holofs-admin sign-whitelist \
+  --admin admin.key \
+  --node 10.0.1.10:9100=NODE0_PUBKEY_HEX:0 \
+  ... \
+  --node 10.0.3.10:9100=NEW_PUBKEY_HEX:4 \
+  --out whitelist.holofs
 
-# 3. Раскатить, hot-reload, потом запустить ноду
+# 3. Раскатить whitelist.holofs на каждую ноду + gateway; SIGHUP им.
 ```
 
 Каталог не меняется; будущие placement'ы могут выбирать новую ноду
 через HRW. Существующие объекты **не** ребалансятся автоматически —
-запустите `holofs-admin rebalance` для миграции шардов (опционально;
-для корректности не требуется).
+фоновый scrub (`HOLOFS_SCRUB_INTERVAL`) и auto-repair на чтении
+постепенно мигрируют шарды по мере появления новых.
 
 ### 10.2. Убрать (decommission) ноду
 
+Отдельной команды `drain` нет — вывод ноды — это правка whitelist +
+остановка демона; фоновый repair сам восполнит потерянные шарды.
+
 ```sh
-# 1. Drain — отказ от новых Put, доделать in-flight
-holofs-admin node drain 10.0.1.10:9100
+# 1. Переподписать whitelist без уходящей ноды.
+holofs-admin sign-whitelist \
+  --admin admin.key \
+  --node 10.0.1.11:9100=NODE1_PUBKEY_HEX:0 \
+  ... \
+  --out whitelist.holofs
 
-# 2. Дождаться, пока repair перераспределит её шарды
-holofs-admin node status 10.0.1.10:9100
-# → "drained, 0 shards remaining"
-
-# 3. Убрать из whitelist
-holofs-admin whitelist remove --node 10.0.1.10:9100 …
-
-# 4. Погасить systemd-unit
+# 2. Раскатить + SIGHUP всем оставшимся нодам + gateway.
+# 3. Смотреть, как `holofs_repair_completed_total` растёт: scrub
+#    переносит шарды ушедшей ноды на выживших.
+# 4. Как только /api/stats покажет полное восстановление — гасить
+#    старый демон.
 systemctl stop holofs-node@10
 ```
 
