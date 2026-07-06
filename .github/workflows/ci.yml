@@ -24,6 +24,42 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # === Non-Rust style linters ===============================================
+  # Prose (typos + markdownlint), TOML (taplo), and shell (shellcheck).
+  # Rust code is covered by rustfmt + clippy in the jobs above/below.
+  # Local equivalent: `make lint`.
+  style:
+    name: style (typos, markdownlint, taplo, shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install typos
+        uses: crate-ci/typos@master
+        with:
+          config: ./_typos.toml
+      - name: Install taplo
+        run: |
+          curl -fsSL https://github.com/tamasfe/taplo/releases/latest/download/taplo-linux-x86_64.gz \
+            | gunzip > /usr/local/bin/taplo
+          chmod +x /usr/local/bin/taplo
+          taplo --version
+      - name: taplo fmt --check
+        run: taplo fmt --check
+      - name: Install markdownlint-cli2
+        run: npm install -g markdownlint-cli2@0.23.0
+      - name: markdownlint-cli2
+        run: markdownlint-cli2
+      - name: shellcheck
+        run: |
+          shellcheck \
+            deploy/dev-seed.sh \
+            scripts/spawn-cluster.sh \
+            tools/test-data/run-tests.sh \
+            tools/test-data/fetch-real-landscapes.sh \
+            tools/test-data/clean-cluster.sh \
+            tools/test-data/upload-samples.sh \
+            crates/holofs-e2e/scripts/run-tests.sh
+
   # === Clippy lints =========================================================
   # `holofs-web` has mutually-exclusive `ssr` and `hydrate` features, so we
   # cannot use `--all-features`. Lint the workspace with the default

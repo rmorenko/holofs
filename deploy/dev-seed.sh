@@ -33,7 +33,7 @@ SAMPLE_PNG="${SAMPLE_PNG:-$PWD/assets/sample.png}"
 mkdir -p "$FETCH"
 
 # --- coloured status helpers -------------------------------------------
-BOLD="\033[1m"; DIM="\033[2m"; GRN="\033[32m"; RED="\033[31m"
+GRN="\033[32m"; RED="\033[31m"
 CYA="\033[36m"; YLW="\033[33m"; NC="\033[0m"
 
 say()  { printf "${CYA}[seed]${NC} %s\n" "$*"; }

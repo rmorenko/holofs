@@ -475,7 +475,7 @@ mod tests {
         let _g = DisablePool::new();
         let (a, _ha) = spawn_responder(Response::Pong).await;
         // Bind+drop a second node so its port is closed — gives us a
-        // determistic "node b is dead" baseline.
+        // deterministic "node b is dead" baseline.
         let dead_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let b = dead_listener.local_addr().unwrap().to_string();
         drop(dead_listener);

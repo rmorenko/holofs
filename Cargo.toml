@@ -1,21 +1,21 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/holofs-core",
-    "crates/holofs-model",
-    "crates/holofs-wire",
-    "crates/holofs-codec",
-    "crates/holofs-storage",
-    "crates/holofs-client",
-    "crates/holofs-cluster",
-    "crates/holofs-analytics",
-    "crates/holofs-gateway",
-    "crates/holofs-cli",
-    "crates/holofs-web",
-    "crates/holofs-mcp",
-    "crates/holofs-embed",
-    "crates/holofs-e2e",
-    "crates/holofs-testutils",
+  "crates/holofs-core",
+  "crates/holofs-model",
+  "crates/holofs-wire",
+  "crates/holofs-codec",
+  "crates/holofs-storage",
+  "crates/holofs-client",
+  "crates/holofs-cluster",
+  "crates/holofs-analytics",
+  "crates/holofs-gateway",
+  "crates/holofs-cli",
+  "crates/holofs-web",
+  "crates/holofs-mcp",
+  "crates/holofs-embed",
+  "crates/holofs-e2e",
+  "crates/holofs-testutils",
 ]
 
 [workspace.package]
@@ -34,33 +34,83 @@ publish = false
 
 [workspace.dependencies]
 # Math/IO base
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "net",
+  "io-util",
+  "macros",
+  "sync",
+  "time",
+  "signal",
+] }
 # CancellationToken for graceful shutdown across background tasks.
-tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+tokio-util = { version = "0.7", default-features = false, features = [ "rt" ] }
 png = "0.18"
-image = { version = "0.25", default-features = false, features = ["jpeg", "webp", "gif", "bmp", "tiff", "png"] }
-symphonia = { version = "0.5", default-features = false, features = ["wav", "mp3", "flac", "vorbis", "ogg", "aac", "isomp4", "aiff", "pcm"] }
+image = { version = "0.25", default-features = false, features = [
+  "jpeg",
+  "webp",
+  "gif",
+  "bmp",
+  "tiff",
+  "png",
+] }
+symphonia = { version = "0.5", default-features = false, features = [
+  "wav",
+  "mp3",
+  "flac",
+  "vorbis",
+  "ogg",
+  "aac",
+  "isomp4",
+  "aiff",
+  "pcm",
+] }
 
 # Crypto
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-rand_core = { version = "0.6", features = ["getrandom"] }
+ed25519-dalek = { version = "2", features = [ "rand_core" ] }
+rand_core = { version = "0.6", features = [ "getrandom" ] }
 # At-rest shard encryption: AES-256-GCM, HKDF-SHA256 for derivation
 # from NodeIdentity's seed. Default-features off keeps the sha2 pull
 # minimal (no asm).
-aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+aes-gcm = { version = "0.10", default-features = false, features = [
+  "aes",
+  "alloc",
+] }
 hkdf = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 # rustls TLS on the wire protocol. tokio-rustls 0.26 lines up with the
 # rustls 0.23 line; rcgen self-signs the embedded-mode CA. rustls-pki-types
 # ships the PEM parser under `rustls::pki_types::pem`.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "std",
+  "tls12",
+] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+  "ring",
+  "tls12",
+] }
+rcgen = { version = "0.13", default-features = false, features = [
+  "ring",
+  "pem",
+] }
 
 # Web stack: axum HTTP server + Leptos SSR. cargo-leptos drives the WASM build.
-axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "json", "matched-path", "tracing", "multipart"] }
+axum = { version = "0.7", default-features = false, features = [
+  "http1",
+  "tokio",
+  "json",
+  "matched-path",
+  "tracing",
+  "multipart",
+] }
 tower = { version = "0.4", default-features = false }
-tower-http = { version = "0.5", default-features = false, features = ["fs", "compression-gzip", "trace", "set-header"] }
+tower-http = { version = "0.5", default-features = false, features = [
+  "fs",
+  "compression-gzip",
+  "trace",
+  "set-header",
+] }
 http = "1"
 http-body-util = "0.1"
 mime_guess = "2"
@@ -71,17 +121,25 @@ futures-util = { version = "0.3", default-features = false }
 serde_json = "1"
 
 # Operational concerns — CLI parser, structured logging.
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = [ "derive", "env" ] }
 # TOML config file support. `toml` needs serde derive.
-toml = { version = "0.8", default-features = false, features = ["parse"] }
-serde = { version = "1", features = ["derive"] }
+toml = { version = "0.8", default-features = false, features = [ "parse" ] }
+serde = { version = "1", features = [ "derive" ] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "ansi", "tracing-log"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "env-filter",
+  "fmt",
+  "json",
+  "ansi",
+  "tracing-log",
+] }
 
 # Server-side markdown renderer for the in-app /help section. `gfm`
 # enables tables/strikethrough/tasklists; `math` enables `$…$` and
 # `$$…$$` capture (we render the actual math client-side via KaTeX).
-pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "0.12", default-features = false, features = [
+  "html",
+] }
 
 # Leptos 0.7 stable — clean `server_fn 0.7+` build chain, no
 # unmaintained `proc-macro-error`/`paste` transitive deps.
@@ -97,17 +155,17 @@ web-sys = "0.3"
 js-sys = "0.3"
 
 # Internal crates (path-deps)
-holofs-core      = { path = "crates/holofs-core",      version = "1.0.0" }
-holofs-model     = { path = "crates/holofs-model",     version = "1.0.0" }
-holofs-wire      = { path = "crates/holofs-wire",      version = "1.0.0" }
-holofs-codec     = { path = "crates/holofs-codec",     version = "1.0.0" }
-holofs-storage   = { path = "crates/holofs-storage",   version = "1.0.0" }
-holofs-client    = { path = "crates/holofs-client",    version = "1.0.0" }
-holofs-cluster   = { path = "crates/holofs-cluster",   version = "1.0.0" }
+holofs-core = { path = "crates/holofs-core", version = "1.0.0" }
+holofs-model = { path = "crates/holofs-model", version = "1.0.0" }
+holofs-wire = { path = "crates/holofs-wire", version = "1.0.0" }
+holofs-codec = { path = "crates/holofs-codec", version = "1.0.0" }
+holofs-storage = { path = "crates/holofs-storage", version = "1.0.0" }
+holofs-client = { path = "crates/holofs-client", version = "1.0.0" }
+holofs-cluster = { path = "crates/holofs-cluster", version = "1.0.0" }
 holofs-analytics = { path = "crates/holofs-analytics", version = "1.0.0" }
-holofs-gateway   = { path = "crates/holofs-gateway",   version = "1.0.0" }
-holofs-mcp       = { path = "crates/holofs-mcp",       version = "1.0.0" }
-holofs-embed     = { path = "crates/holofs-embed",     version = "1.0.0" }
+holofs-gateway = { path = "crates/holofs-gateway", version = "1.0.0" }
+holofs-mcp = { path = "crates/holofs-mcp", version = "1.0.0" }
+holofs-embed = { path = "crates/holofs-embed", version = "1.0.0" }
 holofs-testutils = { path = "crates/holofs-testutils", version = "1.0.0" }
 
 [profile.release]

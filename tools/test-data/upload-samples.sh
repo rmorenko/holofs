@@ -43,7 +43,7 @@ echo "→ creating directory tree…"
 TMP_DIRS="$(mktemp)"
 trap 'rm -f "$TMP_DIRS"' EXIT
 find "$SAMPLES" -type f ! -name "MANIFEST.txt" | while read -r f; do
-  rel="${f#$SAMPLES/}"
+  rel="${f#"$SAMPLES"/}"
   dir="$(dirname "$rel")"
   while [ "$dir" != "." ]; do
     echo "$dir"
@@ -76,7 +76,7 @@ ok=0
 echo "→ uploading files…"
 throttle_ms="${THROTTLE_MS:-600}"
 find "$SAMPLES" -type f ! -name "MANIFEST.txt" | sort | while read -r f; do
-  rel="${f#$SAMPLES/}"
+  rel="${f#"$SAMPLES"/}"
   # Default base resolution for embedded clusters is 512×512 — anything
   # smaller gets up-scaled inside the gateway, which is fine for tests.
   total=$((total + 1))

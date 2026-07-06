@@ -13,7 +13,7 @@ holofs-model.workspace = true
 holofs-core.workspace = true
 holofs-cluster.workspace = true
 tokio.workspace = true
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = [ "derive" ] }
 serde_json.workspace = true
 tracing.workspace = true
 # base64 for blob payloads exposed via MCP `resources/`.
@@ -27,10 +27,10 @@ base64 = "0.22"
 # legacy two-endpoint SSE transport. `schemars` derives JSON schemas for
 # tool input types directly from `serde::Deserialize`.
 rmcp = { version = "1.8", features = [
-    "server",
-    "macros",
-    "schemars",
-    "transport-streamable-http-server",
+  "server",
+  "macros",
+  "schemars",
+  "transport-streamable-http-server",
 ] }
 schemars = "1"
 

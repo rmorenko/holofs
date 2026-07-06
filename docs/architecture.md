@@ -357,8 +357,8 @@ is no separate `.idx` file that could go stale.
 
 ### Dedup
 
-Shard filenames are content-addressed. A duplicate PUT (same coefficients
-+ payload) is detected by `fs::write(... .tmp)` → `rename` over an existing
+Shard filenames are content-addressed. A duplicate PUT (same coefficients +
+payload) is detected by `fs::write(... .tmp)` → `rename` over an existing
 file (overwrites identically). The in-memory index check earlier still
 returns `false` from `put()` so the caller knows no new shard appeared.
 
@@ -388,7 +388,7 @@ trust class as Backblaze B2 or AWS S3, not Filecoin or Storj. See
 | Admin whitelist signature        | Ed25519                         | ed25519-dalek       |
 | Handshake challenge              | random 32-byte nonce + Ed25519  | holofs-storage      |
 | Key escrow / Shamir-style        | RLNC over GF(2⁸) with custom K  | holofs-analytics    |
-| Domain separation                | string prefix (`holofs-XXX-vN`) before hash / sign input |
+| Domain separation                | string prefix (`holofs-XXX-vN`) | hash / sign inputs  |
 
 ---
 

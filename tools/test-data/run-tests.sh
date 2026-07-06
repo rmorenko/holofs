@@ -83,10 +83,10 @@ section "5. robust-copy detection (Stage 13.0)"
 # The brand-pairs uploads include `logo-N` + `logo-N-wm` — same structure,
 # different fine layers.  /similar's robust_copy_score should be high.
 target="photos/brand-pairs/logo-1.png"
-similar_body=$(curl -sf "$BASE_URL/api/similar?name=$target&scope=all" \
-               -X POST -d "" 2>/dev/null || true)
-# This API is a server fn; raw probe via the rendered page is more
-# reliable in shell.  We check the page surface instead.
+# Warm the server-fn endpoint (its response body is opaque to shell —
+# rendered page below is the actual assertion).
+curl -sf -o /dev/null "$BASE_URL/api/similar?name=$target&scope=all" \
+     -X POST -d "" 2>/dev/null || true
 code=$(http_code "$BASE_URL/similar/$target")
 if [ "$code" = "200" ]; then ok "/similar/$target loads"; else bad "/similar → $code"; fi
 

@@ -22,12 +22,12 @@ candle-transformers = { version = "0.8", default-features = false }
 # `spawn_blocking`, and the rest of the embed path is plain sync work.
 hf-hub = "0.3"
 # Tokenizer for the CLIP text branch. Same vocab the original CLIP ships.
-tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.20", default-features = false, features = [ "onig" ] }
 # Image preprocessing — CLIP expects 224×224 RGB normalised by its own
 # magic mean/std. We do the resize / normalise here, the gateway hands
 # us decoded f32 channels.
 image = { workspace = true }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = [ "derive" ] }
 serde_json = { workspace = true }
 thiserror = "1"
 tracing = { workspace = true }

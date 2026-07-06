@@ -296,7 +296,9 @@ identical copies → 100% green plus a large `storage_saved_kb`.
 ## 7. Inspect: visual shard audit
 
 **Goal.** Confirm the grid shows all 444 shards (3 channels × 4 layers
-× 26..64 per layer) without gaps. Regression check for 
+× 26..64 per layer) without gaps. Regression check for the shard
+generation math.
+
 1. Open `http://127.0.0.1:8787/inspect/mandala.png`.
 2. Scroll — for each channel (R, G, B) you should see 4 sections
    (layers 0..3), each with the right thumbnail count:
@@ -921,7 +923,7 @@ What it walks through, by stage:
 | 12.6   | `/mix?a=<image>` renders the wavelet-mix composer  |
 | 12.7   | `/health/<name>` per-file metrics                  |
 | 12.7   | `/about` marketing page                            |
-| 12.8/9 | `/search` UI + `/api/search?band=<any|coarse|mid|full>` |
+| 12.8/9 | `/search` UI + `/api/search?band=<any\|coarse\|mid\|full>` |
 | 13.0   | `/similar/<brand-pair logo>` includes robust-copy column |
 | 13.1   | `/holo/<name>` + `/preview/stream/<name>` multipart |
 | 13.2   | `/api/spotlight.png?mode=spatial`                  |

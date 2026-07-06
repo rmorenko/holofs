@@ -1,0 +1,35 @@
+# taplo config — TOML formatter + schema hints.
+# See https://taplo.tamasfe.dev/configuration/file.html
+
+include = [
+  "**/*.toml",
+]
+exclude = [
+  "target/**",
+  "node_modules/**",
+  ".cluster-data/**",
+  ".cluster-logs/**",
+  "out/**",
+  "holofs-data/**",
+  "samples/**",
+]
+
+[formatting]
+# 2-space indent, LF EOL, no trailing whitespace — matches the rest of
+# the repo's style config (.editorconfig, rustfmt.toml).
+indent_string = "  "
+crlf = false
+trailing_newline = true
+# Keep column alignment off — auto-alignment fights hand-tuned tables.
+align_entries = false
+align_comments = false
+# Break long inline arrays across multiple lines once they get wide;
+# this matches how the workspace already lays out feature lists.
+array_auto_expand = true
+array_auto_collapse = false
+column_width = 100
+compact_arrays = false
+compact_inline_tables = false
+compact_entries = false
+reorder_keys = false
+reorder_arrays = false

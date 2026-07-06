@@ -115,6 +115,7 @@ The corresponding node command picks up its own leaf — see the systemd
 unit in §2.5 for the env-var form.
 
 The cert files must satisfy:
+
 - Leaf cert SANs must cover every `addr:port` host the gateway will
   connect to (DNS name or IP literal).
 - The CA cert is the trust root on both sides — same file on every node
@@ -438,8 +439,8 @@ audit path.
 
 The 18-byte header is AAD to the GCM tag, so any post-hoc header
 rewrite (object_id, channel, layer, lengths) invalidates the shard
-on decrypt. Reads sniff the first 8 bytes and dispatch — mixed v1
-+ v2 directories are supported so enabling on an existing store
+on decrypt. Reads sniff the first 8 bytes and dispatch — mixed v1 +
+v2 directories are supported so enabling on an existing store
 seals only *new* writes. A full re-encryption pass is out of scope;
 the recommended migration is to spawn a fresh node with a fresh
 identity and let the auto-repair pass rebalance shards onto it.

@@ -1,0 +1,22 @@
+// markdownlint-cli2 runner config: globs + config file.
+{
+    "config": ".markdownlint.jsonc",
+    "globs": [
+        "**/*.md"
+    ],
+    "ignores": [
+        "target/**",
+        "node_modules/**",
+        ".cluster-data/**",
+        ".cluster-logs/**",
+        "out/**",
+        "samples/**",
+        "holofs-data/**",
+        // Localized docs are translations of English canon; we lint the source
+        // and trust the translator for rendering conventions.
+        "docs/de/**",
+        "docs/es/**",
+        "docs/fr/**",
+        "docs/ru/**"
+    ]
+}

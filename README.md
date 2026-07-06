@@ -23,8 +23,8 @@ of a hologram: cut it in half and the picture remains whole, just blurrier.
 > retries + `NoLiveNodes`), Shamir-style key escrow,
 > AES-256-GCM at-rest shard encryption, TOML configuration
 > file, per-IP rate limiter, streaming PUT with tempfile spill,
-> MCP server for LLM tooling, in-app docs viewer with Mermaid
-> + KaTeX, and UI in five languages (English, Russian, German,
+> MCP server for LLM tooling, in-app docs viewer with Mermaid +
+> KaTeX, and UI in five languages (English, Russian, German,
 > French, Spanish). Reliability layer: SIGTERM/SIGINT graceful
 > shutdown, supervised background tasks with panic-catching +
 > exponential-backoff restart, bounded-concurrency backpressure

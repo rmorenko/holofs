@@ -98,7 +98,7 @@ What the script walks through, by stage:
 | 12.6   | `/mix?a=<image>` renders the wavelet-mix composer  |
 | 12.7   | `/health/<name>` per-file metrics page             |
 | 12.7   | `/about` marketing page                            |
-| 12.8/9 | `/search` UI + `/api/search?band=<any|coarse|mid|full>` |
+| 12.8/9 | `/search` UI + `/api/search?band=<any\|coarse\|mid\|full>` |
 | 13.0   | `/similar/<brand-pair logo>` includes robust-copy column |
 | 13.1   | `/holo/<name>` + `/preview/stream/<name>` multipart |
 | 13.2   | `/api/spotlight.png?mode=spatial`                  |

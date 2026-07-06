@@ -378,7 +378,7 @@ $$
 
 This is **deterministic from content**: two clients encoding the same
 file with the same parameters produce the same CID. Two image files
-that ressize to the same canvas bytes (e.g. lossless PNG vs BMP of the
+that resize to the same canvas bytes (e.g. lossless PNG vs BMP of the
 same source) produce the same CID — cross-format dedup falls out for
 free.
 

@@ -107,3 +107,39 @@ dev-logs:  ## tail the daemon log
 .PHONY: dev-open
 dev-open:  ## open the web UI in the default browser (macOS)
 	@open $(BASE) || xdg-open $(BASE) || echo "$(BASE)"
+
+# --- style / lint --------------------------------------------------------
+# Non-Rust style linters. Rust code is covered by `cargo fmt` +
+# `cargo clippy` in CI; these catch prose, TOML, shell drift.
+#
+#   brew install typos-cli markdownlint-cli2 taplo shellcheck
+SHELL_SCRIPTS := deploy/dev-seed.sh scripts/spawn-cluster.sh \
+                 tools/test-data/run-tests.sh \
+                 tools/test-data/fetch-real-landscapes.sh \
+                 tools/test-data/clean-cluster.sh \
+                 tools/test-data/upload-samples.sh \
+                 crates/holofs-e2e/scripts/run-tests.sh
+
+.PHONY: lint
+lint: lint-typos lint-md lint-toml lint-sh  ## run all non-Rust style linters
+
+.PHONY: lint-typos
+lint-typos:  ## spellcheck source + docs (config: _typos.toml)
+	@typos
+
+.PHONY: lint-md
+lint-md:  ## Markdown style (config: .markdownlint.jsonc)
+	@markdownlint-cli2
+
+.PHONY: lint-toml
+lint-toml:  ## TOML formatting (config: .taplo.toml)
+	@taplo fmt --check
+
+.PHONY: lint-sh
+lint-sh:  ## shell script analysis
+	@shellcheck $(SHELL_SCRIPTS)
+
+.PHONY: lint-fix
+lint-fix:  ## apply auto-fixes for typos + TOML formatting
+	@typos --write-changes || true
+	@taplo fmt

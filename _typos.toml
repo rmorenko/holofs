@@ -1,0 +1,36 @@
+[files]
+# Vendored / generated content — do not spellcheck.
+extend-exclude = [
+  "crates/holofs-embed/assets/tokenizer.json",
+  "crates/holofs-web/src/i18n.rs",
+  "crates/holofs-web/style/main.css",
+  # Non-English documentation: typos is an English dictionary; foreign-language
+  # words trigger thousands of false positives. Rely on native review for these.
+  "docs/de/**",
+  "docs/es/**",
+  "docs/fr/**",
+  "docs/ru/**",
+  # Sample fixtures + test data payloads may contain intentional garbage.
+  "samples/**",
+  "holofs-data/**",
+  ".cluster-data/**",
+  ".cluster-logs/**",
+  "out/**",
+  "*.profraw",
+]
+
+[default.extend-words]
+# Domain acronyms + short identifiers typos mis-classifies as typos.
+PN = "PN" # part of "PNGs" (plural) split on camelCase boundary
+RTO = "RTO" # Recovery Time Objective
+anc = "anc" # short for `ancestor` in tight loops
+ot = "ot" # `objects_total` shorthand in JSON serializer
+mis = "mis" # `mis-penalise` prefix in comments
+DELET = "DELET" # part of "DELETEd" (HTTP verb past tense)
+Dentifier = "Dentifier" # part of "IDentifier" with intentional caps
+concurency = "concurency" # intentional misspelling in docs/operations.md as a config-key example
+
+# British vs American — both spellings are valid English.
+decodeable = "decodeable"
+unparseable = "unparseable"
+identicals = "identicals"

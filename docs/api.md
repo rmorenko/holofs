@@ -24,7 +24,7 @@ from `HOLOFS_TLS=1`, mTLS via `HOLOFS_MTLS=1`).
 > `api`, `health`, `escrow`, `preview`, `inspect`, `similar`, `diff`,
 > `admin`, `metrics`, `pkg`, `help`, `inspect-zoom` — cannot be used as
 > the first segment of an object path because they shadow real routes.
-
+>
 > `GET /<path>` and `GET /preview/<path>` honour
 > the `Range:` request header per RFC 9110 §14.2. A single satisfiable
 > byte range returns `206 Partial Content` with `Content-Range`. The
@@ -1088,4 +1088,3 @@ ConnectionAborted / NotConnected`. Every wire op is idempotent at the
 application layer (PUT/Audit/Gather/Purge/PutBatch all key on shard
 hash), so the retry is safe and silently masks the rare "peer closed
 while we were idle" race.
-

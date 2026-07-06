@@ -1,0 +1,27 @@
+// markdownlint-cli2 config. Rules listed in
+// https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+{
+    // MD013 line-length: docs run wide by intent (technical prose + tables).
+    "MD013": false,
+    // MD004 unordered-list style: mix of "-" and "+" across authors, not a bug.
+    "MD004": false,
+    // MD060 table-column-style: tables are hand-formatted for readability of
+    // the source, not machine alignment.
+    "MD060": false,
+    // MD049 emphasis-style: `_underscore_` vs `*asterisk*` is prose flavor.
+    "MD049": false,
+    // MD036 no-emphasis-as-heading: we use bold labels inline in prose lists.
+    "MD036": false,
+    // MD041 first-line-heading: some docs start with front matter or notes.
+    "MD041": false,
+    // MD033 inline-HTML: allowed for callout boxes, diagrams, kbd.
+    "MD033": false,
+    // MD024 duplicate-heading: allowed when nested under different parents.
+    "MD024": { "siblings_only": true },
+    // MD040 fenced-code-language: docs mix code, output, and diagram fences;
+    // labeling every block is more churn than it's worth for internal prose.
+    "MD040": false,
+    // MD051 link-fragments: theory.md uses superscript (GF(2⁸)) in headings,
+    // and Unicode → GitHub anchor mapping isn't statically predictable.
+    "MD051": false
+}
