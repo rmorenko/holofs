@@ -61,6 +61,7 @@ Binaries produced under `target/release/`:
 | `holofs-fs`      | Local filesystem playground                   |
 | `holofs-inspect` | Manifest / shard inspection                   |
 | `holofs-bench`   | Benchmarks                                    |
+| `holofs-soak`    | Long-running random-op driver against a live gateway |
 | `holofs`         | Legacy single-command CLI                     |
 
 ### 2.3. Whitelist (required in production)
@@ -869,3 +870,48 @@ curl -s http://gw:8787/inspect/photo.png
 ```
 
 See [api.md](./api.md) for full route inventory.
+
+### 10.7. Soak testing
+
+`holofs-soak` drives randomised HTTP traffic against a live gateway
+for hours, records everything that happened, and exits with a
+`summary.json` — the intended workflow is "gate a suspicious change
+by running an overnight soak, then triage `errors.jsonl` the next
+morning".
+
+```sh
+# Bring up a seeded cluster (any topology: embedded, spawn-cluster, k8s).
+make dev                                    # embedded 40-node + dev-seed.sh
+
+# Drive the gateway for 8 h with 50 parallel workers.
+./target/release/holofs-soak \
+    --base http://127.0.0.1:8787 \
+    --workers 50 \
+    --duration 8h \
+    --metrics-interval 10s \
+    --out .soak
+```
+
+Each run writes to `.soak/<utc-timestamp>/`:
+
+| File                   | Content                                                         |
+|------------------------|-----------------------------------------------------------------|
+| `config.json`          | Parameters used (seed, duration, workers, base URL, timeouts).  |
+| `ops.jsonl`            | One line per HTTP call: `{t, worker, op, target, http, ms, err?}`. |
+| `errors.jsonl`         | Same schema, filtered to `http >= 500` or transport-level errors. |
+| `metrics.jsonl`        | `/metrics` + `/api/stats` snapshot every `--metrics-interval`.  |
+| `health-events.jsonl`  | Raw `/api/health/events` SSE stream.                            |
+| `summary.json`         | Per-op counts, p50/p95/p99 latency, HTTP-status histogram.      |
+
+Op selection is weighted toward reads (`get_random` ≈ 30 %,
+`put_new` ≈ 15 %, `put_replace` ≈ 10 %, `search` ≈ 8 %, catalog
+mutations ≈ 12 %) so the runner exercises the read + version paths
+harder than admin surface. Ctrl-C shuts down cleanly and still
+writes the summary. Weights and op set are compiled in — patch
+`crates/holofs-cli/src/bin/holofs-soak.rs` if you need a different
+mix for a specific investigation.
+
+The runner is intentionally **read-mostly on the admin surface**:
+it does not call `/api/gc`, `/admin/node`, or the escrow endpoints,
+so it can be pointed at a live staging gateway without cluster-state
+side effects beyond regular PUT/DELETE.

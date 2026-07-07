@@ -154,6 +154,19 @@ wasm-bindgen = "0.2"
 web-sys = "0.3"
 js-sys = "0.3"
 
+# Extras used by holofs-soak (long-running HTTP driver).
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "stream",
+  "json",
+] }
+anyhow = "1"
+rand = "0.8"
+chrono = { version = "0.4", default-features = false, features = [
+  "clock",
+  "serde",
+] }
+
 # Internal crates (path-deps)
 holofs-core = { path = "crates/holofs-core", version = "1.0.0" }
 holofs-model = { path = "crates/holofs-model", version = "1.0.0" }

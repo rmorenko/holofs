@@ -1768,6 +1768,10 @@ dependencies = [
 name = "holofs-cli"
 version = "1.0.0"
 dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "futures-util",
  "holofs-analytics",
  "holofs-client",
  "holofs-cluster",
@@ -1778,7 +1782,12 @@ dependencies = [
  "holofs-storage",
  "holofs-wire",
  "png",
+ "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -3823,12 +3832,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower 0.5.3",
  "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots 1.0.8",
 ]

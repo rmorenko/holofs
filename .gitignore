@@ -42,3 +42,6 @@ __pycache__/
 # e2e suite leaves chromedriver / gateway logs in /tmp; locally-built
 # screenshots and dumps land in this scratch dir.
 /crates/holofs-e2e/.scratch/
+
+# holofs-soak artefacts (per-run subdirectories under this root)
+/.soak/

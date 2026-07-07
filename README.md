@@ -265,7 +265,7 @@ the short version:
 | `holofs-gateway` | catalog, decode pipeline, auto-repair-on-read, background scrub, public Gateway API |
 | `holofs-mcp` | Model Context Protocol server (Streamable HTTP), read-only by default |
 | `holofs-web` | axum + Leptos 0.7 SSR web UI, server functions, HTTP handlers |
-| `holofs-cli` | `holofs-admin` (keys, whitelist), `holofs-bench`, `holofs-inspect`, `holofs-cluster`, `holofs-fs`, `holofs-node`, `holofs` |
+| `holofs-cli` | `holofs-admin` (keys, whitelist), `holofs-bench`, `holofs-inspect`, `holofs-cluster`, `holofs-fs`, `holofs-node`, `holofs-soak`, `holofs` |
 | `holofs-testutils` | shared fixtures for cross-crate integration tests |
 | `holofs-e2e` | browser-driven (thirtyfour + chromedriver) end-to-end test harness |
 

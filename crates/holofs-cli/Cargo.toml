@@ -18,7 +18,16 @@ holofs-cluster.workspace = true
 holofs-analytics.workspace = true
 holofs-gateway.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 png.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+anyhow.workspace = true
+rand.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
 
 [[bin]]
 name = "holofs"
@@ -47,6 +56,10 @@ path = "src/bin/holofs-inspect.rs"
 [[bin]]
 name = "holofs-admin"
 path = "src/bin/holofs-admin.rs"
+
+[[bin]]
+name = "holofs-soak"
+path = "src/bin/holofs-soak.rs"
 
 [lints]
 workspace = true
