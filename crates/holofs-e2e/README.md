@@ -105,7 +105,7 @@ crates/holofs-e2e/
 ├── src/
 │   ├── lib.rs                       ← TestHarness, gateway lifecycle, WebDriver session, restart()
 │   └── fixtures.rs                  ← deterministic tiny PNG / WAV / opaque blobs
-└── tests/                            ← 32 files, 106 tests + 10 #[ignore]'d
+└── tests/                            ← 31 files, 109 tests + 12 #[ignore]'d
     ├── ui_catalog.rs                 ← tree view, breadcrumb, lazy folder expand
     ├── ui_about.rs                   ← /about marketing
     ├── ui_actions.rs                 ← per-card action links

@@ -105,7 +105,8 @@ reproducible via `/health/photo.png` in `holofs-web`.
 - **Leak resistance.** No node holds the bytes of any file — only random
   linear combinations. Exfiltrating one node yields no original.
 - **Perceptual search without decompression.** The L0 systematic shards
-  already are "low-res in the frequency domain"; a 16-byte fingerprint is
+  already are "low-res in the frequency domain"; a per-channel byte-mean
+  fingerprint (16 bytes/channel, 48 bytes for 3-channel images) is
   computed from them without decoding the file.
 - **Shamir-style secret sharing out of the box.** The same RLNC over
   GF(256) is a threshold scheme — "any 3 of 5 family devices restore the
@@ -245,7 +246,7 @@ shows the full PKI flow.
 
 ## Repository layout
 
-The workspace is split into 14 crates under `crates/`. A full crate map
+The workspace is split into 15 crates under `crates/`. A full crate map
 with each crate's responsibility lives in
 [`docs/architecture.md`](./docs/architecture.md#1-crate-dependency-graph);
 the short version:
@@ -265,6 +266,7 @@ the short version:
 | `holofs-mcp` | Model Context Protocol server (Streamable HTTP), read-only by default |
 | `holofs-web` | axum + Leptos 0.7 SSR web UI, server functions, HTTP handlers |
 | `holofs-cli` | `holofs-admin` (keys, whitelist), `holofs-bench`, `holofs-inspect`, `holofs-cluster`, `holofs-fs`, `holofs-node`, `holofs` |
+| `holofs-testutils` | shared fixtures for cross-crate integration tests |
 | `holofs-e2e` | browser-driven (thirtyfour + chromedriver) end-to-end test harness |
 
 Top-level: `Cargo.toml` (workspace), `Cargo.lock`, `Dockerfile`,
@@ -276,18 +278,19 @@ Top-level: `Cargo.toml` (workspace), `Cargo.lock`, `Dockerfile`,
 ## Tests
 
 ```sh
-cargo test --workspace --exclude holofs-e2e         # 329 workspace tests
-cargo test -p holofs-web --features ssr --lib       # 56 SSR-only lib tests
-cargo test -p holofs-e2e -- --test-threads=1        # 106 e2e tests (needs chromedriver)
+cargo test --workspace --exclude holofs-e2e         # 360 workspace tests
+cargo test -p holofs-web --features ssr --lib       # 70 SSR-only lib tests
+cargo test -p holofs-e2e -- --test-threads=1        # 109 e2e tests (needs chromedriver)
 cargo deny check                                    # advisories + licenses + bans + sources
 cargo clippy --workspace                            # workspace lints (pedantic-leaning)
 ```
 
 The e2e suite spawns a fresh `holofs-web` gateway against a `TempDir`
 storage for every scenario; running them serial (`--test-threads=1`)
-keeps embedded node ports collision-free. Ten tests are
-`#[ignore]`'d behind `--include-ignored` because they download the
-~155 MiB DistilBERT-multilingual CLIP weights on first run.
+keeps embedded node ports collision-free. Twelve tests are
+`#[ignore]`'d behind `--include-ignored` because they download
+~155 MiB (CLIP) or ~700 MiB (multilingual) of model weights on first
+run.
 
 Line-coverage on measurable code (excluding HTTP-handler / leptos
 SSR code that only runs inside the spawned gateway):
