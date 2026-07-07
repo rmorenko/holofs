@@ -62,6 +62,7 @@ Binaries produced under `target/release/`:
 | `holofs-inspect` | Manifest / shard inspection                   |
 | `holofs-bench`   | Benchmarks                                    |
 | `holofs-soak`    | Long-running random-op driver against a live gateway |
+| `holofs-soak-report` | Render HTML + Markdown report from a soak-run directory |
 | `holofs`         | Legacy single-command CLI                     |
 
 ### 2.3. Whitelist (required in production)
@@ -952,3 +953,53 @@ Shutdown is graceful in all three topologies:
 - If the run panics before `summary.json`, `kill_on_drop(true)` on
   every spawned `Child` still ensures no gateway or node processes
   leak into the next test run.
+
+### 10.7.a. Reports
+
+`holofs-soak-report` turns a run directory into a self-contained
+report. HTML is the default (inline CSS + inline SVG charts, no CDN,
+no JS — opens in any browser and stays readable years from now);
+Markdown is available for git-committable summaries or GitHub-issue
+attachments. Both formats can be produced in one shot with
+`--format both`.
+
+```sh
+# Latest run under .soak/, HTML → .soak/<run>/report.html
+holofs-soak-report
+
+# Explicit run, both formats, 30-second buckets for a short soak
+holofs-soak-report .soak/2026-07-07T15-34-41Z --format both --bucket 30s
+
+# Custom output path (extension appended automatically for `both`)
+holofs-soak-report --format both --output ~/soak-nightly
+# → ~/soak-nightly.html + ~/soak-nightly.md
+```
+
+The report contains:
+
+1. **Overview** — total ops, error rate, average RPS, elapsed vs
+   configured duration, bucket size.
+2. **Timings per operation** — count, errors, skipped, p50/p95/p99
+   ms, max ms.
+3. **Throughput and error timelines** — RPS per bucket + stacked
+   `{4xx, 5xx, transport}` errors per bucket, plus a p95-latency
+   overlay for the top 5 ops by volume.
+4. **Per-worker load** — ops and errors bar charts.
+5. **Top errors** — highest-count `(op, target, http)` triples plus
+   deduplicated transport-level error messages.
+6. **Cluster telemetry** — timelines of `objects_total`,
+   `shards_total`, `bytes_total`, `nodes_live`, and the repair
+   counters straight from `/api/stats`; plus the Prometheus
+   `holofs_backpressure_rejected_total`,
+   `holofs_handler_timeouts_total`,
+   `holofs_rate_limit_rejected_total`, and
+   `holofs_backpressure_permits_available{bucket}` gauges parsed out
+   of `metrics.jsonl`.
+7. **Health-events sample** — first 20 SSE frames verbatim (the tail
+   is elided with a count).
+8. **Reproducibility** — full `config.json` embedded at the end for
+   exact rerun.
+
+`--bucket` defaults to 5 minutes — sane for the 8-hour target soak.
+Drop it to `30s`–`1m` for smoke runs; raise it to `15m`+ for
+day-long stress tests.

@@ -27,6 +27,7 @@ reqwest.workspace = true
 anyhow.workspace = true
 rand.workspace = true
 chrono.workspace = true
+prometheus-parse.workspace = true
 futures-util.workspace = true
 
 [[bin]]
@@ -60,6 +61,10 @@ path = "src/bin/holofs-admin.rs"
 [[bin]]
 name = "holofs-soak"
 path = "src/bin/holofs-soak.rs"
+
+[[bin]]
+name = "holofs-soak-report"
+path = "src/bin/holofs-soak-report.rs"
 
 [lints]
 workspace = true
