@@ -245,8 +245,10 @@ $$
 $$
 
 de sorte que la couche 0 (LL) est stockée avec
-$\lceil K \cdot 4.0 \rceil = 64$ shards, tandis que la couche 3 (détail
-le plus fin) reçoit $\lceil K \cdot 1.15 \rceil = 18$.
+$\lfloor K \cdot 4.0 + 0.5 \rfloor = 64$ shards, tandis que la couche 3
+(détail le plus fin) reçoit $\lfloor K \cdot 1.15 + 0.5 \rfloor = 18$.
+Le code utilise l'arrondi bancaire (`f32::round`), non le plafond —
+donc `K · 1.15 = 18.4` donne $18$, pas $19$.
 
 ### Courbe de dégradation
 
@@ -547,28 +549,38 @@ utilisée par les hachages perceptuels classiques (pHash utilise DCT,
 dHash utilise des différences de pixels).
 
 Dans holofs, **les $K$ premiers shards systématiques de la couche 0**
-contiennent littéralement les pixels LL (comme coefficients d'ondelettes
-en float-32, sérialisés en octets). Nous calculons une empreinte de
-16 octets comme
+contiennent littéralement les pixels LL (comme coefficients
+d'ondelettes en float-32, sérialisés en octets). Nous calculons une
+empreinte par canal à partir des moyennes d'octets
 
 $$
-\mathrm{fp}_i \;=\; \mathrm{moyenne}(\mathrm{payload}(\mathrm{shard}_i)), \quad i = 0, 1, \ldots, K - 1.
+\mathrm{fp}_i^{(c)} \;=\; \mathrm{clamp}_{0..255}\bigl(\mathrm{moyenne}(\mathrm{payload}(\mathrm{shard}_i^{(c)}))\bigr),
+\quad i = 0, \ldots, K - 1.
 $$
 
-Pour notre $K = 16$, cela donne une grille $4 \times 4$ de luminances
-moyennes — une variante dHash classique. La distance est L₁ :
+Pour notre $K = 16$, chaque canal produit une grille $4 \times 4$ de
+luminances moyennes — une variante dHash classique. L'empreinte
+stockée concatène les trois canaux :
+$[\mathrm{R}_{0..15}\,|\,\mathrm{G}_{0..15}\,|\,\mathrm{B}_{0..15}]$
+— soit 48 octets pour les images à 3 canaux ; l'audio et les autres
+types à 1 canal n'utilisent que les 16 premiers.
 
-$$
-d(\mathrm{fp}, \mathrm{fp}') \;=\; \sum_{i=0}^{15} |\mathrm{fp}_i - \mathrm{fp}'_i| \;\in\; [0,\, 16 \cdot 255].
-$$
+**Deux métriques de distance vivent au-dessus de cette empreinte :**
 
-La similarité en % est $100 \cdot (1 - d / 4080)$. Contenu identique
-→ 0. Visuellement similaire → $d \lesssim 200$. Images aléatoires →
-$d \gtrsim 1500$.
+- `/api/fingerprint/<name>` expose un L₁ brut sur les octets de
+  canaux,
+  $d = \sum_{c, i} |\mathrm{fp}_i^{(c)} - \mathrm{fp}_i^{'(c)}|
+  \in [0,\, 48 \cdot 255]$ — utile pour les tests d'égalité exacte.
+- `/similar/<name>` dérive les bits dHash — un bit par comparaison
+  de tuiles adjacentes dans chaque bande de canal, soit
+  $3 \times 15 = 45$ bits — et rapporte la similarité comme
+  $1 - \mathrm{hamming} / 45$. dHash se dégrade gracieusement sous les
+  retournements géométriques et la divergence chromatique, là où L₁
+  brut sature.
 
-**Important** : nous calculons cette empreinte **sans décompresser
+**Important** : les deux métriques sont calculées **sans décompresser
 l'objet** — juste en lisant les shards systématiques de la couche 0.
-Pour une recherche à travers des milliers d'objets, cela fait O(K)
+Pour une recherche à travers des milliers d'objets, cela fait $O(K)$
 octets par objet.
 
 **Références.**

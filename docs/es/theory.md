@@ -239,9 +239,11 @@ $$
 \mathrm{RED}[\ell] \;\in\; \{\,4.0,\, 2.5,\, 1.6,\, 1.15\,\} \quad \text{para } \ell = 0, 1, 2, 3,
 $$
 
-de modo que la capa 0 (LL) se almacena con $\lceil K \cdot 4.0 \rceil = 64$
-shards, mientras que la capa 3 (detalle más fino) obtiene
-$\lceil K \cdot 1.15 \rceil = 18$.
+de modo que la capa 0 (LL) se almacena con
+$\lfloor K \cdot 4.0 + 0.5 \rfloor = 64$ shards, mientras que la capa 3
+(detalle más fino) obtiene $\lfloor K \cdot 1.15 + 0.5 \rfloor = 18$.
+El código usa redondeo bancario (`f32::round`), no techo — por eso
+`K · 1.15 = 18.4` da $18$, no $19$.
 
 ### Curva de degradación
 
@@ -540,27 +542,37 @@ DCT, dHash usa diferencias de píxeles).
 
 En holofs, **los primeros $K$ shards sistemáticos de la capa 0**
 contienen literalmente los píxeles LL (como coeficientes wavelet
-float-32, serializados en bytes). Calculamos un fingerprint de 16
-bytes como
+float-32, serializados en bytes). Calculamos un fingerprint a partir
+de las medias de bytes por canal
 
 $$
-\mathrm{fp}_i \;=\; \mathrm{mean}(\mathrm{payload}(\mathrm{shard}_i)), \quad i = 0, 1, \ldots, K - 1.
+\mathrm{fp}_i^{(c)} \;=\; \mathrm{clamp}_{0..255}\bigl(\mathrm{mean}(\mathrm{payload}(\mathrm{shard}_i^{(c)}))\bigr),
+\quad i = 0, \ldots, K - 1.
 $$
 
-Para nuestro $K = 16$ esto da una cuadrícula $4 \times 4$ de
-luminancias medias — una variante clásica de dHash. La distancia es
-L₁:
+Para nuestro $K = 16$ cada canal produce una cuadrícula $4 \times 4$
+de luminancias medias — una variante clásica de dHash. El fingerprint
+almacenado concatena los tres canales:
+$[\mathrm{R}_{0..15}\,|\,\mathrm{G}_{0..15}\,|\,\mathrm{B}_{0..15}]$
+— 48 bytes para imágenes de 3 canales; audio y otros tipos de 1
+canal usan solo los primeros 16.
 
-$$
-d(\mathrm{fp}, \mathrm{fp}') \;=\; \sum_{i=0}^{15} |\mathrm{fp}_i - \mathrm{fp}'_i| \;\in\; [0,\, 16 \cdot 255].
-$$
+**Dos métricas de distancia viven sobre este fingerprint:**
 
-La similitud en % es $100 \cdot (1 - d / 4080)$. Contenido idéntico → 0.
-Visualmente similar → $d \lesssim 200$. Imágenes aleatorias → $d \gtrsim 1500$.
+- `/api/fingerprint/<name>` expone un L₁ directo sobre los bytes de
+  canal,
+  $d = \sum_{c, i} |\mathrm{fp}_i^{(c)} - \mathrm{fp}_i^{'(c)}|
+  \in [0,\, 48 \cdot 255]$ — útil para comprobaciones de igualdad
+  exacta.
+- `/similar/<name>` deriva bits dHash — un bit por comparación de
+  baldosas adyacentes dentro de cada franja de canal, dando
+  $3 \times 15 = 45$ bits — y reporta similitud como
+  $1 - \mathrm{hamming} / 45$. dHash se degrada suavemente bajo
+  volteos geométricos y divergencia cromática, donde L₁ se satura.
 
-**Importante**: calculamos este fingerprint **sin descomprimir el
-objeto** — solo leyendo los shards sistemáticos de la capa 0. Para una
-búsqueda entre miles de objetos esto es O(K) bytes por objeto.
+**Importante**: ambas métricas se calculan **sin descomprimir el
+objeto** — solo leyendo los shards sistemáticos de la capa 0. Para
+una búsqueda entre miles de objetos esto es $O(K)$ bytes por objeto.
 
 **Referencias.**
 

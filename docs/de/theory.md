@@ -241,9 +241,11 @@ $$
 \mathrm{RED}[\ell] \;\in\; \{\,4.0,\, 2.5,\, 1.6,\, 1.15\,\} \quad \text{für } \ell = 0, 1, 2, 3,
 $$
 
-sodass Schicht 0 (LL) mit $\lceil K \cdot 4.0 \rceil = 64$ Shards
-gespeichert wird, während Schicht 3 (feinstes Detail)
-$\lceil K \cdot 1.15 \rceil = 18$ erhält.
+sodass Schicht 0 (LL) mit $\lfloor K \cdot 4.0 + 0.5 \rfloor = 64$
+Shards gespeichert wird, während Schicht 3 (feinstes Detail)
+$\lfloor K \cdot 1.15 + 0.5 \rfloor = 18$ erhält. Der Code verwendet
+kaufmännisches Runden (`f32::round`), nicht Aufrunden — daher liefert
+`K · 1.15 = 18.4` das Ergebnis $18$, nicht $19$.
 
 ### Degradations-Kurve
 
@@ -546,27 +548,37 @@ dHash nutzt Pixeldifferenzen).
 
 In holofs enthalten **die ersten $K$ systematischen Shards der Schicht
 0** buchstäblich die LL-Pixel (als float-32-Wavelet-Koeffizienten,
-byte-serialisiert). Wir berechnen einen 16-Byte-Fingerabdruck als
+byte-serialisiert). Wir berechnen einen Fingerabdruck aus
+kanalweisen Byte-Mittelwerten
 
 $$
-\mathrm{fp}_i \;=\; \mathrm{mean}(\mathrm{payload}(\mathrm{shard}_i)), \quad i = 0, 1, \ldots, K - 1.
+\mathrm{fp}_i^{(c)} \;=\; \mathrm{clamp}_{0..255}\bigl(\mathrm{mean}(\mathrm{payload}(\mathrm{shard}_i^{(c)}))\bigr),
+\quad i = 0, \ldots, K - 1.
 $$
 
-Für unser $K = 16$ ergibt das ein $4 \times 4$-Raster mittlerer
-Luminanzen — eine klassische dHash-Variante. Die Distanz ist L₁:
+Für unser $K = 16$ liefert jeder Kanal ein $4 \times 4$-Raster
+mittlerer Luminanzen — eine klassische dHash-Variante. Der
+gespeicherte Fingerabdruck konkateniert die drei Kanäle:
+$[\mathrm{R}_{0..15}\,|\,\mathrm{G}_{0..15}\,|\,\mathrm{B}_{0..15}]$
+— 48 Bytes für 3-Kanal-Bilder; Audio und andere 1-Kanal-Typen
+verwenden nur die ersten 16.
 
-$$
-d(\mathrm{fp}, \mathrm{fp}') \;=\; \sum_{i=0}^{15} |\mathrm{fp}_i - \mathrm{fp}'_i| \;\in\; [0,\, 16 \cdot 255].
-$$
+**Zwei Distanzmetriken leben auf diesem Fingerabdruck:**
 
-Ähnlichkeit in % ist $100 \cdot (1 - d / 4080)$. Identischer Inhalt →
-0. Visuell ähnlich → $d \lesssim 200$. Zufällige Bilder →
-$d \gtrsim 1500$.
+- `/api/fingerprint/<name>` liefert ein direktes L₁ über die
+  Kanal-Bytes,
+  $d = \sum_{c, i} |\mathrm{fp}_i^{(c)} - \mathrm{fp}_i^{'(c)}|
+  \in [0,\, 48 \cdot 255]$ — nützlich für Exact-Match-Prüfungen.
+- `/similar/<name>` leitet dHash-Bits ab — ein Bit pro
+  Nachbarkachel-Vergleich innerhalb jedes Kanalstreifens, ergibt
+  $3 \times 15 = 45$ Bits — und meldet Ähnlichkeit als
+  $1 - \mathrm{hamming} / 45$. dHash degradiert graziös unter
+  geometrischen Flips und Farbabweichungen, wo rohes L₁ sättigt.
 
-**Wichtig**: wir berechnen diesen Fingerabdruck **ohne das Objekt zu
-dekomprimieren** — allein durch das Lesen der systematischen Shards der
-Schicht 0. Für eine Suche über Tausende von Objekten ist das O(K) Bytes
-pro Objekt.
+**Wichtig**: beide Metriken werden **ohne das Objekt zu
+dekomprimieren** berechnet — allein durch das Lesen der systematischen
+Shards der Schicht 0. Für eine Suche über Tausende von Objekten ist das
+$O(K)$ Bytes pro Objekt.
 
 **Referenzen.**
 

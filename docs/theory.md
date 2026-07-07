@@ -227,8 +227,11 @@ $$
 \mathrm{RED}[\ell] \;\in\; \{\,4.0,\, 2.5,\, 1.6,\, 1.15\,\} \quad \text{for } \ell = 0, 1, 2, 3,
 $$
 
-so layer 0 (LL) is stored with $\lceil K \cdot 4.0 \rceil = 64$ shards,
-while layer 3 (finest detail) gets $\lceil K \cdot 1.15 \rceil = 18$.
+so layer 0 (LL) is stored with $\lfloor K \cdot 4.0 + 0.5 \rfloor = 64$
+shards, while layer 3 (finest detail) gets
+$\lfloor K \cdot 1.15 + 0.5 \rfloor = 18$. The code uses banker-style
+rounding (`f32::round`), not ceiling — so `K · 1.15 = 18.4` rounds to
+$18$, not $19$.
 
 ### Degradation curve
 
@@ -508,25 +511,34 @@ differences).
 
 In holofs, **the first $K$ systematic shards of layer 0** literally
 contain the LL pixels (as float-32 wavelet coefficients, byte-serialised).
-We compute a 16-byte fingerprint as
+We compute a per-channel byte-mean fingerprint
 
 $$
-\mathrm{fp}_i \;=\; \mathrm{mean}(\mathrm{payload}(\mathrm{shard}_i)), \quad i = 0, 1, \ldots, K - 1.
+\mathrm{fp}_i^{(c)} \;=\; \mathrm{clamp}_{0..255}\bigl(\mathrm{mean}(\mathrm{payload}(\mathrm{shard}_i^{(c)}))\bigr),
+\quad i = 0, \ldots, K - 1.
 $$
 
-For our $K = 16$ this gives a $4 \times 4$ grid of mean luminances —
-a classical dHash variant. Distance is L₁:
+For our $K = 16$ each channel yields a $4 \times 4$ grid of mean
+luminances — a classical dHash variant. The stored fingerprint
+concatenates the three channels: $[\mathrm{R}_{0..15}\,|\,\mathrm{G}_{0..15}\,|\,\mathrm{B}_{0..15}]$
+for 48 bytes on 3-channel images; audio and other 1-channel kinds use
+only the first 16.
 
-$$
-d(\mathrm{fp}, \mathrm{fp}') \;=\; \sum_{i=0}^{15} |\mathrm{fp}_i - \mathrm{fp}'_i| \;\in\; [0,\, 16 \cdot 255].
-$$
+**Two distance metrics live on top of this fingerprint:**
 
-Similarity in % is $100 \cdot (1 - d / 4080)$. Identical content → 0.
-Visually similar → $d \lesssim 200$. Random images → $d \gtrsim 1500$.
+- `/api/fingerprint/<name>` exposes a straight L₁ over the raw
+  channel bytes,
+  $d = \sum_{c, i} |\mathrm{fp}_i^{(c)} - \mathrm{fp}_i^{'(c)}|
+  \in [0,\, 48 \cdot 255]$, useful for exact-equality checks.
+- `/similar/<name>` derives dHash bits — one bit per adjacent-tile
+  comparison within each channel strip, giving $3 \times 15 = 45$
+  bits — and reports similarity as $1 - \mathrm{hamming} / 45$. dHash
+  degrades gracefully under geometric flips and chroma divergence,
+  where raw L₁ saturates.
 
-**Importantly**: we compute this fingerprint **without decompressing the
+**Importantly**: both metrics are computed **without decompressing the
 object** — just by reading the systematic shards of layer 0. For a search
-across thousands of objects this is O(K) bytes per object.
+across thousands of objects this is $O(K)$ bytes per object.
 
 **References.**
 
