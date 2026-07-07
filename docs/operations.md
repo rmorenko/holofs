@@ -895,6 +895,20 @@ given), and the post-boot seed is `deploy/dev-seed.sh` unless
 `holofs-soak` itself, or `--binary-dir <dir>` can point elsewhere
 (e.g. `target/release`).
 
+**Optional feature flags for the spawned gateway:**
+
+- `--enable-embed` — turns on CLIP semantic search on the spawned
+  `holofs-web` and triggers a `POST /api/embed_all` after seed so the
+  index is populated before workers start. Without this flag the
+  runner probes `/api/search` at boot and drops the `search` op from
+  the mix — no 500-storm on an unwired feature.
+- `--enable-versions` — enables per-object version history on the
+  spawned gateway. If off, `versions_list` is dropped from the mix
+  the same way.
+
+Both flags are `false` by default (matches `make dev`), so short
+smoke runs start fast. Turn them on for realistic 8-hour soaks.
+
 ```sh
 # 1) External: cluster is already up, e.g. from `make dev`.
 ./target/release/holofs-soak \
@@ -906,6 +920,7 @@ given), and the post-boot seed is `deploy/dev-seed.sh` unless
 ./target/release/holofs-soak \
     --topology embedded \
     --gateway-port 8787 \
+    --enable-embed --enable-versions \
     --workers 50 --duration 8h \
     --binary-dir target/release --out .soak
 
@@ -913,6 +928,7 @@ given), and the post-boot seed is `deploy/dev-seed.sh` unless
 ./target/release/holofs-soak \
     --topology multi-process \
     --nodes 8 --node-base-port 5100 --gateway-port 8787 \
+    --enable-embed --enable-versions \
     --workers 50 --duration 8h \
     --binary-dir target/release --out .soak
 ```

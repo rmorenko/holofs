@@ -150,6 +150,19 @@ struct Cli {
     /// `/api/stats`.
     #[arg(long, default_value = "60s")]
     boot_timeout: String,
+
+    /// Enable the CLIP-based semantic search index on the spawned
+    /// gateway (`--enable-embed` on `holofs-web`). Ignored under
+    /// `--topology external`. Forces a `POST /api/embed_all` after
+    /// seed so the index is populated before workers start.
+    #[arg(long)]
+    enable_embed: bool,
+
+    /// Enable per-object version history on the spawned gateway
+    /// (`--enable-versions` on `holofs-web`). Ignored under
+    /// `--topology external`.
+    #[arg(long)]
+    enable_versions: bool,
 }
 
 // ============================================================================
@@ -323,8 +336,14 @@ async fn spawn_embedded(cli: &Cli) -> Result<Cluster> {
         .arg(&storage_root)
         .env("HOLOFS_NO_SEED", "true")
         .env("HOLOFS_LOG", "warn")
-        .env("HOLOFS_LOG_FORMAT", "text")
-        .stdout(Stdio::null())
+        .env("HOLOFS_LOG_FORMAT", "text");
+    if cli.enable_embed {
+        cmd.arg("--enable-embed");
+    }
+    if cli.enable_versions {
+        cmd.arg("--enable-versions");
+    }
+    cmd.stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let child = cmd
@@ -481,7 +500,14 @@ async fn spawn_multi_process(cli: &Cli) -> Result<Cluster> {
         .arg(&admin_pubkey)
         .env("HOLOFS_NO_SEED", "true")
         .env("HOLOFS_LOG", "warn")
-        .env("HOLOFS_LOG_FORMAT", "text")
+        .env("HOLOFS_LOG_FORMAT", "text");
+    if cli.enable_embed {
+        gw_cmd.arg("--enable-embed");
+    }
+    if cli.enable_versions {
+        gw_cmd.arg("--enable-versions");
+    }
+    gw_cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -623,16 +649,72 @@ impl Op {
     }
 }
 
-fn pick_op(rng: &mut SmallRng) -> Op {
-    let total: u32 = Op::ALL.iter().map(|(_, w)| *w).sum();
+fn pick_op(rng: &mut SmallRng, weights: &[(Op, u32)]) -> Op {
+    let total: u32 = weights.iter().map(|(_, w)| *w).sum();
+    if total == 0 {
+        return Op::GetRandom;
+    }
     let mut r = rng.gen_range(0..total);
-    for (op, w) in Op::ALL {
+    for (op, w) in weights {
         if r < *w {
             return *op;
         }
         r -= *w;
     }
     Op::GetRandom
+}
+
+/// Probe which optional server features are enabled. Called once
+/// after bootstrap; the returned mask lets us zero out ops that would
+/// hit endpoints the operator did not opt into.
+async fn probe_capabilities(base: &str, client: &reqwest::Client) -> Capabilities {
+    let mut caps = Capabilities::default();
+    // /api/search returns 500 when embed is off. 200 (even with 0
+    // hits) means embed is wired.
+    if let Ok(r) = client
+        .get(format!("{base}/api/search?q=probe&limit=1&band=any"))
+        .send()
+        .await
+    {
+        caps.embed = r.status().is_success();
+    }
+    // /api/versions_list returns 500 when versions are off (server-fn
+    // requires the gateway's versions state).
+    if let Ok(r) = client
+        .post(format!("{base}/api/versions_list"))
+        .form(&[("name", "probe-nonexistent-name")])
+        .send()
+        .await
+    {
+        // 200 with error payload OR 404 both mean the endpoint is
+        // reachable; only 500 marks the feature as unavailable.
+        caps.versions = r.status().as_u16() != 500;
+    }
+    caps
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct Capabilities {
+    embed: bool,
+    versions: bool,
+}
+
+fn build_weights(caps: Capabilities) -> Vec<(Op, u32)> {
+    Op::ALL
+        .iter()
+        .filter_map(|&(op, w)| {
+            let keep = match op {
+                Op::Search => caps.embed,
+                Op::VersionsList => caps.versions,
+                _ => true,
+            };
+            if keep {
+                Some((op, w))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -1197,10 +1279,11 @@ async fn worker(
     cancel: CancellationToken,
     seed: u64,
     thinktime_max_ms: u64,
+    weights: Arc<Vec<(Op, u32)>>,
 ) {
     let mut rng = SmallRng::seed_from_u64(seed);
     while !cancel.is_cancelled() {
-        let op = pick_op(&mut rng);
+        let op = pick_op(&mut rng, &weights);
         let rec = do_one(op, id, &base, &client, &live, &mut rng).await;
         // Send, tolerate closed channel on shutdown.
         if tx.send(rec).await.is_err() {
@@ -1365,6 +1448,66 @@ async fn main() -> Result<()> {
         }
     }
 
+    let client = reqwest::Client::builder()
+        .timeout(request_timeout)
+        .pool_max_idle_per_host(cli.workers.min(64))
+        .user_agent(concat!("holofs-soak/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+
+    // Backfill the embed index over whatever the seed script uploaded
+    // so /api/search returns meaningful hits from the first call. The
+    // probe below still runs — if the operator passed --enable-embed
+    // but boot got that wrong, we drop the op.
+    if cli.enable_embed && cluster.is_some() {
+        eprintln!("[soak] triggering POST /api/embed_all to index seeded catalog");
+        // Give the server a generous timeout — this walks the full
+        // catalog and runs each image through CLIP.
+        let embed_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(600))
+            .build()?;
+        match embed_client
+            .post(format!("{base_url}/api/embed_all"))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => {
+                eprintln!("[soak] embed_all ok");
+            }
+            Ok(r) => {
+                eprintln!(
+                    "[soak] embed_all returned HTTP {} — /api/search will be empty",
+                    r.status()
+                );
+            }
+            Err(e) => {
+                eprintln!("[soak] embed_all request failed: {e}");
+            }
+        }
+    }
+
+    // Detect which optional features are actually reachable; drop ops
+    // from the mix that would otherwise 500 on every call.
+    let caps = probe_capabilities(&base_url, &client).await;
+    let weights = build_weights(caps);
+    let dropped: Vec<&'static str> = Op::ALL
+        .iter()
+        .filter(|(op, _)| !weights.iter().any(|(w_op, _)| w_op == op))
+        .map(|(op, _)| op.label())
+        .collect();
+    eprintln!(
+        "[soak] capabilities: embed={}, versions={}{}",
+        caps.embed,
+        caps.versions,
+        if dropped.is_empty() {
+            String::new()
+        } else {
+            format!("  (dropped ops: {})", dropped.join(", "))
+        }
+    );
+    if cli.enable_embed && !caps.embed {
+        eprintln!("[soak] warning: --enable-embed was passed but /api/search probe failed");
+    }
+
     let seed_master = cli.seed.unwrap_or_else(rand::random);
     let cfg = json!({
         "base": base_url,
@@ -1384,14 +1527,14 @@ async fn main() -> Result<()> {
             "ephemeral_storage": c.tempdir.is_some(),
         })),
         "seed_script": seed_script.as_ref().map(|p| p.display().to_string()),
+        "capabilities": {
+            "embed": caps.embed,
+            "versions": caps.versions,
+            "dropped_ops": dropped,
+        },
+        "weights": weights.iter().map(|(op, w)| (op.label(), *w)).collect::<Vec<_>>(),
     });
     write_json(&run_dir.join("config.json"), &cfg).await?;
-
-    let client = reqwest::Client::builder()
-        .timeout(request_timeout)
-        .pool_max_idle_per_host(cli.workers.min(64))
-        .user_agent(concat!("holofs-soak/", env!("CARGO_PKG_VERSION")))
-        .build()?;
 
     // Optional admin token wire-through (currently unused because no op
     // touches admin routes; keep the header for future opt-in).
@@ -1437,6 +1580,7 @@ async fn main() -> Result<()> {
     });
 
     // Spawn workers.
+    let weights_shared = Arc::new(weights);
     let mut worker_handles = Vec::with_capacity(cli.workers);
     for i in 0..cli.workers {
         let base = base_url.clone();
@@ -1444,9 +1588,10 @@ async fn main() -> Result<()> {
         let live = live.clone();
         let tx = tx.clone();
         let cancel = cancel.clone();
+        let weights = weights_shared.clone();
         let seed = seed_master.wrapping_add(i as u64).wrapping_mul(0x9E3779B97F4A7C15);
         worker_handles.push(tokio::spawn(async move {
-            worker(i, base, client, live, tx, cancel, seed, 50).await;
+            worker(i, base, client, live, tx, cancel, seed, 50, weights).await;
         }));
     }
     drop(tx); // writer will finish when all workers close their senders.
@@ -1579,10 +1724,20 @@ mod tests {
     #[test]
     fn ops_pick_deterministic() {
         let mut rng = SmallRng::seed_from_u64(42);
+        let weights: Vec<(Op, u32)> = Op::ALL.to_vec();
         let mut counts = BTreeMap::new();
         for _ in 0..1000 {
-            *counts.entry(pick_op(&mut rng).label()).or_insert(0) += 1;
+            *counts.entry(pick_op(&mut rng, &weights).label()).or_insert(0) += 1;
         }
         assert!(counts.contains_key("get_random"));
+    }
+
+    #[test]
+    fn build_weights_drops_disabled_features() {
+        let caps = Capabilities { embed: false, versions: true };
+        let w = build_weights(caps);
+        assert!(!w.iter().any(|(op, _)| *op == Op::Search));
+        assert!(w.iter().any(|(op, _)| *op == Op::VersionsList));
+        assert!(w.iter().any(|(op, _)| *op == Op::Similar));
     }
 }
