@@ -879,17 +879,41 @@ for hours, records everything that happened, and exits with a
 by running an overnight soak, then triage `errors.jsonl` the next
 morning".
 
-```sh
-# Bring up a seeded cluster (any topology: embedded, spawn-cluster, k8s).
-make dev                                    # embedded 40-node + dev-seed.sh
+Three cluster topologies are supported via `--topology`:
 
-# Drive the gateway for 8 h with 50 parallel workers.
+| `--topology`     | What the runner does                                                        |
+|------------------|-----------------------------------------------------------------------------|
+| `external`       | Connects to an already-running gateway at `--base` (default). No lifecycle. |
+| `embedded`       | Spawns one `holofs-web` process with the in-process 40-node cluster.        |
+| `multi-process`  | Spawns `--nodes` `holofs-node` processes + a whitelisted `holofs-web`.      |
+
+For the two spawned topologies the storage root is a scratch tempdir
+under `$TMPDIR` (deleted on exit unless `--cluster-storage <dir>` is
+given), and the post-boot seed is `deploy/dev-seed.sh` unless
+`--seed-script <path>` overrides it. Binaries are looked up next to
+`holofs-soak` itself, or `--binary-dir <dir>` can point elsewhere
+(e.g. `target/release`).
+
+```sh
+# 1) External: cluster is already up, e.g. from `make dev`.
 ./target/release/holofs-soak \
+    --topology external \
     --base http://127.0.0.1:8787 \
-    --workers 50 \
-    --duration 8h \
-    --metrics-interval 10s \
-    --out .soak
+    --workers 50 --duration 8h --out .soak
+
+# 2) Embedded: 40 in-process nodes; simplest, matches `make dev`.
+./target/release/holofs-soak \
+    --topology embedded \
+    --gateway-port 8787 \
+    --workers 50 --duration 8h \
+    --binary-dir target/release --out .soak
+
+# 3) Multi-process: N node daemons + gateway with signed whitelist.
+./target/release/holofs-soak \
+    --topology multi-process \
+    --nodes 8 --node-base-port 5100 --gateway-port 8787 \
+    --workers 50 --duration 8h \
+    --binary-dir target/release --out .soak
 ```
 
 Each run writes to `.soak/<utc-timestamp>/`:
@@ -915,3 +939,16 @@ The runner is intentionally **read-mostly on the admin surface**:
 it does not call `/api/gc`, `/admin/node`, or the escrow endpoints,
 so it can be pointed at a live staging gateway without cluster-state
 side effects beyond regular PUT/DELETE.
+
+Shutdown is graceful in all three topologies:
+
+- Ctrl-C or the `--duration` deadline flips a `CancellationToken`;
+  workers, the writer, the metrics collector, and the SSE consumer
+  drain in order, then `summary.json` is written.
+- For `embedded`/`multi-process`, the spawned children are sent
+  SIGTERM (via `Child::start_kill`) after `summary.json` is on disk,
+  each with a 5-second grace period. Scratch tempdirs are deleted on
+  the way out.
+- If the run panics before `summary.json`, `kill_on_drop(true)` on
+  every spawned `Child` still ensures no gateway or node processes
+  leak into the next test run.

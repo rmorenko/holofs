@@ -17,7 +17,7 @@ holofs-client.workspace = true
 holofs-cluster.workspace = true
 holofs-analytics.workspace = true
 holofs-gateway.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = [ "process" ] }
 tokio-util.workspace = true
 png.workspace = true
 serde.workspace = true

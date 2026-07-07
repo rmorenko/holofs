@@ -26,6 +26,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,7 +39,8 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -47,6 +49,20 @@ use tokio_util::sync::CancellationToken;
 // CLI
 // ============================================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
+enum Topology {
+    /// Assume the cluster is already running; connect via `--base`.
+    External,
+    /// Spawn a single `holofs-web` process (in-process 40-node cluster).
+    Embedded,
+    /// Spawn N `holofs-node` processes + one whitelisted `holofs-web`
+    /// gateway. Uses `holofs-admin gen-key` + `sign-whitelist` under
+    /// the hood.
+    MultiProcess,
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "holofs-soak",
@@ -54,7 +70,16 @@ use tokio_util::sync::CancellationToken;
     version
 )]
 struct Cli {
-    /// Gateway base URL (e.g. `http://127.0.0.1:8787`).
+    /// How to obtain the cluster the workers talk to. `external`
+    /// (default) is "already running, don't touch it". `embedded` and
+    /// `multi-process` spawn a fresh cluster into a scratch directory,
+    /// wait for readiness, seed it (see `--seed-script`), and tear it
+    /// down cleanly on exit.
+    #[arg(long, value_enum, default_value_t = Topology::External)]
+    topology: Topology,
+
+    /// Gateway base URL, only consulted when `--topology external`.
+    /// The other topologies derive the URL from `--gateway-port`.
     #[arg(long, default_value = "http://127.0.0.1:8787")]
     base: String,
 
@@ -88,6 +113,413 @@ struct Cli {
     /// Per-request HTTP timeout.
     #[arg(long, default_value = "30s")]
     request_timeout: String,
+
+    // ---- cluster-spawn parameters (ignored under `--topology external`) ----
+    /// Gateway HTTP port for spawned topologies.
+    #[arg(long, default_value_t = 8787)]
+    gateway_port: u16,
+
+    /// Number of `holofs-node` processes to spawn under
+    /// `--topology multi-process`.
+    #[arg(long, default_value_t = 8)]
+    nodes: usize,
+
+    /// Base TCP port for the node processes; each node binds
+    /// `<node-base-port> + idx`.
+    #[arg(long, default_value_t = 5100)]
+    node_base_port: u16,
+
+    /// Cluster storage root for spawned topologies. If omitted a
+    /// tempdir under `$TMPDIR` is created and removed on exit.
+    #[arg(long)]
+    cluster_storage: Option<PathBuf>,
+
+    /// Post-boot seed script. Executed as `bash <path>` with
+    /// `BASE=<gateway URL>` in the environment. Default:
+    /// `deploy/dev-seed.sh` if it exists under the workspace root;
+    /// otherwise skipped.
+    #[arg(long)]
+    seed_script: Option<PathBuf>,
+
+    /// Directory holding `holofs-web`, `holofs-node`, `holofs-admin`.
+    /// Defaults to the directory of the running `holofs-soak` binary.
+    #[arg(long)]
+    binary_dir: Option<PathBuf>,
+
+    /// Maximum time to wait for a spawned gateway to answer
+    /// `/api/stats`.
+    #[arg(long, default_value = "60s")]
+    boot_timeout: String,
+}
+
+// ============================================================================
+// Cluster spawn (embedded / multi-process)
+// ============================================================================
+
+/// Owns every child process spawned for a run and the storage root
+/// they wrote to. Dropping this struct kills the whole tree (via
+/// `Drop` on `tokio::process::Child` with `kill_on_drop(true)`); the
+/// preferred path is `shutdown().await`, which first tries SIGTERM.
+struct Cluster {
+    base_url: String,
+    label: &'static str,
+    children: Vec<(String, Child)>,
+    storage_root: PathBuf,
+    tempdir: Option<tempdir_guard::TempDir>,
+}
+
+/// Tiny hand-rolled tempdir (no external crate). Removes the directory
+/// on drop; failures are logged but not surfaced.
+mod tempdir_guard {
+    use std::path::{Path, PathBuf};
+
+    pub(super) struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        pub(super) fn new(prefix: &str) -> std::io::Result<Self> {
+            let base = std::env::temp_dir();
+            let nonce: u64 = rand::random();
+            let path = base.join(format!("{prefix}-{nonce:016x}"));
+            std::fs::create_dir_all(&path)?;
+            Ok(Self { path })
+        }
+        pub(super) fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if let Err(e) = std::fs::remove_dir_all(&self.path) {
+                eprintln!("[soak] tempdir cleanup {}: {e}", self.path.display());
+            }
+        }
+    }
+}
+
+impl Cluster {
+    async fn shutdown(mut self) {
+        // Reverse order so the gateway dies before the nodes it talks to.
+        for (name, child) in self.children.iter_mut().rev() {
+            match child.try_wait() {
+                Ok(Some(_)) => {} // already gone
+                _ => {
+                    let _ = child.start_kill();
+                }
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+            eprintln!("[soak] stopped {name}");
+        }
+    }
+}
+
+fn resolve_binary(dir: Option<&Path>, name: &str) -> PathBuf {
+    let default_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    let base = dir.map(Path::to_path_buf).or(default_dir).unwrap_or_default();
+    let candidate = base.join(name);
+    if candidate.exists() {
+        return candidate;
+    }
+    // Fall back to $PATH.
+    PathBuf::from(name)
+}
+
+async fn wait_for_gateway(base_url: &str, deadline: Duration) -> Result<()> {
+    let start = Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()?;
+    let stats = format!("{base_url}/api/stats");
+    loop {
+        if let Ok(r) = client.get(&stats).send().await {
+            if r.status().is_success() {
+                return Ok(());
+            }
+        }
+        if start.elapsed() > deadline {
+            bail!("gateway {base_url} did not answer /api/stats within {deadline:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+}
+
+async fn read_node_pubkey(child: &mut Child, deadline: Duration) -> Result<(String, String)> {
+    // Node prints `holofs-node addr=<host:port> pubkey=<hex>` once bound.
+    let stderr = child
+        .stderr
+        .take()
+        .context("node stderr not piped — spawn config bug")?;
+    let mut reader = BufReader::new(stderr).lines();
+    let start = Instant::now();
+    loop {
+        if start.elapsed() > deadline {
+            bail!("node did not print pubkey within {deadline:?}");
+        }
+        let read = tokio::time::timeout(Duration::from_millis(500), reader.next_line()).await;
+        match read {
+            Ok(Ok(Some(line))) => {
+                if let Some(rest) = line.strip_prefix("holofs-node addr=") {
+                    if let Some((addr_str, tail)) = rest.split_once(' ') {
+                        if let Some(pubkey) = tail.strip_prefix("pubkey=") {
+                            return Ok((addr_str.to_string(), pubkey.trim().to_string()));
+                        }
+                    }
+                }
+                // Otherwise it's an unrelated stderr line; ignore.
+            }
+            Ok(Ok(None)) => bail!("node stderr closed before printing pubkey"),
+            Ok(Err(e)) => bail!("node stderr read error: {e}"),
+            Err(_) => {} // timeout on this attempt; loop
+        }
+    }
+}
+
+fn find_default_seed_script() -> Option<PathBuf> {
+    let candidate = std::env::current_dir().ok()?.join("deploy/dev-seed.sh");
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+async fn run_seed_script(script: &Path, base_url: &str) -> Result<()> {
+    eprintln!("[soak] seeding via {} (BASE={base_url})", script.display());
+    let status = Command::new("bash")
+        .arg(script)
+        .env("BASE", base_url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .with_context(|| format!("failed to spawn bash {}", script.display()))?;
+    if !status.success() {
+        bail!("seed script exited with {status}");
+    }
+    Ok(())
+}
+
+async fn spawn_embedded(cli: &Cli) -> Result<Cluster> {
+    let bin_dir = cli.binary_dir.as_deref();
+    let holofs_web = resolve_binary(bin_dir, "holofs-web");
+    let (storage_root, tempdir) = ensure_storage(cli, "holofs-soak-embedded")?;
+
+    let addr = format!("127.0.0.1:{}", cli.gateway_port);
+    let base_url = format!("http://{addr}");
+    eprintln!(
+        "[soak] spawning embedded gateway: {} --addr {addr} --storage {}",
+        holofs_web.display(),
+        storage_root.display()
+    );
+    let mut cmd = Command::new(&holofs_web);
+    cmd.arg("--addr")
+        .arg(&addr)
+        .arg("--storage")
+        .arg(&storage_root)
+        .env("HOLOFS_NO_SEED", "true")
+        .env("HOLOFS_LOG", "warn")
+        .env("HOLOFS_LOG_FORMAT", "text")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("spawn {}", holofs_web.display()))?;
+    let cluster = Cluster {
+        base_url: base_url.clone(),
+        label: "embedded",
+        children: vec![("gateway".to_string(), child)],
+        storage_root: storage_root.clone(),
+        tempdir,
+    };
+
+    if let Err(e) = wait_for_gateway(&base_url, parse_duration(&cli.boot_timeout)?).await {
+        cluster.shutdown().await;
+        return Err(e);
+    }
+    eprintln!("[soak] embedded gateway ready at {base_url}");
+    Ok(cluster)
+}
+
+async fn spawn_multi_process(cli: &Cli) -> Result<Cluster> {
+    if cli.nodes == 0 {
+        bail!("--nodes must be > 0 for multi-process topology");
+    }
+    let bin_dir = cli.binary_dir.as_deref();
+    let holofs_node = resolve_binary(bin_dir, "holofs-node");
+    let holofs_admin = resolve_binary(bin_dir, "holofs-admin");
+    let holofs_web = resolve_binary(bin_dir, "holofs-web");
+    let (storage_root, tempdir) = ensure_storage(cli, "holofs-soak-mp")?;
+    let node_pubkey_deadline = parse_duration(&cli.boot_timeout)?;
+
+    // 1. Spawn N nodes.
+    let mut children: Vec<(String, Child)> = Vec::with_capacity(cli.nodes + 1);
+    let mut node_specs: Vec<String> = Vec::with_capacity(cli.nodes);
+    for i in 0..cli.nodes {
+        let port = cli
+            .node_base_port
+            .checked_add(u16::try_from(i).unwrap_or(u16::MAX))
+            .context("node port overflow")?;
+        let addr = format!("127.0.0.1:{port}");
+        let storage = storage_root.join(format!("node-{i:02}"));
+        std::fs::create_dir_all(&storage)?;
+        eprintln!("[soak] starting node {i}: {addr} storage={}", storage.display());
+        let mut cmd = Command::new(&holofs_node);
+        cmd.arg(&addr)
+            .arg("--storage")
+            .arg(&storage)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("spawn {}", holofs_node.display()))?;
+        let (bound_addr, pubkey) = read_node_pubkey(&mut child, node_pubkey_deadline).await?;
+        let zone = i % 4;
+        node_specs.push(format!("{bound_addr}={pubkey}:{zone}"));
+        children.push((format!("node-{i:02}"), child));
+    }
+
+    // 2. Admin keypair.
+    let admin_key = storage_root.join("admin.key");
+    if !admin_key.exists() {
+        let status = Command::new(&holofs_admin)
+            .arg("gen-key")
+            .arg(&admin_key)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .await
+            .with_context(|| format!("spawn {} gen-key", holofs_admin.display()))?;
+        if !status.success() {
+            let cluster = Cluster {
+                base_url: String::new(),
+                label: "multi-process",
+                children,
+                storage_root: storage_root.clone(),
+                tempdir,
+            };
+            cluster.shutdown().await;
+            bail!("holofs-admin gen-key exited with {status}");
+        }
+    }
+    let admin_pubkey = {
+        let out = Command::new(&holofs_admin)
+            .arg("pubkey")
+            .arg(&admin_key)
+            .output()
+            .await
+            .with_context(|| format!("spawn {} pubkey", holofs_admin.display()))?;
+        if !out.status.success() {
+            let cluster = Cluster {
+                base_url: String::new(),
+                label: "multi-process",
+                children,
+                storage_root: storage_root.clone(),
+                tempdir,
+            };
+            cluster.shutdown().await;
+            bail!("holofs-admin pubkey exited with {}", out.status);
+        }
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // 3. Sign whitelist.
+    let whitelist = storage_root.join("whitelist.holofs");
+    let mut sign_cmd = Command::new(&holofs_admin);
+    sign_cmd
+        .arg("sign-whitelist")
+        .arg("--admin")
+        .arg(&admin_key)
+        .arg("--out")
+        .arg(&whitelist);
+    for spec in &node_specs {
+        sign_cmd.arg("--node").arg(spec);
+    }
+    let sign_status = sign_cmd
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .with_context(|| format!("spawn {} sign-whitelist", holofs_admin.display()))?;
+    if !sign_status.success() {
+        let cluster = Cluster {
+            base_url: String::new(),
+            label: "multi-process",
+            children,
+            storage_root: storage_root.clone(),
+            tempdir,
+        };
+        cluster.shutdown().await;
+        bail!("holofs-admin sign-whitelist exited with {sign_status}");
+    }
+
+    // 4. Gateway.
+    let gw_storage = storage_root.join("gateway");
+    std::fs::create_dir_all(&gw_storage)?;
+    let addr = format!("127.0.0.1:{}", cli.gateway_port);
+    let base_url = format!("http://{addr}");
+    eprintln!(
+        "[soak] spawning multi-process gateway: {} --addr {addr} --whitelist {}",
+        holofs_web.display(),
+        whitelist.display()
+    );
+    let mut gw_cmd = Command::new(&holofs_web);
+    gw_cmd
+        .arg("--addr")
+        .arg(&addr)
+        .arg("--storage")
+        .arg(&gw_storage)
+        .arg("--whitelist")
+        .arg(&whitelist)
+        .arg("--admin-pubkey")
+        .arg(&admin_pubkey)
+        .env("HOLOFS_NO_SEED", "true")
+        .env("HOLOFS_LOG", "warn")
+        .env("HOLOFS_LOG_FORMAT", "text")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let gw_child = gw_cmd
+        .spawn()
+        .with_context(|| format!("spawn {}", holofs_web.display()))?;
+    children.push(("gateway".to_string(), gw_child));
+
+    let cluster = Cluster {
+        base_url: base_url.clone(),
+        label: "multi-process",
+        children,
+        storage_root: storage_root.clone(),
+        tempdir,
+    };
+    if let Err(e) = wait_for_gateway(&base_url, parse_duration(&cli.boot_timeout)?).await {
+        cluster.shutdown().await;
+        return Err(e);
+    }
+    eprintln!(
+        "[soak] multi-process cluster ready: {} nodes + gateway at {base_url}",
+        cli.nodes
+    );
+    Ok(cluster)
+}
+
+fn ensure_storage(
+    cli: &Cli,
+    prefix: &str,
+) -> Result<(PathBuf, Option<tempdir_guard::TempDir>)> {
+    if let Some(explicit) = &cli.cluster_storage {
+        std::fs::create_dir_all(explicit)
+            .with_context(|| format!("create --cluster-storage {}", explicit.display()))?;
+        Ok((explicit.clone(), None))
+    } else {
+        let td = tempdir_guard::TempDir::new(prefix)?;
+        Ok((td.path().to_path_buf(), Some(td)))
+    }
 }
 
 // ============================================================================
@@ -905,9 +1337,38 @@ async fn main() -> Result<()> {
     let run_dir = cli.out.join(&run_id);
     tokio::fs::create_dir_all(&run_dir).await?;
 
+    // Bring up the cluster (or connect to an external one) BEFORE
+    // committing config.json — this way boot-time failures still
+    // surface a summary directory even if `wait_for_gateway` bailed.
+    let cluster: Option<Cluster> = match cli.topology {
+        Topology::External => None,
+        Topology::Embedded => Some(spawn_embedded(&cli).await?),
+        Topology::MultiProcess => Some(spawn_multi_process(&cli).await?),
+    };
+    let base_url = cluster
+        .as_ref()
+        .map_or_else(|| cli.base.clone(), |c| c.base_url.clone());
+
+    // Post-boot seed. Default script (for the spawned topologies only)
+    // is `deploy/dev-seed.sh` under the workspace root, matching what
+    // `make dev-seed` runs.
+    let seed_script = cli.seed_script.clone().or_else(|| match cli.topology {
+        Topology::External => None,
+        _ => find_default_seed_script(),
+    });
+    if let Some(script) = &seed_script {
+        if let Err(e) = run_seed_script(script, &base_url).await {
+            if let Some(c) = cluster {
+                c.shutdown().await;
+            }
+            return Err(e);
+        }
+    }
+
     let seed_master = cli.seed.unwrap_or_else(rand::random);
     let cfg = json!({
-        "base": cli.base,
+        "base": base_url,
+        "topology": cli.topology,
         "workers": cli.workers,
         "duration_ms": duration.as_millis() as u64,
         "metrics_interval_ms": metrics_interval.as_millis() as u64,
@@ -916,6 +1377,13 @@ async fn main() -> Result<()> {
         "started_at": chrono::Utc::now().to_rfc3339(),
         "run_id": run_id,
         "binary_version": env!("CARGO_PKG_VERSION"),
+        "cluster": cluster.as_ref().map(|c| json!({
+            "label": c.label,
+            "storage_root": c.storage_root.display().to_string(),
+            "children": c.children.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+            "ephemeral_storage": c.tempdir.is_some(),
+        })),
+        "seed_script": seed_script.as_ref().map(|p| p.display().to_string()),
     });
     write_json(&run_dir.join("config.json"), &cfg).await?;
 
@@ -932,10 +1400,10 @@ async fn main() -> Result<()> {
     }
 
     eprintln!("[soak] run {run_id} → {}", run_dir.display());
-    eprintln!("[soak] base={} workers={} duration={:?}", cli.base, cli.workers, duration);
+    eprintln!("[soak] base={} workers={} duration={:?}", base_url, cli.workers, duration);
 
     // Bootstrap live set.
-    let live = Arc::new(bootstrap_live_set(&cli.base, &client).await?);
+    let live = Arc::new(bootstrap_live_set(&base_url, &client).await?);
     let (files0, dirs0) = live.size().await;
     eprintln!("[soak] initial catalog: {files0} files, {dirs0} directories");
     if files0 == 0 {
@@ -971,7 +1439,7 @@ async fn main() -> Result<()> {
     // Spawn workers.
     let mut worker_handles = Vec::with_capacity(cli.workers);
     for i in 0..cli.workers {
-        let base = cli.base.clone();
+        let base = base_url.clone();
         let client = client.clone();
         let live = live.clone();
         let tx = tx.clone();
@@ -992,14 +1460,14 @@ async fn main() -> Result<()> {
 
     // Metrics + SSE.
     let metrics_handle = tokio::spawn(metrics_collector(
-        cli.base.clone(),
+        base_url.clone(),
         client.clone(),
         metrics_interval,
         metrics_file,
         cancel.clone(),
     ));
     let sse_handle = tokio::spawn(sse_consumer(
-        cli.base.clone(),
+        base_url.clone(),
         client.clone(),
         health_file,
         cancel.clone(),
@@ -1047,6 +1515,12 @@ async fn main() -> Result<()> {
         "rollup": summary,
     });
     write_json(&run_dir.join("summary.json"), &final_view).await?;
+
+    // Tear the spawned cluster down (if any). Do this AFTER summary
+    // so a slow shutdown never eats the artefacts.
+    if let Some(c) = cluster {
+        c.shutdown().await;
+    }
 
     eprintln!("[soak] done → {}", run_dir.display());
     Ok(())
