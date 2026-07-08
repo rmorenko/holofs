@@ -221,10 +221,18 @@ pub async fn put_object(
     let seed = u64::from_be_bytes(cid[8..16].try_into().unwrap());
     let mut rng = Rng::new(seed);
 
-    // 2. Encode, hash, and collect a flat list of Merkle leaves in parallel.
+    // 2. Encode + hash all shards, staging one dispatch queue per node.
+    //    The pre-P1 hot loop `for shard { rpc(node, req).await? }` sent
+    //    every shard sequentially — on a 4-node topology with ~480
+    //    total shards per PUT that was 480 × TCP-round-trip in series,
+    //    dominating the 46 s p50 the soak study measured. Now we
+    //    encode fully, batch by target node, and fan out with
+    //    `try_join_all` so the wire step scales with pool depth
+    //    instead of shard count.
     let mut shard_hashes: Vec<Vec<Vec<Hash>>> =
         vec![vec![Vec::new(); nlayers]; manifest.channels as usize];
     let mut leaves_flat: Vec<Hash> = Vec::new();
+    let mut per_node_reqs: Vec<Vec<Request>> = vec![Vec::new(); manifest.nodes.len()];
 
     for c in 0..manifest.channels as usize {
         let mut plane = channels[c].clone();
@@ -248,25 +256,61 @@ pub async fn put_object(
                 leaves_flat.push(h);
 
                 let node = manifest.place_shard(c as u8, l as u8, idx as u32, live)?;
-                let req = Request::Put {
+                per_node_reqs[node].push(Request::Put {
                     object_id: manifest.object_id,
                     channel: c as u8,
                     layer: l as u8,
                     shard,
-                };
-                match rpc(&manifest.nodes[node], req).await? {
-                    Response::Ack => {}
-                    Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
-                    other => {
-                        return Err(ClientError::UnexpectedResponse { expected: "Ack", got: format!("{other:?}") })
-                    }
-                }
+                });
             }
         }
     }
 
+    fanout_puts(&manifest.nodes, per_node_reqs).await?;
+
     manifest.shard_hashes = shard_hashes;
     manifest.merkle_root = merkle_root(&leaves_flat);
+    Ok(())
+}
+
+/// Dispatch a per-node queue of `Request::Put` frames concurrently.
+/// One task per node so the fan-out fully utilises the keepalive
+/// pool without ballooning tasks per shard. Any single failed RPC
+/// aborts the fan-out and surfaces the underlying `ClientError`.
+async fn fanout_puts(
+    nodes: &[String],
+    per_node_reqs: Vec<Vec<Request>>,
+) -> Result<(), ClientError> {
+    use futures_util::future::try_join_all;
+
+    let tasks = per_node_reqs
+        .into_iter()
+        .enumerate()
+        .filter(|(_, reqs)| !reqs.is_empty())
+        .map(|(node_idx, reqs)| {
+            let addr = nodes[node_idx].clone();
+            async move {
+                // Sequential per node so we don't blow through the
+                // pool's per-addr keepalive cap; parallel across
+                // nodes so the wall clock is the slowest node, not
+                // the sum.
+                for req in reqs {
+                    match rpc(&addr, req).await? {
+                        Response::Ack => {}
+                        Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
+                        other => {
+                            return Err(ClientError::UnexpectedResponse {
+                                expected: "Ack",
+                                got: format!("{other:?}"),
+                            })
+                        }
+                    }
+                }
+                Ok::<(), ClientError>(())
+            }
+        })
+        .collect::<Vec<_>>();
+    try_join_all(tasks).await?;
     Ok(())
 }
 
@@ -832,24 +876,19 @@ pub async fn put_text_object(
     let (_sl, shards) = encode_layer(gf, &split.padded, n, &mut rng);
 
     let mut hashes: Vec<Hash> = Vec::with_capacity(shards.len());
+    let mut per_node_reqs: Vec<Vec<Request>> = vec![Vec::new(); manifest.nodes.len()];
     for (idx, shard) in shards.into_iter().enumerate() {
         let h = shard_hash(&shard);
         hashes.push(h);
         let node = manifest.place_shard(0, 0, idx as u32, live)?;
-        let req = Request::Put {
+        per_node_reqs[node].push(Request::Put {
             object_id: manifest.object_id,
             channel: 0,
             layer: 0,
             shard,
-        };
-        match rpc(&manifest.nodes[node], req).await? {
-            Response::Ack => {}
-            Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
-            other => {
-                return Err(ClientError::UnexpectedResponse { expected: "Ack", got: format!("{other:?}") })
-            }
-        }
+        });
     }
+    fanout_puts(&manifest.nodes, per_node_reqs).await?;
     manifest.shard_hashes = vec![vec![hashes.clone()]];
     manifest.merkle_root = merkle_root(&hashes);
     Ok(())
@@ -924,6 +963,7 @@ pub async fn put_audio_object(
     let mut shard_hashes: Vec<Vec<Vec<Hash>>> =
         vec![vec![Vec::new(); nlayers]; manifest.channels as usize];
     let mut leaves_flat: Vec<Hash> = Vec::new();
+    let mut per_node_reqs: Vec<Vec<Request>> = vec![Vec::new(); manifest.nodes.len()];
 
     for c in 0..manifest.channels as usize {
         let mut plane = channels[c].clone();
@@ -947,22 +987,17 @@ pub async fn put_audio_object(
                 leaves_flat.push(h);
 
                 let node = manifest.place_shard(c as u8, l as u8, idx as u32, live)?;
-                let req = Request::Put {
+                per_node_reqs[node].push(Request::Put {
                     object_id: manifest.object_id,
                     channel: c as u8,
                     layer: l as u8,
                     shard,
-                };
-                match rpc(&manifest.nodes[node], req).await? {
-                    Response::Ack => {}
-                    Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
-                    other => {
-                        return Err(ClientError::UnexpectedResponse { expected: "Ack", got: format!("{other:?}") })
-                    }
-                }
+                });
             }
         }
     }
+
+    fanout_puts(&manifest.nodes, per_node_reqs).await?;
 
     manifest.shard_hashes = shard_hashes;
     manifest.merkle_root = merkle_root(&leaves_flat);
@@ -1163,24 +1198,19 @@ pub async fn put_opaque_object(
     assert_eq!(sl, sym_len);
 
     let mut hashes: Vec<Hash> = Vec::with_capacity(shards.len());
+    let mut per_node_reqs: Vec<Vec<Request>> = vec![Vec::new(); manifest.nodes.len()];
     for (idx, shard) in shards.into_iter().enumerate() {
         let h = shard_hash(&shard);
         hashes.push(h);
         let node = manifest.place_shard(0, 0, idx as u32, live)?;
-        let req = Request::Put {
+        per_node_reqs[node].push(Request::Put {
             object_id: manifest.object_id,
             channel: 0,
             layer: 0,
             shard,
-        };
-        match rpc(&manifest.nodes[node], req).await? {
-            Response::Ack => {}
-            Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
-            other => {
-                return Err(ClientError::UnexpectedResponse { expected: "Ack", got: format!("{other:?}") })
-            }
-        }
+        });
     }
+    fanout_puts(&manifest.nodes, per_node_reqs).await?;
     manifest.shard_hashes = vec![vec![hashes.clone()]];
     manifest.merkle_root = merkle_root(&hashes);
     Ok(())
