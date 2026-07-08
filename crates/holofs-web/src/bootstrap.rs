@@ -367,12 +367,17 @@ pub async fn bootstrap_cluster(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(holofs_gateway::DEFAULT_LONG_CONCURRENCY);
+    let encode_cap: usize = std::env::var("HOLOFS_ENCODE_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(holofs_gateway::DEFAULT_ENCODE_CONCURRENCY);
     if let Some(gw_mut) = Arc::get_mut(&mut gateway) {
         gw_mut.configure_limits(medium_cap, long_cap);
+        gw_mut.configure_encode_limit(encode_cap);
     } else {
         warn!("Arc<Gateway> refcount already > 1 after construction; backpressure caps stayed at defaults");
     }
-    info!(medium_cap, long_cap, "N3 backpressure caps applied");
+    info!(medium_cap, long_cap, encode_cap, "N3 backpressure caps applied");
     // wire the CLIP semantic-search index when the operator
     // opted in. We don't pre-load the model here — that happens lazily
     // on first PUT / first search to keep boot cheap.

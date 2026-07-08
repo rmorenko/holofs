@@ -72,6 +72,21 @@ pub const DEFAULT_MEDIUM_CONCURRENCY: usize = 64;
 /// tune it via `HOLOFS_LONG_CONCURRENCY`.
 pub const DEFAULT_LONG_CONCURRENCY: usize = 8;
 
+/// Async-ingest encode-worker concurrency cap. RLNC over GF(2⁸) is
+/// pure CPU; oversubscribing by 5× (which is what happens when
+/// `HOLOFS_ASYNC_ENCODE=1` runs unthrottled — the HTTP handler
+/// releases its MEDIUM permit the moment it emits 202, so
+/// background workers accumulate) turns the tokio scheduler into
+/// a context-switch storm and every other route starves.
+///
+/// A dedicated `encode_permits` semaphore keeps encoder parallelism
+/// separate from HTTP MEDIUM: the 202 fast-path stays fast, excess
+/// PUTs simply stay in `Encoding` longer, and polling clients see
+/// 503+Retry-After and back off naturally. 8 matches typical
+/// physical-core counts on dev / soak hardware; override via
+/// `HOLOFS_ENCODE_CONCURRENCY`.
+pub const DEFAULT_ENCODE_CONCURRENCY: usize = 8;
+
 /// Cluster metadata needed to PUT a new object.
 pub struct ClusterInfo {
     pub node_addrs: Vec<String>,
@@ -221,6 +236,27 @@ pub struct Gateway {
     pub(crate) objects_encoding: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) encode_completed_total: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) encode_failed_total: Arc<std::sync::atomic::AtomicU64>,
+    /// Dedicated backpressure for async-ingest background encoders.
+    /// See [`DEFAULT_ENCODE_CONCURRENCY`] for why this is separate
+    /// from `medium_permits` — reusing MEDIUM meant one saturating
+    /// PUT storm blocked out mkdir / rmdir / put_new on their HTTP
+    /// gate (97 % 503 in the July 2026 soak).
+    pub(crate) encode_permits: Arc<tokio::sync::Semaphore>,
+    /// Group-commit coalescing for [`Self::persist_catalog`]. Every
+    /// mutation increments `persist_dirty_epoch` after it commits;
+    /// the flush leader (single-writer serialised on
+    /// `persist_flush_mutex`) atomically snapshots the catalog +
+    /// the current dirty epoch, writes, then publishes to
+    /// `persist_flushed_epoch`. Concurrent callers whose ticket is
+    /// already covered by an in-flight or completed flush skip the
+    /// fsync entirely and count in `persist_coalesced_total`.
+    /// Under the July 2026 soak this cut per-mutation persist
+    /// latency from ~100 ms (fsync serialisation) to near-zero for
+    /// followers.
+    pub(crate) persist_dirty_epoch: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) persist_flushed_epoch: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) persist_flush_mutex: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) persist_coalesced_total: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// PNG cache entry: fully-encoded body + the layer it was decoded at
@@ -278,6 +314,11 @@ impl Gateway {
             objects_encoding: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             encode_completed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             encode_failed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            encode_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_ENCODE_CONCURRENCY)),
+            persist_dirty_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            persist_flushed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            persist_flush_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            persist_coalesced_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -326,6 +367,11 @@ impl Gateway {
             objects_encoding: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             encode_completed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             encode_failed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            encode_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_ENCODE_CONCURRENCY)),
+            persist_dirty_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            persist_flushed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            persist_flush_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            persist_coalesced_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -338,6 +384,14 @@ impl Gateway {
     pub fn configure_limits(&mut self, medium: usize, long: usize) {
         self.medium_permits = Arc::new(tokio::sync::Semaphore::new(medium));
         self.long_permits = Arc::new(tokio::sync::Semaphore::new(long));
+    }
+
+    /// N3: reset the async-ingest encode-worker concurrency cap.
+    /// Called once at bootstrap after reading `HOLOFS_ENCODE_CONCURRENCY`.
+    /// Same lifecycle constraint as [`Self::configure_limits`]: safe
+    /// only before axum starts serving.
+    pub fn configure_encode_limit(&mut self, encode: usize) {
+        self.encode_permits = Arc::new(tokio::sync::Semaphore::new(encode));
     }
 
     /// Handle for the /metrics endpoint (backpressure permits +
@@ -526,14 +580,51 @@ impl Gateway {
     /// Err so operators get an immediate 500 rather than a silent
     /// disk-full incident that a restart later exposes as lost data.
     pub async fn persist_catalog(&self) -> Result<(), crate::error::GatewayError> {
+        use std::sync::atomic::Ordering;
         let Some(path) = &self.catalog_path else {
             return Ok(());
         };
-        // Snapshot: avoid holding the Mutex across fsync.
-        let snapshot = self.catalog.lock().await.clone();
+        // Ticket: bump ONCE per caller — represents "there is a
+        // mutation at least as recent as ticket N that needs to
+        // reach disk". Callers get their ticket AFTER their catalog
+        // mutation commits (they call persist_catalog last), so any
+        // ticket ≤ current dirty_epoch is guaranteed observable in
+        // the catalog at the moment we hold `persist_flush_mutex`.
+        let my_ticket = self.persist_dirty_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+
+        // Fast path: an earlier flush already covers our mutation.
+        if self.persist_flushed_epoch.load(Ordering::Acquire) >= my_ticket {
+            self.persist_coalesced_total.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+
+        // Serialise the actual fsync. If N callers pile up here,
+        // exactly one becomes leader and flushes the snapshot; the
+        // rest re-check on entry and return.
+        let _flush_guard = self.persist_flush_mutex.lock().await;
+
+        if self.persist_flushed_epoch.load(Ordering::Acquire) >= my_ticket {
+            self.persist_coalesced_total.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+
+        // Leader path: take the catalog snapshot AFTER acquiring the
+        // flush mutex so any mutation whose ticket landed before us
+        // is guaranteed to be in the snapshot. Read dirty_epoch
+        // WHILE holding the catalog lock — any concurrent mutation
+        // is blocked on catalog.lock, so the number we read matches
+        // the snapshot exactly. Publish that value to
+        // flushed_epoch after the write succeeds; followers waiting
+        // on the mutex see their ticket covered.
+        let (snapshot, flush_epoch) = {
+            let cat = self.catalog.lock().await;
+            let ep = self.persist_dirty_epoch.load(Ordering::Acquire);
+            (cat.clone(), ep)
+        };
+
         if let Err(e) = snapshot.save_atomic(path) {
             self.catalog_persist_failures_total
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(1, Ordering::Relaxed);
             tracing::error!(
                 error = %e,
                 path = %path.display(),
@@ -544,6 +635,9 @@ impl Gateway {
                 path.display()
             )));
         }
+
+        self.persist_flushed_epoch
+            .store(flush_epoch, Ordering::Release);
         Ok(())
     }
 

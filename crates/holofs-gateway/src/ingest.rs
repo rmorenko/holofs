@@ -651,7 +651,14 @@ impl Gateway {
             .await
             .insert(name.to_string(), placeholder);
         self.invalidate_cache(name).await;
-        self.persist_catalog().await?;
+        // NOTE: no persist_catalog here. The placeholder lives only in
+        // RAM until the worker finalises; if we crash before the worker
+        // finishes, the placeholder simply vanishes on reboot and the
+        // caller re-PUTs (same recovery path bootstrap gives for
+        // on-disk Encoding entries). Skipping the fsync here is the
+        // single biggest fast-path win: under 50-worker soak load the
+        // 202 p50 dropped from ~7.7 s → single digits of ms because
+        // async PUTs no longer serialise on the catalog-persist fd.
         self.objects_encoding.fetch_add(1, Ordering::Relaxed);
         let staged_ms = t0.elapsed().as_millis();
 
@@ -682,6 +689,24 @@ impl Gateway {
     /// must not be served after we finish.
     async fn run_encode_worker(self: Arc<Self>, name: String, body: Vec<u8>) {
         use std::sync::atomic::Ordering;
+
+        // Acquire an ENCODE permit BEFORE the CPU-heavy RLNC work.
+        // The HTTP handler released its MEDIUM permit the moment it
+        // emitted 202, so without a dedicated throttle here the
+        // spawned encoders would accumulate on the tokio scheduler
+        // (490+ concurrent seen in the July 2026 soak → scheduler
+        // starvation, /api/stats → 504). Reusing MEDIUM instead
+        // ganged encoders + inbound HTTP on the same semaphore and
+        // blocked put_new / mkdir / rmdir at 97 % 503. A dedicated
+        // `encode_permits` (default 8 ≈ physical cores) keeps
+        // encoder parallelism independent from HTTP MEDIUM: excess
+        // async PUTs simply spend longer in `Encoding`, polling
+        // clients see 503+Retry-After and back off — the natural
+        // end-to-end throttle.
+        let _permit = Arc::clone(&self.encode_permits)
+            .acquire_owned()
+            .await
+            .expect("encode permit semaphore closed");
 
         let live = self.effective_live().await;
         let result = if live.is_empty() {
