@@ -13,6 +13,7 @@
 //! | `PreviewUnsupported` | 404         |
 //! | `IsDirectory`        | 409         |
 //! | `AlreadyExists`      | 409         |
+//! | `EncodingInProgress` | 409 + Retry-After |
 //! | `NotADirectory`      | 409         |
 //! | `DirectoryNotEmpty`  | 409         |
 //! | `ClusterDegraded`    | 503         |
@@ -35,6 +36,15 @@ pub enum GatewayError {
     /// An entry already exists at the target path. `mkdir` returns this for
     /// any non-directory entry; PUT returns it for directory entries.
     AlreadyExists,
+    /// Async ingest is currently running for this name: a previous
+    /// `HOLOFS_ASYNC_ENCODE=1` PUT staged a `state=Encoding`
+    /// placeholder and the background worker has not yet finished.
+    /// HTTP layer surfaces this as `409 Conflict` with a
+    /// `Retry-After` header so the caller polls instead of retrying
+    /// immediately. Distinct from `AlreadyExists` because clients
+    /// treat the two very differently: `AlreadyExists` is terminal,
+    /// `EncodingInProgress` is transient.
+    EncodingInProgress,
     /// `rmdir`/`list_dir` invoked on a path that exists but is not a
     /// `Directory` entry.
     NotADirectory,
@@ -69,6 +79,9 @@ impl std::fmt::Display for GatewayError {
             GatewayError::PreviewUnsupported => write!(f, "preview not supported for this kind"),
             GatewayError::IsDirectory => write!(f, "is a directory"),
             GatewayError::AlreadyExists => write!(f, "already exists"),
+            GatewayError::EncodingInProgress => {
+                write!(f, "async ingest still running for this name")
+            }
             GatewayError::NotADirectory => write!(f, "not a directory"),
             GatewayError::DirectoryNotEmpty => write!(f, "directory not empty"),
             GatewayError::ClusterDegraded => write!(f, "cluster has no live nodes"),

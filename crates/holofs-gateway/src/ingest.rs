@@ -563,8 +563,11 @@ impl Gateway {
                 }
                 if existing.state == ManifestState::Encoding {
                     // Another async PUT is still in flight for this
-                    // name — refuse rather than double-writing.
-                    return Err(GatewayError::AlreadyExists);
+                    // name — refuse rather than double-writing. The
+                    // dedicated `EncodingInProgress` variant lets
+                    // the HTTP layer emit a Retry-After hint so
+                    // the caller polls instead of retrying instantly.
+                    return Err(GatewayError::EncodingInProgress);
                 }
             }
             if let Some(parent) = catalog_path::parent(name) {
