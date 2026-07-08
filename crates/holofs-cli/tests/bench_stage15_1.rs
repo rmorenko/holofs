@@ -28,7 +28,7 @@ use holofs_client::{
 };
 use holofs_core::transform::roi_to_block_ids_with_stride;
 use holofs_core::K;
-use holofs_model::manifest::{Manifest, ObjectEncoding, ObjectKind};
+use holofs_model::manifest::{Manifest, ManifestState, ObjectEncoding, ObjectKind};
 use holofs_model::placement::Placement;
 use holofs_storage::node_service::spawn_node;
 
@@ -101,6 +101,7 @@ fn build_manifest(nodes: Vec<String>) -> Manifest {
         text_minhash: vec![],
         created_at_unix: 0,
         encoding: ObjectEncoding::Rlnc,
+            state: ManifestState::Ready,
     }
 }
 

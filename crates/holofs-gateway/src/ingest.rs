@@ -11,6 +11,7 @@
 //! `merkle_root`, and `shard_hashes` in place.
 //!
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use holofs_client::{put_object, put_object_replicated_blocks, LiveNodes};
@@ -18,12 +19,22 @@ use holofs_codec::image_io::load_photo_from_bytes;
 use holofs_core::hash::hex;
 use holofs_core::transform::coeff_layer;
 use holofs_core::{K, LEVELS, NLAYERS, RED};
-use holofs_model::manifest::{Manifest, ObjectEncoding, ObjectKind};
+use holofs_model::manifest::{Manifest, ManifestState, ObjectEncoding, ObjectKind};
 use holofs_model::path as catalog_path;
 
 use crate::error::GatewayError;
 use crate::util::{guess_opaque_content_type, guess_text_content_type, now_unix};
 use crate::Gateway;
+
+/// Lifecycle marker returned to the HTTP layer. `Ready` = the sync
+/// path finished the encode + fanout; `Encoding` = the async path
+/// staged a pending manifest and left the encode running in the
+/// background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestOutcome {
+    Ready,
+    Encoding,
+}
 
 /// Summary of a successful PUT — fed back to the client as JSON.
 #[derive(Debug, Clone)]
@@ -42,8 +53,13 @@ pub struct IngestResult {
     pub kind: ObjectKind,
     /// Total shards dispatched across the cluster.
     pub total_shards: u32,
-    /// Ingestion wall-clock time in milliseconds.
+    /// Ingestion wall-clock time in milliseconds. For async this is
+    /// the *staging* time only — the background encode is not yet
+    /// waited for.
     pub put_ms: u128,
+    /// Whether the object is ready to serve immediately (`Ready`) or
+    /// the client should poll for readiness (`Encoding`).
+    pub outcome: IngestOutcome,
 }
 
 impl Gateway {
@@ -129,6 +145,7 @@ impl Gateway {
             text_minhash: vec![],
             created_at_unix: 0,
             encoding: ObjectEncoding::Rlnc,
+            state: ManifestState::Ready,
         }
     }
 
@@ -183,6 +200,7 @@ impl Gateway {
             text_minhash: vec![],
             created_at_unix: 0,
             encoding: ObjectEncoding::Rlnc,
+            state: ManifestState::Ready,
         })
     }
 
@@ -216,6 +234,7 @@ impl Gateway {
             text_minhash: vec![],
             created_at_unix: 0,
             encoding: ObjectEncoding::Rlnc,
+            state: ManifestState::Ready,
         }
     }
 
@@ -261,6 +280,7 @@ impl Gateway {
             text_minhash: vec![],
             created_at_unix: 0,
             encoding: ObjectEncoding::Rlnc,
+            state: ManifestState::Ready,
         }
     }
 
@@ -373,6 +393,7 @@ impl Gateway {
             kind,
             total_shards,
             put_ms,
+            outcome: IngestOutcome::Ready,
         })
     }
 
@@ -485,6 +506,220 @@ impl Gateway {
             kind,
             total_shards,
             put_ms,
+            outcome: IngestOutcome::Ready,
         })
+    }
+
+    /// Async ingest — inserts a placeholder manifest with
+    /// `state = Encoding` synchronously, spawns the encode + fanout
+    /// on a detached tokio task, and returns immediately with a
+    /// `Encoding` outcome. Read-side handlers gate on the state so a
+    /// half-written object cannot be GET'd until the worker flips it
+    /// to `Ready`.
+    ///
+    /// The `202 Accepted` return path is meant for burst-heavy soak
+    /// workloads where the pre-async PUT p50 (~46 s under 50 workers
+    /// on the 4-node topology) blew past the client's request
+    /// timeout. Only images/audio/text/opaque under the default RLNC
+    /// encoding go this way — the `?encoding=replicated` fork stays
+    /// sync since ROI encode is bandwidth-heavy, not CPU-heavy.
+    ///
+    /// Failure model:
+    /// - Validation errors (bad name, missing parent, empty body,
+    ///   directory conflict, cluster degraded) return synchronously
+    ///   before spawning anything.
+    /// - Errors during background encode flip the manifest state to
+    ///   `Failed` and bump `encode_failed_total`. Shards that made
+    ///   it out are left for the next `/api/gc` sweep — MVP takes
+    ///   the storage hit rather than reasoning about partial rollback.
+    ///
+    /// Idempotency:
+    /// - Two concurrent PUTs to the same name are serialised on the
+    ///   catalog mutex. Whichever loses the race sees an existing
+    ///   `Encoding` manifest and 409s (the caller can retry once the
+    ///   background job finishes). MVP behaviour; real-world clients
+    ///   almost always send a single PUT then poll.
+    pub async fn ingest_bytes_async(
+        self: &Arc<Self>,
+        name: &str,
+        body: Vec<u8>,
+    ) -> Result<IngestResult, GatewayError> {
+        use std::sync::atomic::Ordering;
+
+        if body.is_empty() {
+            return Err(GatewayError::BadRequest("empty body".into()));
+        }
+        catalog_path::validate(name)
+            .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
+
+        // Same synchronous checks as `ingest_bytes` — reject before we
+        // stage anything so the caller sees a clean 4xx rather than an
+        // orphaned `Failed` manifest cluttering the catalog.
+        {
+            let cat = self.catalog.lock().await;
+            if let Some(existing) = cat.get(name) {
+                if existing.kind == ObjectKind::Directory {
+                    return Err(GatewayError::AlreadyExists);
+                }
+                if existing.state == ManifestState::Encoding {
+                    // Another async PUT is still in flight for this
+                    // name — refuse rather than double-writing.
+                    return Err(GatewayError::AlreadyExists);
+                }
+            }
+            if let Some(parent) = catalog_path::parent(name) {
+                match cat.get(parent) {
+                    Some(m) if m.kind == ObjectKind::Directory => {}
+                    Some(_) => return Err(GatewayError::NotADirectory),
+                    None => {
+                        return Err(GatewayError::BadRequest(format!(
+                            "parent directory does not exist: {parent}"
+                        )))
+                    }
+                }
+            }
+        }
+
+        let live = self.effective_live().await;
+        if live.is_empty() {
+            return Err(GatewayError::ClusterDegraded);
+        }
+
+        // Compute the object-id up front so the pending manifest
+        // has a stable identity clients can echo in polling requests.
+        // The full data_cid is filled in by the encoding worker.
+        use holofs_core::hash::Sha256;
+        let mut hasher = Sha256::new();
+        hasher.update(b"holofs-async-preview");
+        hasher.update(name.as_bytes());
+        hasher.update(&body);
+        let preview = hasher.finalize();
+        let object_id = u64::from_be_bytes(preview[0..8].try_into().unwrap());
+
+        // Placeholder manifest — shape agnostic to detected kind.
+        // The worker will replace it with the properly-encoded one
+        // once auto-detect + encode + fanout finish.
+        let placeholder = Manifest {
+            object_id,
+            k: K as u16,
+            nlayers: 1,
+            n_per_layer: vec![0],
+            sym_len: vec![0],
+            layer_positions: vec![vec![]],
+            channels: 1,
+            width: 0,
+            height: 0,
+            levels: 0,
+            nodes: self.cluster.node_addrs.clone(),
+            placement: self.cluster.placement,
+            zones: self.cluster.zones.clone(),
+            data_cid: preview,
+            merkle_root: [0; 32],
+            shard_hashes: vec![vec![Vec::new(); 1]; 1],
+            kind: ObjectKind::Opaque, // may be revised by worker
+            content_type: "application/octet-stream".into(),
+            chunk_lens: vec![],
+            audio_sample_rate: 0,
+            text_minhash: vec![],
+            created_at_unix: now_unix(),
+            encoding: ObjectEncoding::Rlnc,
+            state: ManifestState::Encoding,
+        };
+
+        let t0 = Instant::now();
+        // Handle prior object: archive-if-versions, else purge orphaned
+        // shards. Do it before we insert the placeholder so orphan sweep
+        // can't see two entries under the same name.
+        let prev = self.catalog.lock().await.get(name).cloned();
+        if let Some(old) = &prev {
+            if self.versions_enabled().await {
+                if let Err(e) = self.archive_version(name, old).await {
+                    eprintln!("PUT-async {name}: version archive failed: {e}");
+                }
+            } else if let Err(e) = self.purge_orphans_of(old, &live, Some(name)).await {
+                eprintln!(
+                    "PUT-async {name}: previous object failed to purge (continuing): {e}"
+                );
+            }
+        }
+
+        self.catalog
+            .lock()
+            .await
+            .insert(name.to_string(), placeholder);
+        self.invalidate_cache(name).await;
+        self.persist_catalog().await?;
+        self.objects_encoding.fetch_add(1, Ordering::Relaxed);
+        let staged_ms = t0.elapsed().as_millis();
+
+        let gw = Arc::clone(self);
+        let name_owned = name.to_string();
+        tokio::spawn(async move {
+            gw.run_encode_worker(name_owned, body).await;
+        });
+
+        Ok(IngestResult {
+            name: name.to_string(),
+            object_id,
+            data_cid_hex: hex(&preview),
+            width: 0,
+            height: 0,
+            kind: ObjectKind::Opaque,
+            total_shards: 0,
+            put_ms: staged_ms,
+            outcome: IngestOutcome::Encoding,
+        })
+    }
+
+    /// Background worker for [`Self::ingest_bytes_async`]. Runs the
+    /// real encode + fanout, then flips the manifest to `Ready` (on
+    /// success) or `Failed` (on error) and persists the catalog.
+    /// Cache invalidation is unconditional — the placeholder that
+    /// went in during staging is a decode-failing tombstone that
+    /// must not be served after we finish.
+    async fn run_encode_worker(self: Arc<Self>, name: String, body: Vec<u8>) {
+        use std::sync::atomic::Ordering;
+
+        let live = self.effective_live().await;
+        let result = if live.is_empty() {
+            Err("cluster has no live nodes at worker time".to_string())
+        } else {
+            self.put_any(&name, &body, &live)
+                .await
+                .map(|(m, _, total)| (m, total))
+        };
+
+        let mut cat = self.catalog.lock().await;
+        match result {
+            Ok((mut real, _total)) => {
+                real.created_at_unix = now_unix();
+                real.state = ManifestState::Ready;
+                cat.insert(name.clone(), real);
+                drop(cat);
+                self.invalidate_cache(&name).await;
+                if let Err(e) = self.persist_catalog().await {
+                    eprintln!(
+                        "PUT-async {name}: encode ok but catalog persist failed: {e:?}"
+                    );
+                    self.encode_failed_total.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.encode_completed_total.fetch_add(1, Ordering::Relaxed);
+                    self.embed_object_in_background(name.clone());
+                }
+            }
+            Err(err) => {
+                eprintln!("PUT-async {name}: encode failed: {err}");
+                if let Some(m) = cat.entries.get_mut(&name) {
+                    if m.state == ManifestState::Encoding {
+                        m.state = ManifestState::Failed;
+                    }
+                }
+                drop(cat);
+                self.invalidate_cache(&name).await;
+                let _ = self.persist_catalog().await;
+                self.encode_failed_total.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.objects_encoding.fetch_sub(1, Ordering::Relaxed);
     }
 }

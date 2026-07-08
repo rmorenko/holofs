@@ -26,9 +26,22 @@ use std::convert::Infallible;
 
 use super::response::{ingest_to_response, remove_to_response, serve_with_range};
 use super::util::{
-    bad_request, error_to_response, is_reserved_name, is_valid_put_name, not_found,
-    render_shard_as_png,
+    bad_request, encoding_failed, encoding_in_progress, error_to_response, is_reserved_name,
+    is_valid_put_name, not_found, render_shard_as_png,
 };
+
+use holofs_model::manifest::ManifestState;
+
+/// Peek at a catalog entry's async-ingest state without cloning the
+/// whole manifest. Returns `Ready` when the entry is missing (the
+/// read handler's usual 404 path takes over from there) so the
+/// caller can treat "no gate" the same as `Ready`.
+async fn manifest_state(gw: &Gateway, name: &str) -> ManifestState {
+    let cat = gw.catalog().lock().await;
+    cat.get(name)
+        .map(|m| m.state)
+        .unwrap_or(ManifestState::Ready)
+}
 
 /// hard cap on the streaming PUT body size, in bytes. Enforced
 /// per-request by [`put_object`] while the body streams to a
@@ -78,6 +91,11 @@ pub async fn get_object(
     if is_reserved_name(&name) {
         return not_found();
     }
+    match manifest_state(&gw, &name).await {
+        ManifestState::Encoding => return encoding_in_progress(&name),
+        ManifestState::Failed => return encoding_failed(&name),
+        ManifestState::Ready => {}
+    }
     match gw.decode_object(&name, None).await {
         Ok(obj) => serve_with_range(&name, obj, &headers),
         Err(e) => error_to_response(e),
@@ -93,6 +111,11 @@ pub async fn get_preview(
 ) -> Response {
     if is_reserved_name(&name) {
         return not_found();
+    }
+    match manifest_state(&gw, &name).await {
+        ManifestState::Encoding => return encoding_in_progress(&name),
+        ManifestState::Failed => return encoding_failed(&name),
+        ManifestState::Ready => {}
     }
     match gw.decode_object(&name, Some(0)).await {
         Ok(obj) => serve_with_range(&name, obj, &headers),
@@ -316,9 +339,22 @@ pub async fn put_object(
 
     // Fork on the optional `?encoding=…` query param. Default =
     // RLNC via ingest_bytes; replicated goes through
-    // ingest_bytes_replicated.
+    // ingest_bytes_replicated. When `HOLOFS_ASYNC_ENCODE=1` and the
+    // caller sticks to the default RLNC path, we route through the
+    // async ingest — the handler returns 202 as soon as the
+    // placeholder manifest is committed and the encode runs on a
+    // detached tokio task.
+    let async_mode = std::env::var("HOLOFS_ASYNC_ENCODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let ingest_result = match q.encoding.as_deref() {
-        None | Some("rlnc") => gw.ingest_bytes(&name, &body_bytes).await,
+        None | Some("rlnc") => {
+            if async_mode {
+                gw.ingest_bytes_async(&name, body_bytes).await
+            } else {
+                gw.ingest_bytes(&name, &body_bytes).await
+            }
+        }
         Some("replicated") => {
             let block_size = q.block_size.unwrap_or(64);
             let replication = q.r.unwrap_or(3);
@@ -337,7 +373,15 @@ pub async fn put_object(
     };
     match ingest_result {
         Ok(res) => {
-            gw.embed_object_in_background(name.clone());
+            // Sync + replicated paths kick off embed here; async
+            // path defers it until the background encode finishes
+            // (`run_encode_worker` calls `embed_object_in_background`
+            // on success). Keeping the two paths symmetric here is
+            // wrong — a still-encoding object has no L0 shards for
+            // the embed task to fetch.
+            if !matches!(res.outcome, holofs_gateway::IngestOutcome::Encoding) {
+                gw.embed_object_in_background(name.clone());
+            }
             ingest_to_response(res)
         }
         Err(e) => error_to_response(e),
@@ -396,6 +440,20 @@ pub async fn delete_object(
 ) -> Response {
     if is_reserved_name(&name) {
         return not_found();
+    }
+    // Async-ingest gate: refuse to delete while an encode is in
+    // flight — otherwise the background worker races against the
+    // purge and can leave orphan shards on the nodes. Once the
+    // encode finishes (or fails), the caller can DELETE normally.
+    match manifest_state(&gw, &name).await {
+        ManifestState::Encoding => {
+            return (
+                StatusCode::CONFLICT,
+                format!("{name}: object is still encoding; retry after it finishes\n"),
+            )
+                .into_response();
+        }
+        ManifestState::Failed | ManifestState::Ready => {}
     }
     match gw.remove_object(&name).await {
         Ok(res) => remove_to_response(res),

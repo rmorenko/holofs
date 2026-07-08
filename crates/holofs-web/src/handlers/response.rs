@@ -152,13 +152,18 @@ pub(crate) fn decoded_to_response(name: &str, obj: DecodedObject) -> Response {
 }
 
 pub(crate) fn ingest_to_response(res: IngestResult) -> Response {
+    let state = match res.outcome {
+        holofs_gateway::IngestOutcome::Ready => "ready",
+        holofs_gateway::IngestOutcome::Encoding => "encoding",
+    };
     let body = format!(
         "{{\"name\":\"{name}\",\
 \"object_id\":\"{oid:016x}\",\
 \"data_cid\":\"{cid}\",\
 \"width\":{w},\"height\":{h},\
 \"shards\":{shards},\
-\"put_ms\":{ms}}}\n",
+\"put_ms\":{ms},\
+\"state\":\"{state}\"}}\n",
         name = json_escape(&res.name),
         oid = res.object_id,
         cid = res.data_cid_hex,
@@ -167,9 +172,17 @@ pub(crate) fn ingest_to_response(res: IngestResult) -> Response {
         shards = res.total_shards,
         ms = res.put_ms,
     );
+    let status = match res.outcome {
+        holofs_gateway::IngestOutcome::Ready => StatusCode::CREATED,
+        holofs_gateway::IngestOutcome::Encoding => StatusCode::ACCEPTED,
+    };
+    let location = format!("/{}", res.name);
     (
-        StatusCode::CREATED,
-        [(header::CONTENT_TYPE, "application/json")],
+        status,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::LOCATION, location.as_str()),
+        ],
         body,
     )
         .into_response()

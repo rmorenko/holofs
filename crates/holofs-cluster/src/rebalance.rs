@@ -64,7 +64,7 @@ pub async fn add_node(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use holofs_model::manifest::Manifest;
+    use holofs_model::manifest::{Manifest, ManifestState};
     use holofs_model::placement::Placement;
 
     fn empty_manifest(nodes: Vec<String>) -> Manifest {
@@ -93,7 +93,8 @@ mod tests {
             text_minhash: vec![],
             created_at_unix: 0,
             encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
-        }
+        state: holofs_model::manifest::ManifestState::Ready,
+    }
     }
 
     #[test]

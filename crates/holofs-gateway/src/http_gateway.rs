@@ -43,6 +43,9 @@ pub struct ObservabilityCounters<'gw> {
     pub admin_auth_bad_total: &'gw Arc<std::sync::atomic::AtomicU64>,
     pub admin_auth_disabled_total: &'gw Arc<std::sync::atomic::AtomicU64>,
     pub rate_limit_rejected_total: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub objects_encoding: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub encode_completed_total: &'gw Arc<std::sync::atomic::AtomicU64>,
+    pub encode_failed_total: &'gw Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// N3: default MEDIUM-bucket concurrency (decodes, PUT, dir ops).
@@ -210,6 +213,14 @@ pub struct Gateway {
     /// (`HOLOFS_RATE_LIMIT_RPS_PER_IP=0`). Emitted in `/metrics`
     /// as `holofs_rate_limit_rejected_total`.
     pub(crate) rate_limit_rejected_total: Arc<std::sync::atomic::AtomicU64>,
+    /// Async-ingest lifecycle counters. Zero for the sync path
+    /// (default). `objects_encoding` is a gauge — currently-active
+    /// background encode tasks. `encode_completed_total` /
+    /// `encode_failed_total` are cumulative counts of finished
+    /// tasks by outcome. Emitted in `/metrics`.
+    pub(crate) objects_encoding: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) encode_completed_total: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) encode_failed_total: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// PNG cache entry: fully-encoded body + the layer it was decoded at
@@ -264,6 +275,9 @@ impl Gateway {
             admin_auth_bad_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             admin_auth_disabled_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             rate_limit_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            objects_encoding: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            encode_completed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            encode_failed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -309,6 +323,9 @@ impl Gateway {
             admin_auth_bad_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             admin_auth_disabled_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             rate_limit_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            objects_encoding: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            encode_completed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            encode_failed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -344,6 +361,9 @@ impl Gateway {
             admin_auth_bad_total: &self.admin_auth_bad_total,
             admin_auth_disabled_total: &self.admin_auth_disabled_total,
             rate_limit_rejected_total: &self.rate_limit_rejected_total,
+            objects_encoding: &self.objects_encoding,
+            encode_completed_total: &self.encode_completed_total,
+            encode_failed_total: &self.encode_failed_total,
         }
     }
 

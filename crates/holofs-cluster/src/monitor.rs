@@ -323,6 +323,7 @@ fn probe_manifest(nodes: Vec<String>) -> Manifest {
         text_minhash: vec![],
         created_at_unix: 0,
         encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
+        state: holofs_model::manifest::ManifestState::Ready,
     }
 }
 
@@ -378,7 +379,7 @@ mod tests {
     // no graceful shutdown needed for a unit test, the test binary
     // exit reclaims everything.
 
-    use holofs_model::manifest::{Manifest, ObjectEncoding, ObjectKind};
+    use holofs_model::manifest::{Manifest, ManifestState, ObjectEncoding, ObjectKind};
     use holofs_model::placement::Placement;
     use holofs_testutils::{spawn_mock_node as spawn_responder, DisablePool};
     use holofs_wire::Response;
@@ -413,6 +414,7 @@ mod tests {
             text_minhash: vec![],
             created_at_unix: 0,
             encoding: ObjectEncoding::Rlnc,
+            state: ManifestState::Ready,
         }
     }
 

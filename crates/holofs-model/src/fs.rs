@@ -246,6 +246,7 @@ mod tests {
             text_minhash: vec![],
             created_at_unix: 1_700_000_000 + seed as u64,
             encoding: crate::manifest::ObjectEncoding::Rlnc,
+            state: crate::manifest::ManifestState::Ready,
         }
     }
 

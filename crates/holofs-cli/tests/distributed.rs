@@ -104,7 +104,8 @@ fn build_manifest(nodes: Vec<String>) -> Manifest {
         text_minhash: vec![],
         created_at_unix: 0,
         encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
-    }
+            state: holofs_model::manifest::ManifestState::Ready,
+        }
 }
 
 fn synth_channels() -> Vec<Vec<f32>> {
@@ -334,7 +335,8 @@ async fn smoke_512x512_shard_budget_and_roundtrip() {
         text_minhash: vec![],
         created_at_unix: 0,
         encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
-    };
+            state: holofs_model::manifest::ManifestState::Ready,
+        };
     // Synthetic 512×512 RGB with high-frequency noise on top of
     // the smooth base — smooth-only images push most detail-band
     // coefficients to zero, then per-channel identical-zero blocks

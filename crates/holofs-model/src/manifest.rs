@@ -39,6 +39,60 @@ pub enum ObjectKind {
     Directory,
 }
 
+/// Lifecycle state for asynchronous ingest. The sync path always
+/// produces `Ready` (encode + fanout finish before the handler
+/// returns). The async path (opt-in via `HOLOFS_ASYNC_ENCODE=1`)
+/// inserts a `Encoding` manifest into the catalog synchronously,
+/// returns `202 Accepted` to the client, and flips the state to
+/// `Ready` (or `Failed`) once the background worker finishes.
+///
+/// Read-side handlers gate on this: GET/HEAD on `Encoding` returns
+/// `503 Retry-After`, on `Failed` returns `404 Not Found` (with a
+/// `X-Encode-Failed` header for diagnostics).
+///
+/// Legacy manifests (magic `HOLOFSM9` and earlier) decode as
+/// `Ready` — the enum was introduced in `HOLOFSMA`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ManifestState {
+    /// Sync-produced object, or async object that finished encoding
+    /// + shard-fanout successfully. Every reader path uses this.
+    #[default]
+    Ready,
+    /// Async in-flight: the catalog entry exists but shard hashes /
+    /// merkle root are placeholders and the shards have not yet
+    /// been dispatched to the cluster. Only `PUT` (idempotent
+    /// conflict) touches these.
+    Encoding,
+    /// Async encoding attempt failed (RLNC / wire / decode error).
+    /// The catalog keeps the entry as a tombstone so a subsequent
+    /// `PUT` can replace it; reads treat it as absent.
+    Failed,
+}
+
+impl ManifestState {
+    /// Discriminant byte used on the wire-format.
+    #[must_use]
+    pub fn tag(&self) -> u8 {
+        match self {
+            ManifestState::Ready => 0,
+            ManifestState::Encoding => 1,
+            ManifestState::Failed => 2,
+        }
+    }
+
+    /// Reverse of [`Self::tag`]. Unknown discriminants become
+    /// `Ready` — safer than failing to decode, and future writers
+    /// that add new states can update readers to interpret them.
+    #[must_use]
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => ManifestState::Encoding,
+            2 => ManifestState::Failed,
+            _ => ManifestState::Ready,
+        }
+    }
+}
+
 /// /.1: how an object's per-(channel, layer) shards are
 /// laid out.
 ///
@@ -145,6 +199,13 @@ pub struct Manifest {
     /// adds an explicit byte plus per-variant payload (currently just
     /// `replication: u8`).
     pub encoding: ObjectEncoding,
+
+    /// Async-ingest lifecycle. Sync-produced manifests are always
+    /// [`ManifestState::Ready`]; the async path uses `Encoding` /
+    /// `Failed` as transient markers. Legacy manifests (`HOLOFSM9`
+    /// and earlier) decode as `Ready` — this field only appears on
+    /// `HOLOFSMA` on the wire.
+    pub state: ManifestState,
 }
 
 impl Manifest {
@@ -182,6 +243,7 @@ impl Manifest {
             text_minhash: Vec::new(),
             created_at_unix,
             encoding: ObjectEncoding::Rlnc,
+            state: ManifestState::Ready,
         }
     }
 
@@ -244,7 +306,11 @@ impl Manifest {
 /// the variant, plus variant-specific payload). Pure-append schema
 /// extension: readers see the new bytes, legacy readers decode
 /// through and default `encoding` to `Rlnc`.
-const MAGIC: &[u8; 8] = b"HOLOFSM9";
+const MAGIC: &[u8; 8] = b"HOLOFSMA";
+/// Previous MAGIC — has every field of `HOLOFSMA` *except* the
+/// trailing `state` byte introduced by the async-ingest work.
+/// Records under this magic decode with `state = Ready`.
+const MAGIC_LEGACY_V9: &[u8; 8] = b"HOLOFSM9";
 /// magic — accepted on read; lacks the trailing
 /// `encoding` byte (defaults to `Rlnc`).
 const MAGIC_LEGACY_V8: &[u8; 8] = b"HOLOFSM8";
@@ -349,6 +415,9 @@ impl Manifest {
                 b.extend_from_slice(&block_size.to_be_bytes());
             }
         }
+        // Async-ingest lifecycle byte. Present only under HOLOFSMA;
+        // pre-async catalogs decode with `state = Ready`.
+        b.push(self.state.tag());
         b
     }
 
@@ -358,15 +427,19 @@ impl Manifest {
         let mut magic = [0u8; 8];
         magic.copy_from_slice(magic_bytes);
         let is_current = magic == *MAGIC;
+        let is_legacy_v9 = magic == *MAGIC_LEGACY_V9;
         let is_legacy_v8 = magic == *MAGIC_LEGACY_V8;
         let is_legacy_v7 = magic == *MAGIC_LEGACY_V7;
         let is_legacy_v6 = magic == *MAGIC_LEGACY;
-        if !is_current && !is_legacy_v8 && !is_legacy_v7 && !is_legacy_v6 {
+        if !is_current && !is_legacy_v9 && !is_legacy_v8 && !is_legacy_v7 && !is_legacy_v6 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "not a holofs manifest",
             ));
         }
+        // `HOLOFSM9` and `HOLOFSMA` share the encoding tail; both
+        // predecessors of the async work.
+        let has_encoding_tail = is_current || is_legacy_v9;
         let object_id = c.u64()?;
         let k = c.u16()?;
         let nlayers = c.u8()?;
@@ -474,7 +547,7 @@ impl Manifest {
         // Replicated tail grew a `block_size: u32` in         // without a magic bump — the invariant carried over from
         // 15.0 that no `Replicated` manifest was ever persisted
         // means there's no backwards-compat load-path to preserve.
-        let encoding = if is_current {
+        let encoding = if has_encoding_tail {
             match c.u8()? {
                 0 => ObjectEncoding::Rlnc,
                 1 => {
@@ -494,6 +567,14 @@ impl Manifest {
             }
         } else {
             ObjectEncoding::Rlnc
+        };
+        // Async-ingest state byte only under HOLOFSMA. Everything
+        // older is by definition `Ready` because those magics
+        // predate the async path.
+        let state = if is_current {
+            ManifestState::from_tag(c.u8()?)
+        } else {
+            ManifestState::Ready
         };
 
         Ok(Manifest {
@@ -520,6 +601,7 @@ impl Manifest {
             text_minhash,
             created_at_unix,
             encoding,
+            state,
         })
     }
 }
@@ -615,6 +697,7 @@ mod tests {
             text_minhash: vec![],
             created_at_unix: 1_700_000_000,
             encoding: ObjectEncoding::Rlnc,
+            state: ManifestState::Ready,
         };
         let bytes = m.encode();
         let back = Manifest::decode(&bytes).unwrap();
@@ -673,6 +756,7 @@ mod tests {
             created_at_unix: 0,
             // Same story for encoding selector.
             encoding: ObjectEncoding::Rlnc,
+            state: ManifestState::Ready,
         };
         let mut bytes = m.encode();
         // Pretend this is a HOLOFSM6 record: rewrite the magic AND chop

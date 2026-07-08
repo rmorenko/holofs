@@ -373,6 +373,7 @@ mod tests {
             text_minhash: vec![],
             created_at_unix: 0,
             encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
+            state: holofs_model::manifest::ManifestState::Ready,
         }
     }
 

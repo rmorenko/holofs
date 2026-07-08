@@ -245,6 +245,28 @@ pub async fn bootstrap_cluster(
         .clone()
         .unwrap_or_else(|| config.storage.join("catalog.bin"));
     let mut directory = Directory::load_or_empty(&catalog_path)?;
+    // Async-ingest recovery: any manifest still marked `Encoding` at
+    // boot time is from an in-flight PUT that lost its worker to a
+    // process restart. Downgrade to `Failed` so reads treat it as
+    // absent and a subsequent PUT can replace it. Persist so the
+    // next unclean shutdown doesn't chain-corrupt the same entries.
+    {
+        use holofs_model::manifest::ManifestState;
+        let mut promoted = 0usize;
+        for (_, m) in directory.entries.iter_mut() {
+            if m.state == ManifestState::Encoding {
+                m.state = ManifestState::Failed;
+                promoted += 1;
+            }
+        }
+        if promoted > 0 {
+            info!(
+                count = promoted,
+                "async-ingest recovery: marked orphaned Encoding manifests as Failed"
+            );
+            directory.save_atomic(&catalog_path)?;
+        }
+    }
     // migration: legacy catalogs stored objects under nested keys
     // (`docs/note.txt`) but never wrote explicit `Directory` markers. The
     // new tree-shaped UI requires markers for every prefix, so fill in
@@ -641,7 +663,8 @@ async fn put_named(
             .map(|d| d.as_secs())
             .unwrap_or(0),
         encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
-    };
+            state: holofs_model::manifest::ManifestState::Ready,
+        };
     put_object(gf, &mut m, &live.to_vec(), channels)
         .await
         .expect("PUT failed during seed");

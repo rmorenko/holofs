@@ -1919,6 +1919,7 @@ mod rpc_tests {
             text_minhash: vec![],
             created_at_unix: 0,
             encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
+            state: holofs_model::manifest::ManifestState::Ready,
         };
         // Tag for ignored warnings on read-only fields.
         m.object_id = 1;
@@ -1960,6 +1961,7 @@ mod rpc_tests {
             text_minhash: vec![],
             created_at_unix: 0,
             encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
+            state: holofs_model::manifest::ManifestState::Ready,
         };
         let live = discover_live(&m).await;
         assert!(live.is_empty());

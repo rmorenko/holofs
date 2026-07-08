@@ -380,6 +380,7 @@ LONG 300 s); streaming endpoints (SSE, multipart/x-mixed-replace) +
 |-----------------------------|---------|----------------------------------------------------------|
 | `HOLOFS_ENABLE_VERSIONS`    | `false` | Mirror of `--enable-versions`. Archives every PUT-replace as a side file under `<storage>/versions/<sanitized>/v…bin`. |
 | `HOLOFS_ENABLE_EMBED`       | `false` | Mirror of `--enable-embed`. Loads the CLIP-multilingual model on first PUT or first `/api/search`, then maintains `embeddings.bin`. |
+| `HOLOFS_ASYNC_ENCODE`       | `false` | Flip the default RLNC PUT path from sync to async. Handler returns `202 Accepted` after the placeholder manifest is committed; encode + shard fan-out run on a detached tokio task. Read-side handlers gate on `ManifestState` — see §10.7 for the measured throughput impact and when it's appropriate. |
 | `HOLOFS_MCP_TOKEN`          | —       | When set, the `/mcp` endpoint requires `Authorization: Bearer <token>` AND flips write tools on. Without the variable the endpoint stays open + read-only. |
 
 ### 5.8. TOML configuration file
@@ -943,6 +944,39 @@ build) gives:
 | write-light                 | 50      | `put_new=3,put_replace=2`  | 30 s    | 23.4  | 7.5 % |
 | **realistic sweet spot**    | **50**  | **`put_new=3,put_replace=1`** | **60 s** | **8.4** | **4.0 %** |
 | longer client patience      | 50      | `put_new=3,put_replace=1`  | 120 s   | 10.9  | 10.7 % |
+
+**Async ingest (`HOLOFS_ASYNC_ENCODE=1`).** Optional server-side flag
+that flips the default RLNC PUT path from sync (`201 Created` after
+encode + fanout finish) to async: the placeholder manifest is
+committed synchronously in `ManifestState::Encoding`, the encode +
+shard fan-out run on a detached tokio task, and the handler
+returns `202 Accepted` with a `Location: /path` header + JSON
+`{state:"encoding", …}`. Read handlers gate on the state — GET/HEAD
+on `Encoding` returns `503 Retry-After: 5`, on `Failed` returns
+`404`. DELETE on `Encoding` returns `409 Conflict`. Startup
+recovery downgrades any surviving `Encoding` manifest to `Failed`
+so an unclean shutdown doesn't leave tombstones behind.
+
+Measured on the 4-node multi-process soak topology, same profile
+(`--workers 50 --op-mix "put_new=3,put_replace=1" --thinktime 500ms`):
+
+| Path              | PUT p50    | Total RPS | Notes |
+|-------------------|-----------:|----------:|-------|
+| Sync (baseline)   | 49 969 ms  | 8.4       | Client waits full encode. |
+| Sync + fan-out    | 34 822 ms  | 5.3       | Parallel wire; encode still on the hot path. |
+| **Async 202**     | **113 ms** | **24.1**  | Encode fully off the hot path. |
+
+The soak runner in its current form does not understand `202` +
+`Retry-After` polling — it treats an `Encoding` GET as a plain 503 —
+so the async run above reports an inflated ~45 % error rate. A
+polling-aware client (or a future runner change) collapses those
+back into normal 200s.
+
+**When to use `HOLOFS_ASYNC_ENCODE=1`:** burst-heavy pipelines where
+the caller can tolerate a "please poll me back" flow — bulk uploads,
+sync/replication jobs, batch ingest. Sync remains the default for
+interactive PUTs where the client wants a straight `201` and a
+final data_cid.
 
 Two counter-intuitive findings the study surfaced:
 

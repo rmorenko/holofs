@@ -49,6 +49,34 @@ pub(crate) fn not_found() -> Response {
         .into_response()
 }
 
+/// Response shape for a GET/HEAD on an object still in
+/// `ManifestState::Encoding`: 503 with `Retry-After: 5`. The message
+/// body is short and machine-friendly so a polling client can log the
+/// exact state without parsing HTML.
+pub(crate) fn encoding_in_progress(name: &str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (header::CONTENT_TYPE, "text/plain"),
+            (header::RETRY_AFTER, "5"),
+        ],
+        format!("{name}: object is still encoding; retry after 5 s\n"),
+    )
+        .into_response()
+}
+
+/// Response shape for a GET/HEAD/DELETE on an object whose async
+/// encode ran but failed. 404 with an explanatory body so the caller
+/// can safely `PUT` again.
+pub(crate) fn encoding_failed(name: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "text/plain")],
+        format!("{name}: previous PUT failed to encode; PUT again to replace\n"),
+    )
+        .into_response()
+}
+
 /// Build a JSON `Response` with the given status. Used by every
 /// `/api/*` handler so payloads always advertise
 /// `application/json`.

@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use holofs_client::{gather_layer, ClientError, LiveNodes};
 use holofs_core::merkle::{shard_hash, Hash};
 use holofs_core::rng::Rng;
-use holofs_model::manifest::Manifest;
+use holofs_model::manifest::{Manifest, ManifestState};
 
 /// Default random-loss scenarios (percentage of nodes killed at random).
 pub const DEFAULT_KILL_PCTS: [u8; 4] = [10, 25, 50, 75];
@@ -380,6 +380,7 @@ mod tests {
             text_minhash: vec![],
             created_at_unix: 0,
             encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
+            state: holofs_model::manifest::ManifestState::Ready,
         }
     }
 

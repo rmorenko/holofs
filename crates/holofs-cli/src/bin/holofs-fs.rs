@@ -16,7 +16,7 @@ use holofs_core::hash::hex;
 use holofs_core::transform::coeff_layer;
 use holofs_core::{dims_from_env, K, LEVELS, NLAYERS, N_NODES, RED};
 use holofs_model::fs::Directory;
-use holofs_model::manifest::Manifest;
+use holofs_model::manifest::{Manifest, ManifestState};
 use holofs_model::placement::Placement;
 use holofs_storage::node_service::{spawn_node, SharedStore};
 
@@ -222,7 +222,8 @@ fn blank_manifest(node_addrs: &[String], w: usize, h: usize) -> Manifest {
         text_minhash: vec![],
         created_at_unix: 0,
         encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
-    }
+            state: ManifestState::Ready,
+        }
 }
 
 fn psnr(orig: &[Vec<f32>], recon: &[Vec<f32>]) -> f64 {

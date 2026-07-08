@@ -187,6 +187,27 @@ pub async fn metrics(Extension(gw): Extension<Arc<Gateway>>) -> Response {
         obs.task_restarts_scrub.load(Ordering::Relaxed)
     ));
 
+    body.push_str("# HELP holofs_objects_encoding Currently-encoding objects (async ingest, in-flight background workers).\n");
+    body.push_str("# TYPE holofs_objects_encoding gauge\n");
+    body.push_str(&format!(
+        "holofs_objects_encoding {}\n",
+        obs.objects_encoding.load(Ordering::Relaxed)
+    ));
+
+    body.push_str("# HELP holofs_encode_completed_total Async-ingest background encodes that finished successfully.\n");
+    body.push_str("# TYPE holofs_encode_completed_total counter\n");
+    body.push_str(&format!(
+        "holofs_encode_completed_total {}\n",
+        obs.encode_completed_total.load(Ordering::Relaxed)
+    ));
+
+    body.push_str("# HELP holofs_encode_failed_total Async-ingest background encodes that failed (encode error, cluster degraded, catalog persist error). Manifest gets state=Failed.\n");
+    body.push_str("# TYPE holofs_encode_failed_total counter\n");
+    body.push_str(&format!(
+        "holofs_encode_failed_total {}\n",
+        obs.encode_failed_total.load(Ordering::Relaxed)
+    ));
+
     body.push_str("# HELP holofs_rate_limit_rejected_total v0.7 per-IP rate limit rejections (429 responses).\n");
     body.push_str("# TYPE holofs_rate_limit_rejected_total counter\n");
     body.push_str(&format!(

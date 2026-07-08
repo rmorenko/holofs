@@ -15,7 +15,7 @@ use holofs_core::rlnc::Shard;
 use holofs_core::rng::Rng;
 use holofs_core::transform::coeff_layer;
 use holofs_core::{dims_from_env, K, LEVELS, NLAYERS, N_NODES, RED};
-use holofs_model::manifest::Manifest;
+use holofs_model::manifest::{Manifest, ManifestState};
 use holofs_model::placement::Placement;
 use holofs_storage::node_service::{spawn_node, SharedStore};
 
@@ -83,7 +83,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         text_minhash: vec![],
         created_at_unix: 0,
         encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
-    };
+            state: ManifestState::Ready,
+        };
 
     // === Prepare an image: argv → assets/sample.png → synthetic ===========
     let channels = match std::env::args().nth(1) {
