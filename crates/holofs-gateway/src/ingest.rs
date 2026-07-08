@@ -709,6 +709,12 @@ impl Gateway {
             }
             Err(err) => {
                 eprintln!("PUT-async {name}: encode failed: {err}");
+                // Snapshot the placeholder's object_id + nodes list
+                // BEFORE we drop the catalog guard — best-effort
+                // Purge below needs both, and the state flip has to
+                // happen atomically with catalog read to avoid a
+                // concurrent PUT of the same name racing us.
+                let placeholder = cat.entries.get(&name).cloned();
                 if let Some(m) = cat.entries.get_mut(&name) {
                     if m.state == ManifestState::Encoding {
                         m.state = ManifestState::Failed;
@@ -718,6 +724,24 @@ impl Gateway {
                 self.invalidate_cache(&name).await;
                 let _ = self.persist_catalog().await;
                 self.encode_failed_total.fetch_add(1, Ordering::Relaxed);
+
+                // Best-effort shard cleanup: fire `Purge { object_id }`
+                // at every live node. Every shard the failed encode
+                // dispatched keys off the same `object_id`, so the
+                // node-side handler will drop them all. Runs sequentially
+                // and swallows every error — this is a cleanup pass, a
+                // failure here just means /api/gc will pick the residue
+                // up later.
+                if let Some(m) = placeholder {
+                    let live = self.effective_live().await;
+                    if !live.is_empty() {
+                        if let Err(e) = holofs_client::purge_object(&m, &live).await {
+                            eprintln!(
+                                "PUT-async {name}: best-effort purge failed (will settle at /api/gc): {e:?}"
+                            );
+                        }
+                    }
+                }
             }
         }
         self.objects_encoding.fetch_sub(1, Ordering::Relaxed);
