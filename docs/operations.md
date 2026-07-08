@@ -932,6 +932,31 @@ Effective weights and throttle settings are also written into
 `config.json` so post-run analysis knows exactly what mix produced
 the numbers.
 
+**Baseline profiles measured on this machine.** A 3-minute soak on
+`--topology multi-process --nodes 4` (macbook M-series, release
+build) gives:
+
+| Profile                     | Workers | Op-mix                     | Timeout | RPS   | Err % |
+|-----------------------------|--------:|----------------------------|--------:|------:|------:|
+| smoke-only                  | 10      | default                    | 30 s    | 1.7   | 3.9 % |
+| default (unusable)          | 50      | default                    | 30 s    | 4.4   | 45 % |
+| write-light                 | 50      | `put_new=3,put_replace=2`  | 30 s    | 23.4  | 7.5 % |
+| **realistic sweet spot**    | **50**  | **`put_new=3,put_replace=1`** | **60 s** | **8.4** | **4.0 %** |
+| longer client patience      | 50      | `put_new=3,put_replace=1`  | 120 s   | 10.9  | 10.7 % |
+
+Two counter-intuitive findings the study surfaced:
+
+- Raising `--request-timeout` from 60 s to 120 s made things
+  **worse**, not better: clients that wait longer keep more
+  concurrent PUTs in-flight, MEDIUM permits (default 64) fill up,
+  and 5xx cascade. 60 s is the sweet spot for a 4-node cluster.
+- Raising the gateway's `HOLOFS_MEDIUM_CONCURRENCY` from 64 to 128
+  also made things **worse** — the extra permits let more PUTs run,
+  but PUT is CPU-heavy (JPEG decode + DWT + RLNC fanout) and starves
+  concurrent GET on the same host. GET p50 jumped 1 ms → 79 ms, net
+  error rate rose. 64 stays the default; only tune it up when the
+  workload is provably read-dominant.
+
 ```sh
 # 1) External: cluster is already up, e.g. from `make dev`.
 ./target/release/holofs-soak \

@@ -51,6 +51,14 @@ pub struct ObservabilityCounters<'gw> {
 /// gives headroom without letting a burst DoS the process. Callers
 /// override via [`Gateway::configure_limits`] (bootstrap reads
 /// `HOLOFS_MEDIUM_CONCURRENCY` and applies it).
+///
+/// The 50-worker soak study (`docs/operations.md §10.7`) tried
+/// bumping this to 128 to unblock backpressure-storm scenarios;
+/// the higher ceiling let more PUTs run concurrently, but PUT is
+/// CPU-heavy (JPEG decode + DWT + RLNC fanout) and starved GET on
+/// the same host — GET p50 jumped 1 ms → 79 ms, and cluster-wide
+/// error rate went up, not down. 64 stays because PUT is the
+/// greedy op that fills whatever bucket you give it.
 pub const DEFAULT_MEDIUM_CONCURRENCY: usize = 64;
 
 /// N3: default LONG-bucket concurrency. `semantic_search` +

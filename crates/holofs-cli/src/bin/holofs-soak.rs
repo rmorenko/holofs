@@ -110,8 +110,11 @@ struct Cli {
     #[arg(long, env = "HOLOFS_ADMIN_TOKEN")]
     admin_token: Option<String>,
 
-    /// Per-request HTTP timeout.
-    #[arg(long, default_value = "30s")]
+    /// Per-request HTTP timeout. Raised from 30 s → 60 s in the
+    /// wake of the multi-process soak study (§10.7): PUT under a
+    /// 50-worker load routinely runs 30–45 s, and a shorter timeout
+    /// turned realistic backpressure into transport-level errors.
+    #[arg(long, default_value = "60s")]
     request_timeout: String,
 
     // ---- cluster-spawn parameters (ignored under `--topology external`) ----

@@ -22,7 +22,7 @@
 //!
 //! ## Env knobs
 //!
-//! * `HOLOFS_POOL_PER_NODE` — max idle entries per addr (default `8`).
+//! * `HOLOFS_POOL_PER_NODE` — max idle entries per addr (default `32`).
 //! * `HOLOFS_POOL_IDLE_SECS` — drop entries older than this on acquire
 //!   (default `30`).
 //! * `HOLOFS_POOL_DISABLE=1` — bypass the pool entirely; every
@@ -69,11 +69,17 @@ fn state() -> &'static Mutex<PoolState> {
 }
 
 fn per_node_cap() -> usize {
+    // 32 is the raised default (was 8). On a 4-node multi-process
+    // topology the previous 4 nodes × 8 = 32 total idle connections
+    // ran out immediately under a 50-worker load; every next op
+    // paid a fresh TCP handshake. Raising to 32 per addr caps at
+    // ~128 for a 4-node cluster — still bounded, but no longer
+    // the critical path.
     std::env::var("HOLOFS_POOL_PER_NODE")
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&n: &usize| n > 0)
-        .unwrap_or(8)
+        .unwrap_or(32)
 }
 
 fn idle_ttl() -> Duration {
