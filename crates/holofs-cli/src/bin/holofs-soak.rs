@@ -885,6 +885,13 @@ struct OpRecord {
 struct LiveSet {
     files: RwLock<Vec<String>>,      // decodable object names (non-directory)
     dirs: RwLock<Vec<String>>,       // directory names
+    /// Objects the runner has PUT'd but the server hasn't confirmed
+    /// as `Ready` yet — the async ingest path returns `202 Accepted`
+    /// with a placeholder in `state=Encoding`, and reads on those
+    /// paths keep 503-ing until the background worker flips them.
+    /// A dedicated polling task walks this list and promotes entries
+    /// into `files` once `HEAD /path` returns 200.
+    pending: RwLock<Vec<String>>,
     put_counter: AtomicU64,          // monotonic suffix for generated names
 }
 
@@ -915,6 +922,27 @@ impl LiveSet {
     }
     async fn remove_dir(&self, name: &str) {
         let mut g = self.dirs.write().await;
+        g.retain(|n| n != name);
+    }
+    async fn add_pending(&self, name: String) {
+        let mut g = self.pending.write().await;
+        if !g.iter().any(|n| n == &name) {
+            g.push(name);
+        }
+    }
+    async fn snapshot_pending(&self, max: usize) -> Vec<String> {
+        let g = self.pending.read().await;
+        g.iter().take(max).cloned().collect()
+    }
+    async fn promote_pending(&self, name: &str) {
+        {
+            let mut g = self.pending.write().await;
+            g.retain(|n| n != name);
+        }
+        self.add_file(name.to_string()).await;
+    }
+    async fn drop_pending(&self, name: &str) {
+        let mut g = self.pending.write().await;
         g.retain(|n| n != name);
     }
     async fn size(&self) -> (usize, usize) {
@@ -990,6 +1018,15 @@ fn random_png(rng: &mut SmallRng) -> Vec<u8> {
     out
 }
 
+/// True when a 503 response carries the `Retry-After` header — the
+/// signature the gateway emits when a manifest is still in
+/// `state=Encoding`. All other 503s (permit-empty backpressure,
+/// cluster-degraded decode failures) omit that header and stay
+/// classified as real errors.
+fn is_encoding_retry(status: u16, headers: &reqwest::header::HeaderMap) -> bool {
+    status == 503 && headers.contains_key(reqwest::header::RETRY_AFTER)
+}
+
 // ============================================================================
 // One HTTP call → OpRecord
 // ============================================================================
@@ -1011,7 +1048,18 @@ async fn do_one(
             };
             let url = format!("{base}/{}", encode_path(&name));
             match client.get(&url).send().await {
-                Ok(r) => (name, r.status().as_u16(), None),
+                Ok(r) => {
+                    let s = r.status().as_u16();
+                    if is_encoding_retry(s, r.headers()) {
+                        // Async ingest still running — bounce the
+                        // name back to `pending` so we stop
+                        // hammering it and the poller re-promotes.
+                        live.remove_file(&name).await;
+                        live.add_pending(name.clone()).await;
+                        return skip_record(op.label(), worker_id, &ts_iso, "encoding");
+                    }
+                    (name, s, None)
+                }
                 Err(e) => (name, 0, Some(e.to_string())),
             }
         }
@@ -1024,7 +1072,15 @@ async fn do_one(
             let url = format!("{base}/{}", encode_path(&name));
             let req = client.get(&url).header("Range", format!("bytes={start_b}-{end_b}"));
             match req.send().await {
-                Ok(r) => (name, r.status().as_u16(), None),
+                Ok(r) => {
+                    let s = r.status().as_u16();
+                    if is_encoding_retry(s, r.headers()) {
+                        live.remove_file(&name).await;
+                        live.add_pending(name.clone()).await;
+                        return skip_record(op.label(), worker_id, &ts_iso, "encoding");
+                    }
+                    (name, s, None)
+                }
                 Err(e) => (name, 0, Some(e.to_string())),
             }
         }
@@ -1040,7 +1096,15 @@ async fn do_one(
             match client.put(&url).body(body).send().await {
                 Ok(r) => {
                     let s = r.status().as_u16();
-                    if (200..300).contains(&s) {
+                    // 201 = sync path finished; 202 = async ingest
+                    // (`HOLOFS_ASYNC_ENCODE=1`) staged a placeholder
+                    // in `state=Encoding`. In the async case the
+                    // path is not readable yet — park it in the
+                    // pending queue so the polling task promotes
+                    // it once HEAD returns 200.
+                    if s == 202 {
+                        live.add_pending(path.clone()).await;
+                    } else if (200..300).contains(&s) {
                         live.add_file(path.clone()).await;
                     }
                     (path, s, None)
@@ -1055,7 +1119,18 @@ async fn do_one(
             let body = random_png(rng);
             let url = format!("{base}/{}", encode_path(&name));
             match client.put(&url).body(body).send().await {
-                Ok(r) => (name, r.status().as_u16(), None),
+                Ok(r) => {
+                    let s = r.status().as_u16();
+                    // Async replace: temporarily unreadable while
+                    // the background encode runs. Move the entry
+                    // out of `files` into `pending` so we don't
+                    // dispatch reads that would 503.
+                    if s == 202 {
+                        live.remove_file(&name).await;
+                        live.add_pending(name.clone()).await;
+                    }
+                    (name, s, None)
+                }
                 Err(e) => (name, 0, Some(e.to_string())),
             }
         }
@@ -1542,6 +1617,65 @@ async fn metrics_collector(
 // SSE consumer — /api/health/events
 // ============================================================================
 
+/// Walks `LiveSet::pending` on a fixed cadence and dispatches HEAD
+/// probes to check readiness. Promotes to `files` on 200, drops on
+/// 404, leaves in place on 503 (still encoding). Runs until the
+/// cancellation token flips.
+async fn pending_poller(
+    base: String,
+    client: reqwest::Client,
+    live: Arc<LiveSet>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    use futures_util::future::join_all;
+
+    const BATCH: usize = 12;
+    let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = ticker.tick() => {
+                let batch = live.snapshot_pending(BATCH).await;
+                if batch.is_empty() {
+                    continue;
+                }
+                let probes = batch.iter().map(|name| {
+                    let client = client.clone();
+                    let url = format!("{base}/{}", encode_path(name));
+                    async move {
+                        let out = client.head(&url).send().await;
+                        (name.clone(), out)
+                    }
+                });
+                let results = join_all(probes).await;
+                for (name, out) in results {
+                    match out {
+                        Ok(r) => {
+                            let s = r.status().as_u16();
+                            if (200..300).contains(&s) {
+                                live.promote_pending(&name).await;
+                            } else if s == 404 {
+                                // Encoding failed, or something else
+                                // deleted the entry — either way, no
+                                // future reader should try this path.
+                                live.drop_pending(&name).await;
+                            }
+                            // 503 with Retry-After: still encoding,
+                            // leave in pending for the next tick.
+                        }
+                        Err(_) => {
+                            // transport blip — leave in pending,
+                            // retry on the next tick.
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn sse_consumer(
     base: String,
     client: reqwest::Client,
@@ -1831,6 +1965,20 @@ async fn main() -> Result<()> {
         cancel.clone(),
     ));
 
+    // Async-ingest poller. Walks the `pending` list every 500 ms
+    // and issues a small batch of HEAD probes. 200 → the object
+    // is now `Ready`, promote it into `files`. 404 → the encode
+    // failed (or the file was deleted), drop from pending. 503 →
+    // still encoding, leave in place. Bounded concurrency (12 in
+    // flight) keeps the poller from stealing throughput from the
+    // main workers on a slow cluster.
+    let poll_handle = tokio::spawn(pending_poller(
+        base_url.clone(),
+        client.clone(),
+        live.clone(),
+        cancel.clone(),
+    ));
+
     // Progress printer every 30 s.
     let cancel_prog = cancel.clone();
     let counters_prog = counters.clone();
@@ -1862,6 +2010,7 @@ async fn main() -> Result<()> {
     let _ = writer_handle.await?;
     let _ = metrics_handle.await?;
     let _ = sse_handle.await?;
+    let _ = poll_handle.await?;
 
     // Final summary.
     let summary = counters.snapshot();
