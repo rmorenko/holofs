@@ -178,6 +178,27 @@ async fn metrics_parses_as_prometheus() -> Result<()> {
         .ok_or_else(|| anyhow!("malformed gauge line: {nodes_line}"))?
         .parse()?;
     assert!(val > 0);
+
+    // Async-ingest observability: the three families added with the
+    // async 202-Accepted path must be present on every gateway, even
+    // when HOLOFS_ASYNC_ENCODE is unset. Fresh gateway → all three
+    // must be zero: nothing has started encoding yet.
+    for family in [
+        "holofs_objects_encoding",
+        "holofs_encode_completed_total",
+        "holofs_encode_failed_total",
+    ] {
+        let line = body
+            .lines()
+            .find(|l| l.starts_with(family) && !l.starts_with('#'))
+            .ok_or_else(|| anyhow!("/metrics missing family {family}"))?;
+        let n: u64 = line
+            .split_whitespace()
+            .last()
+            .ok_or_else(|| anyhow!("malformed line: {line}"))?
+            .parse()?;
+        assert_eq!(n, 0, "fresh gateway should report {family}=0, got {n}");
+    }
     harness.close().await
 }
 
