@@ -163,6 +163,35 @@ struct Cli {
     /// `--topology external`.
     #[arg(long)]
     enable_versions: bool,
+
+    /// Maximum idle time each worker sleeps between ops. Actual
+    /// sleep is `rng.gen_range(0..=thinktime)`; raise to reduce
+    /// steady-state pressure on the gateway.
+    #[arg(long, default_value = "500ms")]
+    thinktime: String,
+
+    /// Base sleep after a 5xx or transport-level error. Consecutive
+    /// failures double this up to `--error-backoff-max`.
+    #[arg(long, default_value = "500ms")]
+    error_backoff: String,
+
+    /// Cap on the exponential-backoff sleep window. Reached after
+    /// ~log2(cap/base) consecutive errors.
+    #[arg(long, default_value = "30s")]
+    error_backoff_max: String,
+
+    /// Optional global rate limit in ops/second, shared across every
+    /// worker via a refilled token bucket. `0` disables the limiter
+    /// (workers only obey `--thinktime` + backoff).
+    #[arg(long, default_value_t = 0)]
+    rate_limit: u32,
+
+    /// Comma-separated `op=weight` overrides for the sampling table
+    /// (e.g. `put_new=5,get_random=40,search=0`). Any op not listed
+    /// keeps its default weight; weight `0` removes the op from the
+    /// mix entirely.
+    #[arg(long, default_value = "")]
+    op_mix: String,
 }
 
 // ============================================================================
@@ -588,6 +617,79 @@ fn parse_duration(s: &str) -> Result<Duration> {
     Ok(Duration::from_millis(total_ms))
 }
 
+fn parse_duration_millis(s: &str) -> Result<Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        bail!("empty duration");
+    }
+    // Accept `500ms` too. `parse_duration` swallows the `m` before the `s`.
+    if let Some(num) = s.strip_suffix("ms") {
+        let n: u64 = num.parse().with_context(|| format!("bad ms in {s:?}"))?;
+        return Ok(Duration::from_millis(n));
+    }
+    parse_duration(s)
+}
+
+// ============================================================================
+// Global rate limiter (token bucket, refilled every 100 ms)
+// ============================================================================
+
+/// Simple token bucket. `capacity` == `rate_per_sec` for a burst that
+/// matches one second of steady state; refill runs every 100 ms adding
+/// `rate/10` tokens. `acquire()` returns as soon as a token is
+/// available, or immediately if the limiter is disabled.
+struct RateLimiter {
+    rate: u32,
+    inner: tokio::sync::Mutex<Bucket>,
+}
+
+struct Bucket {
+    tokens: u32,
+    last_refill: Instant,
+}
+
+impl RateLimiter {
+    fn new(rate: u32) -> Arc<Self> {
+        Arc::new(Self {
+            rate,
+            inner: tokio::sync::Mutex::new(Bucket {
+                tokens: rate,
+                last_refill: Instant::now(),
+            }),
+        })
+    }
+
+    async fn acquire(&self, cancel: &CancellationToken) {
+        if self.rate == 0 {
+            return;
+        }
+        loop {
+            {
+                let mut g = self.inner.lock().await;
+                let now = Instant::now();
+                let elapsed_ms = now.duration_since(g.last_refill).as_millis();
+                // Add rate * elapsed_ms / 1000 tokens; only advance
+                // `last_refill` by the amount actually credited so we
+                // don't quantise away sub-token fractions.
+                let add = ((self.rate as u128) * elapsed_ms / 1000) as u32;
+                if add > 0 {
+                    g.tokens = g.tokens.saturating_add(add).min(self.rate);
+                    let credited_ms = (add as u128 * 1000) / self.rate as u128;
+                    g.last_refill += Duration::from_millis(credited_ms as u64);
+                }
+                if g.tokens > 0 {
+                    g.tokens -= 1;
+                    return;
+                }
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                _ = cancel.cancelled() => return,
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Op kinds + weights
 // ============================================================================
@@ -699,22 +801,61 @@ struct Capabilities {
     versions: bool,
 }
 
-fn build_weights(caps: Capabilities) -> Vec<(Op, u32)> {
+fn build_weights(caps: Capabilities, overrides: &BTreeMap<String, u32>) -> Vec<(Op, u32)> {
     Op::ALL
         .iter()
-        .filter_map(|&(op, w)| {
-            let keep = match op {
+        .filter_map(|&(op, default_w)| {
+            let feature_ok = match op {
                 Op::Search => caps.embed,
                 Op::VersionsList => caps.versions,
                 _ => true,
             };
-            if keep {
-                Some((op, w))
-            } else {
+            if !feature_ok {
+                return None;
+            }
+            let w = overrides
+                .get(op.label())
+                .copied()
+                .unwrap_or(default_w);
+            if w == 0 {
                 None
+            } else {
+                Some((op, w))
             }
         })
         .collect()
+}
+
+/// Parse `--op-mix "put_new=5,get_random=40"` into a map. Empty
+/// string yields an empty map (all defaults). Unknown op names bail
+/// so `--op-mix "typo=1"` fails loudly instead of silently ignoring.
+fn parse_op_mix(s: &str) -> Result<BTreeMap<String, u32>> {
+    let mut out = BTreeMap::new();
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(out);
+    }
+    let known: std::collections::HashSet<&'static str> =
+        Op::ALL.iter().map(|(op, _)| op.label()).collect();
+    for chunk in s.split(',') {
+        let chunk = chunk.trim();
+        if chunk.is_empty() {
+            continue;
+        }
+        let (op, w) = chunk
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--op-mix chunk {chunk:?} must be op=weight"))?;
+        let op = op.trim();
+        if !known.contains(op) {
+            bail!("--op-mix: unknown op {op:?}");
+        }
+        let w: u32 = w
+            .trim()
+            .parse()
+            .with_context(|| format!("--op-mix: bad weight in {chunk:?}"))?;
+        out.insert(op.to_string(), w);
+    }
+    Ok(out)
 }
 
 // ============================================================================
@@ -1269,6 +1410,15 @@ impl Counters {
 // Worker
 // ============================================================================
 
+/// Static per-worker configuration. Grouped into a struct so the
+/// spawn call site stops looking like a phone book.
+#[derive(Clone)]
+struct WorkerConfig {
+    thinktime_max: Duration,
+    error_backoff_base: Duration,
+    error_backoff_cap: Duration,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn worker(
     id: usize,
@@ -1278,21 +1428,58 @@ async fn worker(
     tx: mpsc::Sender<OpRecord>,
     cancel: CancellationToken,
     seed: u64,
-    thinktime_max_ms: u64,
     weights: Arc<Vec<(Op, u32)>>,
+    rate_limiter: Arc<RateLimiter>,
+    wcfg: WorkerConfig,
 ) {
     let mut rng = SmallRng::seed_from_u64(seed);
+    let mut consecutive_errs: u32 = 0;
     while !cancel.is_cancelled() {
+        // Global throttle: waits until a token is available (no-op
+        // when --rate-limit=0).
+        rate_limiter.acquire(&cancel).await;
+        if cancel.is_cancelled() {
+            break;
+        }
+
         let op = pick_op(&mut rng, &weights);
         let rec = do_one(op, id, &base, &client, &live, &mut rng).await;
-        // Send, tolerate closed channel on shutdown.
+
+        // Classify AFTER we captured the record; skips don't count.
+        let is_error = rec.http >= 500
+            || rec
+                .err
+                .as_ref()
+                .is_some_and(|e| !e.starts_with("skip:"));
+        if is_error {
+            consecutive_errs = consecutive_errs.saturating_add(1);
+        } else {
+            consecutive_errs = 0;
+        }
+
         if tx.send(rec).await.is_err() {
             break;
         }
-        if thinktime_max_ms > 0 {
-            let t = rng.gen_range(0..=thinktime_max_ms);
+
+        // Exponential backoff on sustained errors — reasoned like a
+        // polite client, not a retry storm.
+        let sleep = if consecutive_errs > 0 {
+            let shift = consecutive_errs.saturating_sub(1).min(20);
+            let ms = wcfg
+                .error_backoff_base
+                .as_millis()
+                .saturating_mul(1u128 << shift);
+            let cap_ms = wcfg.error_backoff_cap.as_millis();
+            Duration::from_millis(u64::try_from(ms.min(cap_ms)).unwrap_or(u64::MAX))
+        } else if wcfg.thinktime_max.is_zero() {
+            Duration::ZERO
+        } else {
+            let max_ms = wcfg.thinktime_max.as_millis().try_into().unwrap_or(u64::MAX);
+            Duration::from_millis(rng.gen_range(0..=max_ms))
+        };
+        if !sleep.is_zero() {
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(t)) => {}
+                _ = tokio::time::sleep(sleep) => {}
                 _ = cancel.cancelled() => break,
             }
         }
@@ -1488,7 +1675,8 @@ async fn main() -> Result<()> {
     // Detect which optional features are actually reachable; drop ops
     // from the mix that would otherwise 500 on every call.
     let caps = probe_capabilities(&base_url, &client).await;
-    let weights = build_weights(caps);
+    let op_mix_overrides = parse_op_mix(&cli.op_mix)?;
+    let weights = build_weights(caps, &op_mix_overrides);
     let dropped: Vec<&'static str> = Op::ALL
         .iter()
         .filter(|(op, _)| !weights.iter().any(|(w_op, _)| w_op == op))
@@ -1533,6 +1721,13 @@ async fn main() -> Result<()> {
             "dropped_ops": dropped,
         },
         "weights": weights.iter().map(|(op, w)| (op.label(), *w)).collect::<Vec<_>>(),
+        "throttle": {
+            "thinktime_max": cli.thinktime,
+            "error_backoff": cli.error_backoff,
+            "error_backoff_max": cli.error_backoff_max,
+            "rate_limit_ops_per_sec": cli.rate_limit,
+            "op_mix": cli.op_mix,
+        },
     });
     write_json(&run_dir.join("config.json"), &cfg).await?;
 
@@ -1579,6 +1774,19 @@ async fn main() -> Result<()> {
         cancel_deadline.cancel();
     });
 
+    // Rate limiter + per-worker sleep/backoff config are computed once
+    // and shared. Parse durations up front so a bad `--thinktime` fails
+    // before we start burning workers.
+    let thinktime_max = parse_duration_millis(&cli.thinktime)?;
+    let error_backoff_base = parse_duration_millis(&cli.error_backoff)?;
+    let error_backoff_cap = parse_duration_millis(&cli.error_backoff_max)?;
+    let rate_limiter = RateLimiter::new(cli.rate_limit);
+    let wcfg = WorkerConfig {
+        thinktime_max,
+        error_backoff_base,
+        error_backoff_cap,
+    };
+
     // Spawn workers.
     let weights_shared = Arc::new(weights);
     let mut worker_handles = Vec::with_capacity(cli.workers);
@@ -1589,9 +1797,11 @@ async fn main() -> Result<()> {
         let tx = tx.clone();
         let cancel = cancel.clone();
         let weights = weights_shared.clone();
+        let rl = rate_limiter.clone();
+        let wcfg = wcfg.clone();
         let seed = seed_master.wrapping_add(i as u64).wrapping_mul(0x9E3779B97F4A7C15);
         worker_handles.push(tokio::spawn(async move {
-            worker(i, base, client, live, tx, cancel, seed, 50, weights).await;
+            worker(i, base, client, live, tx, cancel, seed, weights, rl, wcfg).await;
         }));
     }
     drop(tx); // writer will finish when all workers close their senders.
@@ -1735,9 +1945,40 @@ mod tests {
     #[test]
     fn build_weights_drops_disabled_features() {
         let caps = Capabilities { embed: false, versions: true };
-        let w = build_weights(caps);
+        let w = build_weights(caps, &BTreeMap::new());
         assert!(!w.iter().any(|(op, _)| *op == Op::Search));
         assert!(w.iter().any(|(op, _)| *op == Op::VersionsList));
         assert!(w.iter().any(|(op, _)| *op == Op::Similar));
+    }
+
+    #[test]
+    fn op_mix_overrides_and_zeros_are_honoured() {
+        let mut ov = BTreeMap::new();
+        ov.insert("put_new".to_string(), 100);
+        ov.insert("get_random".to_string(), 0);
+        let caps = Capabilities { embed: true, versions: true };
+        let w = build_weights(caps, &ov);
+        assert_eq!(
+            w.iter().find(|(op, _)| *op == Op::PutNew).map(|(_, w)| *w),
+            Some(100)
+        );
+        assert!(!w.iter().any(|(op, _)| *op == Op::GetRandom));
+    }
+
+    #[test]
+    fn op_mix_parser_accepts_valid_and_rejects_typos() {
+        let ok = parse_op_mix("put_new=5,get_random=40").unwrap();
+        assert_eq!(ok.get("put_new"), Some(&5));
+        assert_eq!(ok.get("get_random"), Some(&40));
+        assert!(parse_op_mix("").unwrap().is_empty());
+        assert!(parse_op_mix("typo=1").is_err());
+        assert!(parse_op_mix("put_new").is_err());
+    }
+
+    #[test]
+    fn parse_duration_millis_accepts_ms() {
+        assert_eq!(parse_duration_millis("500ms").unwrap(), Duration::from_millis(500));
+        assert_eq!(parse_duration_millis("30s").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_duration_millis("1m").unwrap(), Duration::from_secs(60));
     }
 }

@@ -909,6 +909,29 @@ given), and the post-boot seed is `deploy/dev-seed.sh` unless
 Both flags are `false` by default (matches `make dev`), so short
 smoke runs start fast. Turn them on for realistic 8-hour soaks.
 
+**Throttling knobs.** By default 50 workers × ~0.5 s think-time gives
+~100 ops/sec — enough to stress an embedded 40-node cluster but light
+enough to avoid a self-inflicted retry storm. Four flags fine-tune it:
+
+| Flag                 | Default | Effect                                                                 |
+|----------------------|---------|------------------------------------------------------------------------|
+| `--thinktime <dur>`  | `500ms` | Upper bound of the random sleep each worker takes between ops.         |
+| `--error-backoff <dur>` | `500ms` | Base sleep after a 5xx / transport error. Doubles per consecutive failure. |
+| `--error-backoff-max <dur>` | `30s` | Cap on the exponential backoff.                                       |
+| `--rate-limit <ops/s>` | `0`   | Global token bucket shared by all workers. `0` = disabled.             |
+| `--op-mix "op=w,..."` | `""`  | Override any op's weight; `w=0` drops the op from the mix entirely.    |
+
+Turning **`--rate-limit`** on gives you a hard cap regardless of
+worker count — handy for reproducible latency histograms. `--op-mix`
+lets you carve out read-heavy or write-heavy scenarios without
+touching the source (e.g. `--op-mix "put_new=3,put_replace=2"` for
+a mostly-read profile, `--op-mix "search=0,similar=0"` to skip
+analytics endpoints).
+
+Effective weights and throttle settings are also written into
+`config.json` so post-run analysis knows exactly what mix produced
+the numbers.
+
 ```sh
 # 1) External: cluster is already up, e.g. from `make dev`.
 ./target/release/holofs-soak \
