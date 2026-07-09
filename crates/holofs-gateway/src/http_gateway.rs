@@ -87,6 +87,16 @@ pub const DEFAULT_LONG_CONCURRENCY: usize = 8;
 /// `HOLOFS_ENCODE_CONCURRENCY`.
 pub const DEFAULT_ENCODE_CONCURRENCY: usize = 8;
 
+/// Async-ingest intake ceiling. When `objects_encoding` reaches
+/// `DEFAULT_ENCODE_QUEUE_MAX` the 202 fast-path stops accepting new
+/// PUTs and returns 503 + Retry-After instead. Prevents the queue
+/// from growing without bound under a bursty client that hasn't
+/// migrated to Retry-After polling yet: the whole point of async
+/// ingest is fast-fail on overload, not silent RAM exhaustion.
+/// Default is 4 × `DEFAULT_ENCODE_CONCURRENCY`; override via
+/// `HOLOFS_ENCODE_QUEUE_MAX`.
+pub const DEFAULT_ENCODE_QUEUE_MAX: usize = 32;
+
 /// Cluster metadata needed to PUT a new object.
 pub struct ClusterInfo {
     pub node_addrs: Vec<String>,
@@ -242,6 +252,13 @@ pub struct Gateway {
     /// PUT storm blocked out mkdir / rmdir / put_new on their HTTP
     /// gate (97 % 503 in the July 2026 soak).
     pub(crate) encode_permits: Arc<tokio::sync::Semaphore>,
+    /// Intake ceiling for async ingest — see
+    /// [`DEFAULT_ENCODE_QUEUE_MAX`]. Compared against
+    /// `objects_encoding.load()` at the top of
+    /// `ingest_bytes_async`; over the ceiling we return
+    /// `AsyncQueueFull` (503+Retry-After) so the queue can't grow
+    /// past a bounded RAM footprint.
+    pub(crate) encode_queue_max: usize,
     /// Group-commit coalescing for [`Self::persist_catalog`]. Every
     /// mutation increments `persist_dirty_epoch` after it commits;
     /// the flush leader (single-writer serialised on
@@ -315,6 +332,7 @@ impl Gateway {
             encode_completed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             encode_failed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             encode_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_ENCODE_CONCURRENCY)),
+            encode_queue_max: DEFAULT_ENCODE_QUEUE_MAX,
             persist_dirty_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             persist_flushed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             persist_flush_mutex: Arc::new(tokio::sync::Mutex::new(())),
@@ -368,6 +386,7 @@ impl Gateway {
             encode_completed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             encode_failed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             encode_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_ENCODE_CONCURRENCY)),
+            encode_queue_max: DEFAULT_ENCODE_QUEUE_MAX,
             persist_dirty_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             persist_flushed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             persist_flush_mutex: Arc::new(tokio::sync::Mutex::new(())),
@@ -392,6 +411,14 @@ impl Gateway {
     /// only before axum starts serving.
     pub fn configure_encode_limit(&mut self, encode: usize) {
         self.encode_permits = Arc::new(tokio::sync::Semaphore::new(encode));
+    }
+
+    /// Set the async-ingest intake ceiling — see
+    /// [`DEFAULT_ENCODE_QUEUE_MAX`]. Bootstrap reads
+    /// `HOLOFS_ENCODE_QUEUE_MAX` and applies it once before axum
+    /// begins serving.
+    pub fn configure_encode_queue_max(&mut self, queue_max: usize) {
+        self.encode_queue_max = queue_max;
     }
 
     /// Handle for the /metrics endpoint (backpressure permits +

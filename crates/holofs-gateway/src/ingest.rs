@@ -552,6 +552,17 @@ impl Gateway {
         catalog_path::validate(name)
             .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
 
+        // Intake backpressure. Without a ceiling, a bursty client
+        // that isn't polling would let `objects_encoding` grow
+        // linearly with request rate — the encoder can't drain
+        // faster than one shard-fanout at a time, so pending
+        // placeholders + their bodies would eventually OOM the
+        // gateway. Refuse fast so the caller backs off (or its
+        // retry loop pauses on the Retry-After header) instead.
+        if self.objects_encoding.load(Ordering::Acquire) >= self.encode_queue_max as u64 {
+            return Err(GatewayError::AsyncQueueFull);
+        }
+
         // Same synchronous checks as `ingest_bytes` — reject before we
         // stage anything so the caller sees a clean 4xx rather than an
         // orphaned `Failed` manifest cluttering the catalog.

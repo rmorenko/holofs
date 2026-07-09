@@ -109,9 +109,8 @@ pub(crate) fn redirect_to(target: &str) -> Response {
 /// [`holofs_gateway::GatewayError`]. Every writer handler funnels
 /// its `Err(GatewayError)` branch through here.
 pub(crate) fn error_to_response(e: GatewayError) -> Response {
-    // Special-case `EncodingInProgress` so the response carries a
-    // `Retry-After` hint. Every other variant fits the plain
-    // (status, body) mould below.
+    // Special-case the two Retry-After–bearing variants first — the
+    // rest fit the plain (status, body) mould below.
     if matches!(e, GatewayError::EncodingInProgress) {
         return (
             StatusCode::CONFLICT,
@@ -120,6 +119,17 @@ pub(crate) fn error_to_response(e: GatewayError) -> Response {
                 (header::RETRY_AFTER, "5"),
             ],
             "async ingest still running for this name; retry after 5 s\n".to_string(),
+        )
+            .into_response();
+    }
+    if matches!(e, GatewayError::AsyncQueueFull) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (header::CONTENT_TYPE, "text/plain"),
+                (header::RETRY_AFTER, "5"),
+            ],
+            "async ingest queue is full; retry after 5 s\n".to_string(),
         )
             .into_response();
     }
@@ -138,6 +148,10 @@ pub(crate) fn error_to_response(e: GatewayError) -> Response {
         GatewayError::EncodingInProgress => {
             // Handled above; unreachable but kept exhaustive.
             (StatusCode::CONFLICT, "encoding in progress".to_string())
+        }
+        GatewayError::AsyncQueueFull => {
+            // Handled above; unreachable but kept exhaustive.
+            (StatusCode::SERVICE_UNAVAILABLE, "async ingest queue is full".to_string())
         }
         GatewayError::NotADirectory => {
             (StatusCode::CONFLICT, "not a directory".to_string())

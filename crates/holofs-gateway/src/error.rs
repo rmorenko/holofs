@@ -62,6 +62,15 @@ pub enum GatewayError {
     /// catalog. Now writers refuse and surface a 500 so the operator
     /// notices immediately.
     Persist(String),
+    /// Async-ingest intake ceiling reached: `objects_encoding` has
+    /// hit `encode_queue_max` and further 202s would let the queue
+    /// grow without bound. HTTP layer surfaces this as
+    /// `503 Service Unavailable` with `Retry-After` so a polling
+    /// client backs off cleanly. Distinct from `ClusterDegraded`
+    /// (503 without Retry-After — the cluster itself is down) and
+    /// from `EncodingInProgress` (409 — one specific name is busy,
+    /// not the whole gateway).
+    AsyncQueueFull,
 }
 
 impl From<holofs_model::placement::NoLiveNodes> for GatewayError {
@@ -86,6 +95,9 @@ impl std::fmt::Display for GatewayError {
             GatewayError::DirectoryNotEmpty => write!(f, "directory not empty"),
             GatewayError::ClusterDegraded => write!(f, "cluster has no live nodes"),
             GatewayError::Persist(s) => write!(f, "catalog persist failed: {s}"),
+            GatewayError::AsyncQueueFull => {
+                write!(f, "async ingest queue is full — retry after backoff")
+            }
         }
     }
 }
