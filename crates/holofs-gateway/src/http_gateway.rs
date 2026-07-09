@@ -19,6 +19,7 @@ use holofs_core::gf::Gf;
 use holofs_model::fs::Directory;
 use holofs_model::placement::Placement;
 
+use crate::health::ApiStats;
 use crate::search::EmbedState;
 use crate::versions::VersionsState;
 
@@ -259,6 +260,17 @@ pub struct Gateway {
     /// `AsyncQueueFull` (503+Retry-After) so the queue can't grow
     /// past a bounded RAM footprint.
     pub(crate) encode_queue_max: usize,
+    /// TTL cache for `api_stats`. `api_stats` is O(N × M) — N
+    /// manifests × M shard hashes — and must clone the whole
+    /// catalog to avoid holding the mutex during the walk. Under
+    /// a 50-worker soak that clone + walk combined with concurrent
+    /// encoder finalises + `persist_catalog` fsyncs contended the
+    /// same mutex for seconds at a time, tripping the 10 s SHORT
+    /// bucket timeout for 20 % of `/api/stats` calls. Cache the
+    /// result for 500 ms — soak/dashboard callers don't need
+    /// sub-second freshness, and the mutex churn drops to at most
+    /// two contended acquisitions per second.
+    pub(crate) stats_cache: Arc<tokio::sync::Mutex<Option<(std::time::Instant, ApiStats)>>>,
     /// Group-commit coalescing for [`Self::persist_catalog`]. Every
     /// mutation increments `persist_dirty_epoch` after it commits;
     /// the flush leader (single-writer serialised on
@@ -337,6 +349,7 @@ impl Gateway {
             persist_flushed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             persist_flush_mutex: Arc::new(tokio::sync::Mutex::new(())),
             persist_coalesced_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            stats_cache: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -391,6 +404,7 @@ impl Gateway {
             persist_flushed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             persist_flush_mutex: Arc::new(tokio::sync::Mutex::new(())),
             persist_coalesced_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            stats_cache: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 

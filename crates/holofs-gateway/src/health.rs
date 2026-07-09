@@ -251,6 +251,26 @@ impl Gateway {
 
     /// Snapshot of cluster-wide statistics for `GET /api/stats`.
     pub async fn api_stats(&self) -> ApiStats {
+        // Fast path: serve a fresh-enough cached result. Under a
+        // 50-worker soak this drops the mutex-contention pressure
+        // on `catalog` from N/sec (one clone per stats request) to
+        // 2/sec, which is what tripped the 10 s SHORT timeout and
+        // gave `/api/stats` a 20 % 504 rate in the July 2026 run.
+        const TTL: std::time::Duration = std::time::Duration::from_millis(500);
+        {
+            let cache = self.stats_cache.lock().await;
+            if let Some((at, stats)) = cache.as_ref() {
+                if at.elapsed() < TTL {
+                    return stats.clone();
+                }
+            }
+        }
+        let stats = self.api_stats_uncached().await;
+        *self.stats_cache.lock().await = Some((std::time::Instant::now(), stats.clone()));
+        stats
+    }
+
+    async fn api_stats_uncached(&self) -> ApiStats {
         use std::collections::HashSet;
 
         let snapshot = self.catalog.lock().await.clone();
