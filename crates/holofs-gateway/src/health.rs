@@ -251,22 +251,32 @@ impl Gateway {
 
     /// Snapshot of cluster-wide statistics for `GET /api/stats`.
     pub async fn api_stats(&self) -> ApiStats {
-        // Fast path: serve a fresh-enough cached result. Under a
-        // 50-worker soak this drops the mutex-contention pressure
-        // on `catalog` from N/sec (one clone per stats request) to
-        // 2/sec, which is what tripped the 10 s SHORT timeout and
-        // gave `/api/stats` a 20 % 504 rate in the July 2026 run.
-        const TTL: std::time::Duration = std::time::Duration::from_millis(500);
-        {
-            let cache = self.stats_cache.lock().await;
-            if let Some((at, stats)) = cache.as_ref() {
-                if at.elapsed() < TTL {
-                    return stats.clone();
-                }
+        // Fast path: serve a fresh-enough cached result. TTL bumped
+        // to 2 s (from the initial 500 ms) after Arc<Manifest> +
+        // RwLock<Directory> dropped the clone cost far enough that
+        // the residual 16 % 504 rate had to be from cache-miss
+        // coincidence with a write-lock spike — a longer TTL
+        // absorbs those. Dashboards / soak drivers don't need
+        // sub-second freshness; consumers that do can hit
+        // `/metrics` (uncached, single-atomic loads only).
+        const TTL: std::time::Duration = std::time::Duration::from_millis(2000);
+        if let Some((at, stats)) = self.stats_cache.lock().await.as_ref() {
+            if at.elapsed() < TTL {
+                return stats.clone();
+            }
+        }
+        // Cache miss (or stale). Hold the cache mutex across
+        // recomputation so concurrent cache misses coalesce behind
+        // whichever caller wins the race — one uncached call per
+        // TTL, not per concurrent request.
+        let mut guard = self.stats_cache.lock().await;
+        if let Some((at, stats)) = guard.as_ref() {
+            if at.elapsed() < TTL {
+                return stats.clone();
             }
         }
         let stats = self.api_stats_uncached().await;
-        *self.stats_cache.lock().await = Some((std::time::Instant::now(), stats.clone()));
+        *guard = Some((std::time::Instant::now(), stats.clone()));
         stats
     }
 
