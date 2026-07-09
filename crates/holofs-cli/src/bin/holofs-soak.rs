@@ -292,7 +292,11 @@ async fn wait_for_gateway(base_url: &str, deadline: Duration) -> Result<()> {
     }
 }
 
-async fn read_node_pubkey(child: &mut Child, deadline: Duration) -> Result<(String, String)> {
+async fn read_node_pubkey(
+    child: &mut Child,
+    deadline: Duration,
+    stderr_sink: Option<PathBuf>,
+) -> Result<(String, String)> {
     // Node prints `holofs-node addr=<host:port> pubkey=<hex>` once bound.
     let stderr = child
         .stderr
@@ -300,7 +304,11 @@ async fn read_node_pubkey(child: &mut Child, deadline: Duration) -> Result<(Stri
         .context("node stderr not piped — spawn config bug")?;
     let mut reader = BufReader::new(stderr).lines();
     let start = Instant::now();
+    let mut pubkey_line: Option<(String, String)> = None;
     loop {
+        if pubkey_line.is_some() {
+            break;
+        }
         if start.elapsed() > deadline {
             bail!("node did not print pubkey within {deadline:?}");
         }
@@ -310,17 +318,49 @@ async fn read_node_pubkey(child: &mut Child, deadline: Duration) -> Result<(Stri
                 if let Some(rest) = line.strip_prefix("holofs-node addr=") {
                     if let Some((addr_str, tail)) = rest.split_once(' ') {
                         if let Some(pubkey) = tail.strip_prefix("pubkey=") {
-                            return Ok((addr_str.to_string(), pubkey.trim().to_string()));
+                            pubkey_line = Some((
+                                addr_str.to_string(),
+                                pubkey.trim().to_string(),
+                            ));
                         }
                     }
                 }
-                // Otherwise it's an unrelated stderr line; ignore.
             }
             Ok(Ok(None)) => bail!("node stderr closed before printing pubkey"),
             Ok(Err(e)) => bail!("node stderr read error: {e}"),
-            Err(_) => {} // timeout on this attempt; loop
+            Err(_) => {}
         }
     }
+    // Keep draining the node stderr into a log file so a
+    // crashing / faulting node has a durable trace after the MP
+    // cluster tears down. Without this the pipe eventually fills
+    // and node writes block, which under earlier soak runs made
+    // `io: unexpected end of file` failures completely opaque.
+    if let Some(path) = stderr_sink {
+        tokio::spawn(async move {
+            let mut sink = match tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .await
+            {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            use tokio::io::AsyncWriteExt;
+            loop {
+                match reader.next_line().await {
+                    Ok(Some(line)) => {
+                        let _ = sink.write_all(line.as_bytes()).await;
+                        let _ = sink.write_all(b"\n").await;
+                    }
+                    Ok(None) => return,
+                    Err(_) => return,
+                }
+            }
+        });
+    }
+    Ok(pubkey_line.unwrap())
 }
 
 fn find_default_seed_script() -> Option<PathBuf> {
@@ -430,7 +470,13 @@ async fn spawn_multi_process(cli: &Cli) -> Result<Cluster> {
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawn {}", holofs_node.display()))?;
-        let (bound_addr, pubkey) = read_node_pubkey(&mut child, node_pubkey_deadline).await?;
+        let node_log = storage_root.join(format!("node-{i:02}.log"));
+        let (bound_addr, pubkey) = read_node_pubkey(
+            &mut child,
+            node_pubkey_deadline,
+            Some(node_log),
+        )
+        .await?;
         let zone = i % 4;
         node_specs.push(format!("{bound_addr}={pubkey}:{zone}"));
         children.push((format!("node-{i:02}"), child));
@@ -539,10 +585,22 @@ async fn spawn_multi_process(cli: &Cli) -> Result<Cluster> {
     if cli.enable_versions {
         gw_cmd.arg("--enable-versions");
     }
+    // Capture gateway stderr into a file inside the artefact
+    // directory so post-mortem diagnostics are possible even after
+    // the multi-process cluster is torn down. Previously stderr
+    // was piped and dropped, which meant a soak that hit encoder
+    // failures under multi-process could not be traced.
+    let gw_stderr_path = storage_root.join("gateway.log");
+    let gw_stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&gw_stderr_path)
+        .with_context(|| format!("open {}", gw_stderr_path.display()))?;
     gw_cmd
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(gw_stderr))
         .kill_on_drop(true);
+    eprintln!("[soak] gateway stderr → {}", gw_stderr_path.display());
     let gw_child = gw_cmd
         .spawn()
         .with_context(|| format!("spawn {}", holofs_web.display()))?;
