@@ -8,6 +8,13 @@
 # Останавливается по Ctrl-C — все узлы тоже гасятся через trap.
 #
 # Usage: ./scripts/spawn-cluster.sh [N=8] [BASE_PORT=5100] [GATEWAY=127.0.0.1:8787]
+#
+# Env-knobs (forwarded to the gateway, unset by default):
+#   HOLOFS_ASYNC_ENCODE=1         202 Accepted PUT + Retry-After polling
+#   HOLOFS_ENCODE_CONCURRENCY=N   async encoder concurrency cap (default 8)
+#   HOLOFS_ENCODE_QUEUE_MAX=N     intake ceiling before AsyncQueueFull
+#   HOLOFS_NODE_FSYNC=0|1         per-shard WAL fsync (default 1 = safe)
+#   HOLOFS_NODE_FLUSH_INTERVAL_MS N  group-commit interval (default 5 ms)
 set -euo pipefail
 
 N="${1:-8}"
@@ -19,12 +26,14 @@ DATA="$ROOT/.cluster-data"
 LOG="$ROOT/.cluster-logs"
 mkdir -p "$DATA" "$LOG"
 
-# Билдим всё что нужно (release).
-( cd "$ROOT" && cargo build --release --bin holofs-node --bin holofs-admin --bin holofs-http )
+# Билдим всё что нужно (release). `holofs-web` требует ssr feature.
+( cd "$ROOT" \
+  && cargo build --release --bin holofs-node --bin holofs-admin \
+  && cargo build --release --features ssr --bin holofs-web )
 
 BIN_NODE="$ROOT/target/release/holofs-node"
 BIN_ADMIN="$ROOT/target/release/holofs-admin"
-BIN_HTTP="$ROOT/target/release/holofs-http"
+BIN_WEB="$ROOT/target/release/holofs-web"
 
 PIDS=()
 cleanup() {
@@ -77,11 +86,20 @@ echo "── admin pubkey: $ADMIN_PK"
 "$BIN_ADMIN" sign-whitelist --admin "$ADMIN_KEY" "${NODE_SPECS[@]}" --out "$WL" >/dev/null
 echo "── whitelist подписан: $WL"
 
-# 3. Запускаем гейтвей.
-echo "── starting holofs-http @ $GW"
-"$BIN_HTTP" \
+# 3. Запускаем гейтвей (holofs-web с Leptos SSR UI на / + /api/*).
+# --enable-embed включает CLIP-based semantic search индекс. Первый
+# `/api/search` PUT-ов ~155 MiB весов CLIP из HuggingFace в
+# `~/.cache/huggingface/hub/` (кэшируется между рестартами).
+echo "── starting holofs-web @ $GW"
+GATEWAY_STORAGE="$DATA/gateway"
+mkdir -p "$GATEWAY_STORAGE"
+exec "$BIN_WEB" \
   --addr "$GW" \
+  --storage "$GATEWAY_STORAGE" \
+  --catalog "$DATA/catalog.bin" \
   --whitelist "$WL" \
   --admin-pubkey "$ADMIN_PK" \
-  --catalog "$DATA/catalog.bin" \
-  --no-seed
+  --enable-embed \
+  --enable-versions \
+  --log info \
+  --log-format text
