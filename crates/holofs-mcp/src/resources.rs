@@ -20,7 +20,7 @@ pub(crate) async fn list_resources(
     _request: Option<PaginatedRequestParams>,
 ) -> Result<ListResourcesResult, ErrorData> {
     use holofs_model::manifest::ObjectKind;
-    let cat = h.gateway.catalog().lock().await.clone();
+    let cat = h.gateway.catalog().read().await.clone();
     let resources = cat
         .entries
         .iter()

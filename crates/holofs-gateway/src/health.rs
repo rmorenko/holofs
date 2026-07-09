@@ -154,7 +154,7 @@ impl Gateway {
         // (non-directory) objects.
         let live = self.effective_live().await;
         let names: Vec<String> = {
-            let cat = self.catalog.lock().await;
+            let cat = self.catalog.read().await;
             cat.entries
                 .iter()
                 .filter(|(_, m)| m.kind != ObjectKind::Directory && !m.nodes.is_empty())
@@ -185,7 +185,7 @@ impl Gateway {
         // Walk catalog and identify which objects need repair.
         let mut to_repair: Vec<String> = Vec::new();
         {
-            let cat = self.catalog.lock().await;
+            let cat = self.catalog.read().await;
             'outer: for name in &names {
                 let Some(manifest) = cat.entries.get(name) else {
                     continue;
@@ -273,7 +273,7 @@ impl Gateway {
     async fn api_stats_uncached(&self) -> ApiStats {
         use std::collections::HashSet;
 
-        let snapshot = self.catalog.lock().await.clone();
+        let snapshot = self.catalog.read().await.clone();
         let mut counts = KindCounts::default();
         let mut total_shards = 0u64;
         let mut total_payload_bytes = 0u64;
@@ -346,7 +346,7 @@ impl Gateway {
                 admin_killed: kills.get(i).copied().unwrap_or(false),
             })
             .collect();
-        let mut objects = self.catalog.lock().await.names();
+        let mut objects = self.catalog.read().await.names();
         objects.sort();
         let n_live = kills.iter().filter(|&&k| !k).count();
         let n_total = kills.len();
@@ -368,7 +368,7 @@ impl Gateway {
     ) -> Result<holofs_cluster::health::ObjectHealth, GatewayError> {
         let manifest = self
             .catalog
-            .lock()
+            .read()
             .await
             .get(name)
             .cloned()

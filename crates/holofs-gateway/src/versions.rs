@@ -195,14 +195,14 @@ impl Gateway {
         // Archive the current manifest before replacing it. If the
         // name isn't in the catalog at all (was deleted), restore
         // becomes a pure resurrection — no prior to archive.
-        let current = self.catalog.lock().await.get(name).cloned();
+        let current = self.catalog.read().await.get(name).cloned();
         if let Some(prev) = &current {
             self.archive_version(name, prev).await?;
         }
 
         let restored_cid = hex(&target.data_cid);
         self.catalog
-            .lock()
+            .write()
             .await
             .insert(name.to_string(), target);
         self.invalidate_cache(name).await;

@@ -149,7 +149,7 @@ impl Gateway {
 
         let manifest = self
             .catalog
-            .lock()
+            .read()
             .await
             .get(name)
             .cloned()
@@ -389,7 +389,7 @@ impl Gateway {
     /// `holofs embed-all` CLI command.
     pub async fn embed_all_pending(&self) -> Result<(usize, usize), GatewayError> {
         let names: Vec<String> = {
-            let cat = self.catalog.lock().await;
+            let cat = self.catalog.read().await;
             cat.entries
                 .iter()
                 .filter_map(|(name, m)| {

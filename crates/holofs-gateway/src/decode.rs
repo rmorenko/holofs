@@ -76,7 +76,7 @@ impl Gateway {
         // auto-repair since `repair_node` only rewrites
         // `shard_hashes`, not dimensions).
         let (width, height) = {
-            let cat = self.catalog.lock().await;
+            let cat = self.catalog.read().await;
             let m = cat.get(name)?;
             (m.width, m.height)
         };
@@ -114,7 +114,7 @@ impl Gateway {
     ) -> Result<DecodedObject, GatewayError> {
         let manifest = self
             .catalog
-            .lock()
+            .read()
             .await
             .get(name)
             .cloned()

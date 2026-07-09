@@ -88,7 +88,7 @@ impl Gateway {
     pub async fn inspect(&self, name: &str) -> Result<InspectInfo, GatewayError> {
         let manifest = self
             .catalog
-            .lock()
+            .read()
             .await
             .get(name)
             .cloned()
@@ -150,7 +150,7 @@ impl Gateway {
     ) -> Result<Option<ShardPayload>, GatewayError> {
         let manifest = self
             .catalog
-            .lock()
+            .read()
             .await
             .get(name)
             .cloned()

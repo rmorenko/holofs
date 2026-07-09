@@ -83,7 +83,7 @@ impl Gateway {
     pub async fn fingerprint_of(&self, name: &str) -> Result<FingerprintInfo, GatewayError> {
         let manifest = self
             .catalog
-            .lock()
+            .read()
             .await
             .get(name)
             .cloned()
@@ -117,7 +117,7 @@ impl Gateway {
         name: &str,
         scope: SimilarScope,
     ) -> Result<SimilarReport, GatewayError> {
-        let snapshot = self.catalog.lock().await.clone();
+        let snapshot = self.catalog.read().await.clone();
         let manifest = snapshot
             .get(name)
             .cloned()

@@ -41,7 +41,7 @@ pub async fn get_catalog(
     use crate::filter::{apply_filter, CatalogFilter};
 
     let gw = expect_context::<Arc<holofs_gateway::Gateway>>();
-    let catalog = gw.catalog().lock().await;
+    let catalog = gw.catalog().read().await;
     let filter = CatalogFilter::parse(&name_glob, &date_from, &date_to)
         .map_err(|e| ServerFnError::<server_fn::error::NoCustomError>::ServerError(e))?;
     let raw: Vec<CatalogEntry> = catalog

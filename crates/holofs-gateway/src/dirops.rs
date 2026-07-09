@@ -67,7 +67,7 @@ impl Gateway {
     pub async fn remove_object(&self, name: &str) -> Result<RemoveResult, GatewayError> {
         catalog_path::validate(name)
             .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
-        let mut cat = self.catalog.lock().await;
+        let mut cat = self.catalog.write().await;
         if matches!(cat.get(name), Some(m) if m.kind == ObjectKind::Directory) {
             return Err(GatewayError::IsDirectory);
         }
@@ -99,7 +99,7 @@ impl Gateway {
     pub async fn mkdir(&self, path: &str) -> Result<MkdirResult, GatewayError> {
         catalog_path::validate(path)
             .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
-        let mut cat = self.catalog.lock().await;
+        let mut cat = self.catalog.write().await;
         if cat.get(path).is_some() {
             return Err(GatewayError::AlreadyExists);
         }
@@ -132,7 +132,7 @@ impl Gateway {
     pub async fn rmdir(&self, path: &str) -> Result<RmdirResult, GatewayError> {
         catalog_path::validate(path)
             .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
-        let mut cat = self.catalog.lock().await;
+        let mut cat = self.catalog.write().await;
         match cat.get(path) {
             Some(m) if m.kind == ObjectKind::Directory => {}
             Some(_) => return Err(GatewayError::NotADirectory),
@@ -188,7 +188,7 @@ impl Gateway {
                 "cannot rename a directory into its own descendant".into(),
             ));
         }
-        let mut cat = self.catalog.lock().await;
+        let mut cat = self.catalog.write().await;
         let entry = cat.get(old).cloned().ok_or(GatewayError::NotFound)?;
         if cat.get(new).is_some() {
             return Err(GatewayError::AlreadyExists);
@@ -249,7 +249,7 @@ impl Gateway {
             catalog_path::validate(prefix)
                 .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
         }
-        let cat = self.catalog.lock().await;
+        let cat = self.catalog.read().await;
         if !prefix.is_empty() {
             match cat.get(prefix) {
                 Some(m) if m.kind == ObjectKind::Directory => {}

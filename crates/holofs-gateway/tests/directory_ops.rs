@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use holofs_client::LiveNodes;
 use holofs_core::gf::Gf;
@@ -18,7 +18,7 @@ use holofs_model::placement::Placement;
 
 fn build_gateway() -> Arc<Gateway> {
     let gf = Arc::new(Gf::new());
-    let catalog = Arc::new(Mutex::new(Directory::new()));
+    let catalog = Arc::new(RwLock::new(Directory::new()));
     let live: Arc<LiveNodes> = Arc::new(Vec::new());
     let cluster = Arc::new(ClusterInfo {
         node_addrs: Vec::new(),
@@ -91,7 +91,7 @@ async fn rmdir_rejects_non_directory() {
     // Insert a fake non-directory entry by reaching into the catalog mutex.
     // We bypass ingest_bytes intentionally — this is a focused catalog test.
     {
-        let mut cat = gw.catalog().lock().await;
+        let mut cat = gw.catalog().write().await;
         cat.insert(
             "docs/readme.txt".into(),
             holofs_model::manifest::Manifest::directory(0xAAAA, 0),
@@ -117,7 +117,7 @@ async fn rename_carries_descendants_along() {
     let res = gw.rename("a/b", "dest/b").await.expect("rename");
     assert_eq!(res.moved_entries, 2); // a/b + a/b/c
 
-    let cat = gw.catalog().lock().await;
+    let cat = gw.catalog().read().await;
     assert!(cat.get("a").is_some());
     assert!(cat.get("a/b").is_none());
     assert!(cat.get("a/b/c").is_none());

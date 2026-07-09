@@ -24,7 +24,7 @@ pub(crate) async fn list_catalog(
     let rows: Vec<CatalogRow> = if recursive {
         // Walk the catalog snapshot ourselves so we get every
         // descendant — `list_dir` is intentionally one-level deep.
-        let cat = h.gateway.catalog().lock().await.clone();
+        let cat = h.gateway.catalog().read().await.clone();
         let needle = if prefix.is_empty() {
             String::new()
         } else {

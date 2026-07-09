@@ -55,7 +55,7 @@ impl Gateway {
         use holofs_model::manifest::ObjectEncoding;
         let live = self.effective_live().await;
         let manifest = {
-            let cat = self.catalog.lock().await;
+            let cat = self.catalog.read().await;
             cat.get(name).cloned().ok_or_else(|| {
                 ClientError::RemoteError(format!("decode_with_autorepair: {name} not in catalog"))
             })?
@@ -94,7 +94,7 @@ impl Gateway {
                         return Err(ClientError::LayerLost { channel, layer });
                     }
                     let repaired = {
-                        let cat = self.catalog.lock().await;
+                        let cat = self.catalog.read().await;
                         cat.get(name).cloned().ok_or_else(|| {
                             ClientError::RemoteError(format!(
                                 "decode_with_autorepair: {name} disappeared mid-repair"
@@ -134,7 +134,7 @@ impl Gateway {
                 // wrote it back, so `cat.get(name)` returns the
                 // repaired version.
                 let repaired = {
-                    let cat = self.catalog.lock().await;
+                    let cat = self.catalog.read().await;
                     cat.get(name).cloned().ok_or_else(|| {
                         ClientError::RemoteError(format!(
                             "decode_with_autorepair: {name} disappeared from catalog mid-repair"
@@ -171,7 +171,7 @@ impl Gateway {
         use std::collections::HashSet;
         let live = self.effective_live().await;
         let mut manifest = {
-            let cat = self.catalog.lock().await;
+            let cat = self.catalog.read().await;
             cat.get(name).cloned().ok_or_else(|| {
                 ClientError::RemoteError(format!("repair_object_inplace: {name} not in catalog"))
             })?
@@ -281,7 +281,7 @@ impl Gateway {
                 eprintln!("repair_object_inplace: {name} node {node}: {e}");
             }
         }
-        let mut cat = self.catalog.lock().await;
+        let mut cat = self.catalog.write().await;
         cat.insert(name.to_string(), manifest);
         drop(cat);
         // N4: best-effort persist — the shard-side repair is complete
@@ -343,7 +343,7 @@ impl Gateway {
         //    catalog under `name`, so we skip that name explicitly —
         //    otherwise `owned` would always empty itself out.
         {
-            let cat = self.catalog.lock().await;
+            let cat = self.catalog.read().await;
             for (n, m) in cat.entries.iter() {
                 if m.kind == ObjectKind::Directory {
                     continue;

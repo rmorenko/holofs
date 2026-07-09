@@ -66,7 +66,7 @@ impl Gateway {
         name_a: &str,
         name_b: &str,
     ) -> Result<DiffReport, GatewayError> {
-        let snapshot = self.catalog.lock().await.clone();
+        let snapshot = self.catalog.read().await.clone();
         let a = snapshot
             .get(name_a)
             .cloned()

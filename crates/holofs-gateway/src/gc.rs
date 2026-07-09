@@ -114,7 +114,7 @@ impl Gateway {
         let mut live_cids: HashSet<[u8; 32]> = HashSet::new();
         let mut manifests_scanned: u64 = 0;
         {
-            let cat = self.catalog.lock().await;
+            let cat = self.catalog.read().await;
             for (_, m) in cat.entries.iter() {
                 if m.kind == ObjectKind::Directory {
                     continue;

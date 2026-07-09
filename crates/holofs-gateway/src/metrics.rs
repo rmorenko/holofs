@@ -132,7 +132,7 @@ impl Gateway {
     ///    bass / mid / treble breakdown via even thirds of the layer
     ///    set.
     pub async fn file_metrics(&self, name: &str) -> Result<FileMetrics, GatewayError> {
-        let snapshot = self.catalog.lock().await.clone();
+        let snapshot = self.catalog.read().await.clone();
         let manifest = snapshot
             .get(name)
             .cloned()

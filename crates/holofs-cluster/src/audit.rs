@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::reputation::{Reputation, DEFAULT_THRESHOLD};
 use holofs_client::pool;
@@ -138,7 +138,7 @@ pub async fn audit_shard(
 /// one picks the node via `manifest.place_shard()`, queries it, and updates
 /// its reputation.
 pub async fn tick_once(
-    catalog: Arc<Mutex<Directory>>,
+    catalog: Arc<RwLock<Directory>>,
     reputation: Arc<Mutex<Reputation>>,
     config: &AuditConfig,
     rng: &mut Rng,
@@ -153,7 +153,7 @@ pub async fn tick_once(
     // placement (see holofs-cluster issue tracker; pre-    // bug).
     let snapshot: Vec<(String, std::sync::Arc<holofs_model::manifest::Manifest>)> = {
         use holofs_model::manifest::ObjectKind;
-        let cat = catalog.lock().await;
+        let cat = catalog.read().await;
         cat.entries
             .iter()
             .filter(|(_, m)| m.kind != ObjectKind::Directory && !m.nodes.is_empty())
@@ -252,7 +252,7 @@ pub async fn tick_once(
 /// N1: `shutdown` short-circuits both the tick body and the inter-tick sleep
 /// so a SIGTERM lands within one `interval`-tick worst case.
 pub async fn run_periodic(
-    catalog: Arc<Mutex<Directory>>,
+    catalog: Arc<RwLock<Directory>>,
     reputation: Arc<Mutex<Reputation>>,
     config: AuditConfig,
     on_event: impl Fn(&AuditEvent) + Send + Sync + 'static,
@@ -379,7 +379,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_once_returns_no_events_for_empty_catalog() {
-        let cat = Arc::new(Mutex::new(Directory::new()));
+        let cat = Arc::new(RwLock::new(Directory::new()));
         let rep = Arc::new(Mutex::new(Reputation::new(4, 1.0)));
         let cfg = AuditConfig::default();
         let mut rng = Rng::new(0xCA75);

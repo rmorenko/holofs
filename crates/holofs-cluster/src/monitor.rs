@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::health::collect_layer_stats;
 use crate::reputation::Reputation;
@@ -113,7 +113,7 @@ pub struct MonitorState {
 /// same cluster.
 pub async fn tick_once(
     gf: &Gf,
-    catalog: Arc<Mutex<Directory>>,
+    catalog: Arc<RwLock<Directory>>,
     state: &mut MonitorState,
     config: &MonitorConfig,
     rng: &mut Rng,
@@ -131,7 +131,7 @@ pub async fn tick_once(
     //    see audit::tick_once for the same fix).
     let nodes_addrs: Vec<String> = {
         use holofs_model::manifest::ObjectKind;
-        let cat = catalog.lock().await;
+        let cat = catalog.read().await;
         match cat
             .entries
             .values()
@@ -194,12 +194,12 @@ pub async fn tick_once(
 
     // 4. Per-object margin → LowMargin events.
     let names: Vec<String> = {
-        let cat = catalog.lock().await;
+        let cat = catalog.read().await;
         cat.names()
     };
     for name in &names {
         let manifest = {
-            let cat = catalog.lock().await;
+            let cat = catalog.read().await;
             cat.get(name).cloned()
         };
         let Some(m) = manifest else { continue };
@@ -228,7 +228,7 @@ pub async fn tick_once(
     // 5. For every revived node — run repair_node for each object.
     for &node in &revived {
         for name in &names {
-            let mut cat = catalog.lock().await;
+            let mut cat = catalog.write().await;
             let Some(m) = cat.get_mut(name) else {
                 continue;
             };
@@ -261,7 +261,7 @@ pub async fn tick_once(
 /// waiting for the next `sleep` to complete.
 pub async fn run_periodic(
     gf: Arc<Gf>,
-    catalog: Arc<Mutex<Directory>>,
+    catalog: Arc<RwLock<Directory>>,
     config: MonitorConfig,
     reputation: Option<Arc<Mutex<Reputation>>>,
     on_event: impl Fn(&Event) + Send + Sync + 'static,
@@ -430,7 +430,7 @@ mod tests {
     async fn tick_once_on_empty_catalog_returns_no_events() {
         let _g = DisablePool::new();
         let gf = Gf::new();
-        let cat = Arc::new(Mutex::new(Directory::new()));
+        let cat = Arc::new(RwLock::new(Directory::new()));
         let mut state = MonitorState::default();
         let mut rng = Rng::new(1);
         let cfg = MonitorConfig::default();
@@ -456,7 +456,7 @@ mod tests {
         let m = manifest_for(vec![a, b]);
         let mut cat = Directory::new();
         cat.insert("photos/a.png".into(), m);
-        let cat = Arc::new(Mutex::new(cat));
+        let cat = Arc::new(RwLock::new(cat));
 
         let gf = Gf::new();
         let mut state = MonitorState::default();
@@ -500,7 +500,7 @@ mod tests {
         let m = manifest_for(vec![a, b]);
         let mut cat = Directory::new();
         cat.insert("photos/x.png".into(), m);
-        let cat = Arc::new(Mutex::new(cat));
+        let cat = Arc::new(RwLock::new(cat));
         let gf = Gf::new();
         let mut state = MonitorState::default();
         let mut rng = Rng::new(2);
@@ -535,7 +535,7 @@ mod tests {
         };
         let mut cat = Directory::new();
         cat.insert("photos".into(), dir_manifest);
-        let cat = Arc::new(Mutex::new(cat));
+        let cat = Arc::new(RwLock::new(cat));
         let gf = Gf::new();
         let mut state = MonitorState::default();
         let mut rng = Rng::new(3);

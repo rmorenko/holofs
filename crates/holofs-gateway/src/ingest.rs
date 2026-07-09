@@ -306,7 +306,7 @@ impl Gateway {
         // Reject before doing any expensive work: cannot write where a
         // directory already lives, and the parent directory must exist.
         {
-            let cat = self.catalog.lock().await;
+            let cat = self.catalog.read().await;
             if let Some(existing) = cat.get(name) {
                 if existing.kind == ObjectKind::Directory {
                     return Err(GatewayError::AlreadyExists);
@@ -332,7 +332,7 @@ impl Gateway {
         if live.is_empty() {
             return Err(GatewayError::ClusterDegraded);
         }
-        let prev = self.catalog.lock().await.get(name).cloned();
+        let prev = self.catalog.read().await.get(name).cloned();
         if let Some(old) = &prev {
             // when versioning is on we archive the prior
             // manifest as a side file AND skip the shard purge — the
@@ -379,7 +379,7 @@ impl Gateway {
         let width = manifest.width;
         let height = manifest.height;
         self.catalog
-            .lock()
+            .write()
             .await
             .insert(name.to_string(), manifest);
         self.invalidate_cache(name).await;
@@ -434,7 +434,7 @@ impl Gateway {
         catalog_path::validate(name)
             .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
         {
-            let cat = self.catalog.lock().await;
+            let cat = self.catalog.read().await;
             if let Some(existing) = cat.get(name) {
                 if existing.kind == ObjectKind::Directory {
                     return Err(GatewayError::AlreadyExists);
@@ -466,7 +466,7 @@ impl Gateway {
         if live.is_empty() {
             return Err(GatewayError::ClusterDegraded);
         }
-        let prev = self.catalog.lock().await.get(name).cloned();
+        let prev = self.catalog.read().await.get(name).cloned();
         if let Some(old) = &prev {
             if self.versions_enabled().await {
                 if let Err(e) = self.archive_version(name, old).await {
@@ -492,7 +492,7 @@ impl Gateway {
         let width = manifest.width;
         let height = manifest.height;
         self.catalog
-            .lock()
+            .write()
             .await
             .insert(name.to_string(), manifest);
         self.invalidate_cache(name).await;
@@ -567,7 +567,7 @@ impl Gateway {
         // stage anything so the caller sees a clean 4xx rather than an
         // orphaned `Failed` manifest cluttering the catalog.
         {
-            let cat = self.catalog.lock().await;
+            let cat = self.catalog.read().await;
             if let Some(existing) = cat.get(name) {
                 if existing.kind == ObjectKind::Directory {
                     return Err(GatewayError::AlreadyExists);
@@ -644,7 +644,7 @@ impl Gateway {
         // Handle prior object: archive-if-versions, else purge orphaned
         // shards. Do it before we insert the placeholder so orphan sweep
         // can't see two entries under the same name.
-        let prev = self.catalog.lock().await.get(name).cloned();
+        let prev = self.catalog.read().await.get(name).cloned();
         if let Some(old) = &prev {
             if self.versions_enabled().await {
                 if let Err(e) = self.archive_version(name, old).await {
@@ -658,7 +658,7 @@ impl Gateway {
         }
 
         self.catalog
-            .lock()
+            .write()
             .await
             .insert(name.to_string(), placeholder);
         self.invalidate_cache(name).await;
@@ -728,7 +728,7 @@ impl Gateway {
                 .map(|(m, _, total)| (m, total))
         };
 
-        let mut cat = self.catalog.lock().await;
+        let mut cat = self.catalog.write().await;
         match result {
             Ok((mut real, _total)) => {
                 real.created_at_unix = now_unix();

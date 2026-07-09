@@ -12,7 +12,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use holofs_client::put_object;
 use holofs_cluster::audit::{self, AuditConfig, AuditEvent, AuditOutcome};
@@ -318,7 +318,7 @@ pub async fn bootstrap_cluster(
         info!(objects = directory.len(), "seeded catalog");
     }
 
-    let catalog = Arc::new(Mutex::new(directory));
+    let catalog = Arc::new(RwLock::new(directory));
 
     // N5: reputation state persists across restarts. Path fixed at
     // `<storage>/reputation.bin`. Any load failure (missing, corrupt,

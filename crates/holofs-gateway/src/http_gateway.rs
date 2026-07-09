@@ -117,7 +117,7 @@ pub struct Gateway {
     // and each of those reaches into shared state. The Gateway type
     // itself stays `pub`; the fields don't leak outside the crate
     // boundary.
-    pub(crate) catalog: Arc<Mutex<Directory>>,
+    pub(crate) catalog: Arc<RwLock<Directory>>,
     /// Optional path to the catalog file. If set, the catalog is saved
     /// atomically on each change (PUT/DELETE).
     pub(crate) catalog_path: Option<std::path::PathBuf>,
@@ -303,7 +303,7 @@ impl Gateway {
     /// Construct an in-memory Gateway (catalog not persisted to disk).
     pub fn new(
         gf: Arc<Gf>,
-        catalog: Arc<Mutex<Directory>>,
+        catalog: Arc<RwLock<Directory>>,
         live: Arc<LiveNodes>,
         cluster: Arc<ClusterInfo>,
     ) -> Arc<Self> {
@@ -357,7 +357,7 @@ impl Gateway {
     /// persists atomically via [`Self::persist_catalog`].
     pub fn new_persistent(
         gf: Arc<Gf>,
-        catalog: Arc<Mutex<Directory>>,
+        catalog: Arc<RwLock<Directory>>,
         live: Arc<LiveNodes>,
         cluster: Arc<ClusterInfo>,
         catalog_path: std::path::PathBuf,
@@ -580,7 +580,7 @@ impl Gateway {
     }
 
     /// Shared catalog handle. Lock to read or mutate the directory.
-    pub fn catalog(&self) -> &Arc<Mutex<Directory>> {
+    pub fn catalog(&self) -> &Arc<RwLock<Directory>> {
         &self.catalog
     }
 
@@ -658,7 +658,7 @@ impl Gateway {
         // flushed_epoch after the write succeeds; followers waiting
         // on the mutex see their ticket covered.
         let (snapshot, flush_epoch) = {
-            let cat = self.catalog.lock().await;
+            let cat = self.catalog.read().await;
             let ep = self.persist_dirty_epoch.load(Ordering::Acquire);
             (cat.clone(), ep)
         };
@@ -703,7 +703,7 @@ mod tests {
 
     fn make_gw(catalog_path: Option<std::path::PathBuf>) -> Arc<Gateway> {
         let gf = Arc::new(Gf::new());
-        let cat = Arc::new(Mutex::new(Directory::default()));
+        let cat = Arc::new(RwLock::new(Directory::default()));
         let cluster = Arc::new(ClusterInfo {
             node_addrs: vec!["127.0.0.1:9999".into()],
             zones: vec![0],

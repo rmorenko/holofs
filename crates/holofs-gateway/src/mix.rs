@@ -71,7 +71,7 @@ impl Gateway {
         name_b: &str,
         split: u8,
     ) -> Result<MixedImage, GatewayError> {
-        let snapshot = self.catalog.lock().await.clone();
+        let snapshot = self.catalog.read().await.clone();
         let a = snapshot
             .get(name_a)
             .cloned()
@@ -127,7 +127,7 @@ impl Gateway {
     ) -> Result<FilteredAudio, GatewayError> {
         let manifest = self
             .catalog
-            .lock()
+            .read()
             .await
             .get(name)
             .cloned()

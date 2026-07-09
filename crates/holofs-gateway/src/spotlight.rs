@@ -70,7 +70,7 @@ impl Gateway {
     ) -> Result<SpotlightImage, GatewayError> {
         let manifest = self
             .catalog
-            .lock()
+            .read()
             .await
             .get(name)
             .cloned()
@@ -178,7 +178,7 @@ impl Gateway {
     ) -> Result<SpotlightImage, GatewayError> {
         let manifest = self
             .catalog
-            .lock()
+            .read()
             .await
             .get(name)
             .cloned()

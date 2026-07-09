@@ -37,7 +37,7 @@ use holofs_model::manifest::ManifestState;
 /// read handler's usual 404 path takes over from there) so the
 /// caller can treat "no gate" the same as `Ready`.
 async fn manifest_state(gw: &Gateway, name: &str) -> ManifestState {
-    let cat = gw.catalog().lock().await;
+    let cat = gw.catalog().read().await;
     cat.get(name)
         .map(|m| m.state)
         .unwrap_or(ManifestState::Ready)
@@ -150,7 +150,7 @@ pub async fn preview_stream(
     // We do not snapshot the manifest itself — gateway::decode_object
     // re-reads it from the catalog on each call, which is fine.
     let nlayers = {
-        let cat = gw.catalog().lock().await;
+        let cat = gw.catalog().read().await;
         match cat.get(&name) {
             Some(m) if m.kind == ObjectKind::Image => m.nlayers,
             Some(_) => {
