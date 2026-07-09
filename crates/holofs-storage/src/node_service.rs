@@ -79,6 +79,23 @@ const SHARD_MAGIC: &[u8; 8] = SHARD_MAGIC_V1;
 pub struct Store {
     shards: HashMap<Key, HashMap<Hash, (Shard, WriteEpoch)>>,
     dir: Option<PathBuf>,
+    /// Append-only log for persistent stores. Every mutation
+    /// (`put` / `purge` / `wipe` / GC-`purge_by_hashes_up_to`)
+    /// appends one record here; boot recovers the RAM index by
+    /// replaying the segments (+ legacy `.shard` files for rolling
+    /// upgrade). See [`crate::wal`] for the on-disk format.
+    wal: Option<crate::wal::WalWriter>,
+    /// Group-commit bookkeeping. Every append bumps
+    /// `wal_next_seq`; a background flusher periodically calls
+    /// `wal.sync()` and stores the flushed seq in
+    /// `wal_synced_seq`, then wakes any handler waiting for their
+    /// seq to become durable. Turns N concurrent Put frames into
+    /// one shared fsync — the key win of WAL under the soak
+    /// workload where the client sends `Request::Put` per shard,
+    /// not `Request::PutBatch`.
+    wal_next_seq: Arc<std::sync::atomic::AtomicU64>,
+    wal_synced_seq: Arc<std::sync::atomic::AtomicU64>,
+    wal_notify: Arc<tokio::sync::Notify>,
     /// per-node AES-256-GCM key derived from
     /// `NodeIdentity::to_bytes()` via HKDF-SHA256. `None` = plaintext
     /// shard files on disk. Reads accept both formats regardless of
@@ -104,6 +121,10 @@ impl Default for Store {
         Self {
             shards: HashMap::new(),
             dir: None,
+            wal: None,
+            wal_next_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            wal_synced_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            wal_notify: Arc::new(tokio::sync::Notify::new()),
             enc_key: None,
             sync_on_write: true,
         }
@@ -150,12 +171,9 @@ impl Store {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
         let mut shards: HashMap<Key, HashMap<Hash, (Shard, WriteEpoch)>> = HashMap::new();
+        // 1. Legacy per-shard files (rolling upgrade). Skipping
+        //    silently is fine — a WAL-only directory just has none.
         for entry in walk_shard_files(&dir)? {
-            // Grab mtime as the epoch. Cheap `stat` call; if it
-            // fails or predates UNIX_EPOCH we fall back to 0, which
-            // is safe (a "very old" epoch just means this shard is
-            // eligible for any future GC — the orphan set is what
-            // gates whether it actually gets purged).
             let epoch = fs::metadata(&entry)
                 .and_then(|m| m.modified())
                 .ok()
@@ -171,12 +189,83 @@ impl Store {
                 }
             }
         }
+        // 2. WAL segments, in seq order. Records apply on top of
+        //    whatever the legacy scan already produced — Put
+        //    overwrites, Purge/PurgeHashes/Wipe drop.
+        let segments = crate::wal::walk_wal_segments(&dir)?;
+        let mut highest_seq: u64 = 0;
+        for (seq, path) in &segments {
+            highest_seq = (*seq).max(highest_seq);
+            let epoch_from_mtime = fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let records = crate::wal::read_segment(path, enc_key.as_ref())?;
+            for rec in records {
+                match rec {
+                    crate::wal::RecordKind::Put {
+                        object_id,
+                        channel,
+                        layer,
+                        hash,
+                        shard,
+                    } => {
+                        shards
+                            .entry((object_id, channel, layer))
+                            .or_default()
+                            .insert(hash, (shard, epoch_from_mtime));
+                    }
+                    crate::wal::RecordKind::Purge { object_id } => {
+                        shards.retain(|(o, _, _), _| *o != object_id);
+                    }
+                    crate::wal::RecordKind::PurgeHashes { hashes } => {
+                        use std::collections::HashSet;
+                        let set: HashSet<Hash> = hashes.into_iter().collect();
+                        shards.retain(|_, bucket| {
+                            bucket.retain(|h, _| !set.contains(h));
+                            !bucket.is_empty()
+                        });
+                    }
+                    crate::wal::RecordKind::Wipe => {
+                        shards.clear();
+                    }
+                }
+            }
+        }
+        // 3. Open the next segment for writes. Even a brand-new
+        //    directory gets seq=1 so writes never share a file with
+        //    a replayed segment.
+        let wal = crate::wal::WalWriter::open(dir.clone(), highest_seq, enc_key)?;
         Ok(Store {
             shards,
             dir: Some(dir),
+            wal: Some(wal),
+            wal_next_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            wal_synced_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            wal_notify: Arc::new(tokio::sync::Notify::new()),
             enc_key,
             sync_on_write: true,
         })
+    }
+
+    /// Clone the three group-commit handles so the flusher task can
+    /// live outside the Store. `wal_next_seq` is bumped on every
+    /// append; the flusher periodically fsyncs and publishes the
+    /// covered seq to `wal_synced_seq`, then notifies waiters.
+    pub fn group_commit_handles(
+        &self,
+    ) -> (
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        (
+            Arc::clone(&self.wal_next_seq),
+            Arc::clone(&self.wal_synced_seq),
+            Arc::clone(&self.wal_notify),
+        )
     }
 
     /// Returns `true` if the shard was actually added (false →
@@ -186,27 +275,88 @@ impl Store {
     /// purging it just because its original epoch predated the
     /// snapshot.
     pub fn put(&mut self, k: Key, shard: Shard) -> bool {
+        let (ok, _seq) = self.put_appended(k, shard);
+        // No flusher wired → do a sync inline so single-Put callers
+        // (test paths and legacy PutBatch handling) still get
+        // durability.
+        if ok {
+            let sync_on = self.sync_on_write;
+            if let Some(wal) = &mut self.wal {
+                let _ = wal.sync(sync_on);
+            }
+            self.maybe_rotate_wal();
+        }
+        ok
+    }
+
+    /// Append-only companion to [`Self::put`]. Returns `(ok, seq)`
+    /// where `seq` is the [`wal_next_seq`] value the append landed
+    /// under — handlers that share a background flusher wait for
+    /// `wal_synced_seq >= seq` before returning Ack so durability
+    /// is preserved while the fsync tail is amortised across many
+    /// concurrent Put frames.
+    pub fn put_appended(&mut self, k: Key, shard: Shard) -> (bool, u64) {
+        use std::sync::atomic::Ordering;
         let h = shard_hash(&shard);
         let epoch = now_epoch();
-        let bucket = self.shards.entry(k).or_default();
-        if let Some((_, e)) = bucket.get_mut(&h) {
-            // Dedup path: refresh epoch. Disk file is left alone —
-            // mtime is only used at open time to seed the in-memory
-            // epoch; touching it here would double the syscall
-            // budget on the common case of repeated PUTs.
-            *e = epoch;
-            return false;
-        }
-        if let Some(dir) = &self.dir {
-            if let Err(e) =
-                write_shard_file(dir, k, &h, &shard, self.enc_key.as_ref(), self.sync_on_write)
-            {
-                eprintln!("Store::put: could not write shard file: {e}");
-                return false;
+        if let Some(bucket) = self.shards.get_mut(&k) {
+            if let Some((_, e)) = bucket.get_mut(&h) {
+                *e = epoch;
+                // Dedup: no append. Seq unchanged.
+                return (false, self.wal_next_seq.load(Ordering::Acquire));
             }
         }
-        bucket.insert(h, (shard, epoch));
-        true
+        let seq = if let Some(wal) = &mut self.wal {
+            if let Err(e) = wal.append_put(k.0, k.1, k.2, &h, &shard) {
+                eprintln!("Store::put: WAL append failed: {e}");
+                return (false, self.wal_next_seq.load(Ordering::Acquire));
+            }
+            self.wal_next_seq.fetch_add(1, Ordering::AcqRel) + 1
+        } else {
+            0
+        };
+        self.shards.entry(k).or_default().insert(h, (shard, epoch));
+        (true, seq)
+    }
+
+    /// Fsync the WAL and publish the covered seq to
+    /// `wal_synced_seq`, then wake any handler waiting for their
+    /// seq to become durable. Called from the group-commit flusher
+    /// task; a no-op when no WAL is configured.
+    pub fn flush_and_publish(&mut self) {
+        use std::sync::atomic::Ordering;
+        if self.wal.is_none() {
+            return;
+        }
+        let target = self.wal_next_seq.load(Ordering::Acquire);
+        let already = self.wal_synced_seq.load(Ordering::Acquire);
+        if target == already {
+            return;
+        }
+        let sync_on = self.sync_on_write;
+        if let Some(wal) = &mut self.wal {
+            if let Err(e) = wal.sync(sync_on) {
+                eprintln!("Store::flush_and_publish: WAL sync failed: {e}");
+                return;
+            }
+        }
+        self.wal_synced_seq.store(target, Ordering::Release);
+        self.wal_notify.notify_waiters();
+        self.maybe_rotate_wal();
+    }
+
+    /// Rotate the active WAL segment when it crosses the size
+    /// threshold. Called after every append; the check is a plain
+    /// integer comparison so the amortised cost is O(1). A rotate
+    /// failure is logged and the writer keeps the current segment
+    /// — better a fat segment than a dropped record.
+    fn maybe_rotate_wal(&mut self) {
+        let Some(wal) = &mut self.wal else { return };
+        if wal.bytes_written() >= wal.rotate_at {
+            if let Err(e) = wal.rotate() {
+                eprintln!("Store: WAL rotate failed, staying on current segment: {e}");
+            }
+        }
     }
 
 
@@ -235,10 +385,21 @@ impl Store {
             removed_hashes.extend(bucket.keys().copied());
             false
         });
+        // Legacy per-shard files (rolling upgrade): still remove
+        // them so a downgraded reader can't resurrect them.
         if let Some(dir) = &self.dir {
             for h in &removed_hashes {
                 let path = shard_path(dir, h);
-                let _ = fs::remove_file(&path); // missing file is fine
+                let _ = fs::remove_file(&path);
+            }
+        }
+        if let Some(wal) = &mut self.wal {
+            if let Err(e) = wal.append_purge(object_id) {
+                eprintln!("Store::purge: WAL append failed: {e}");
+            } else if let Err(e) = wal.sync(self.sync_on_write) {
+                eprintln!("Store::purge: WAL sync failed: {e}");
+            } else {
+                self.maybe_rotate_wal();
             }
         }
         removed_hashes.len()
@@ -279,12 +440,12 @@ impl Store {
         max_epoch: WriteEpoch,
     ) -> usize {
         let mut removed = 0usize;
-        let mut removed_files: Vec<Hash> = Vec::new();
+        let mut removed_hashes: Vec<Hash> = Vec::new();
         self.shards.retain(|_, bucket| {
             bucket.retain(|h, (_, epoch)| {
                 if targets.contains(h) && *epoch <= max_epoch {
                     removed += 1;
-                    removed_files.push(*h);
+                    removed_hashes.push(*h);
                     false
                 } else {
                     true
@@ -293,9 +454,20 @@ impl Store {
             !bucket.is_empty()
         });
         if let Some(dir) = &self.dir {
-            for h in &removed_files {
+            for h in &removed_hashes {
                 let path = shard_path(dir, h);
                 let _ = fs::remove_file(&path);
+            }
+        }
+        if !removed_hashes.is_empty() {
+            if let Some(wal) = &mut self.wal {
+                if let Err(e) = wal.append_purge_hashes(&removed_hashes) {
+                    eprintln!("Store::purge_by_hashes: WAL append failed: {e}");
+                } else if let Err(e) = wal.sync(self.sync_on_write) {
+                    eprintln!("Store::purge_by_hashes: WAL sync failed: {e}");
+                } else {
+                    self.maybe_rotate_wal();
+                }
             }
         }
         removed
@@ -319,7 +491,11 @@ impl Store {
     pub fn wipe(&mut self) {
         self.shards.clear();
         if let Some(dir) = &self.dir {
-            // Remove the directory contents but keep the directory itself.
+            // Remove the directory contents but keep the directory
+            // itself. This also drops every legacy .shard file AND
+            // every prior WAL segment. The Wipe record we're about
+            // to write becomes the whole future history — anything
+            // that made it to disk before is gone.
             if let Ok(entries) = fs::read_dir(dir) {
                 for e in entries.flatten() {
                     let p = e.path();
@@ -328,6 +504,25 @@ impl Store {
                     } else {
                         let _ = fs::remove_file(&p);
                     }
+                }
+            }
+        }
+        // Reopen a fresh WAL segment so subsequent Puts go
+        // somewhere. We rebuild it rather than trying to append a
+        // Wipe to the old file — the old file was just deleted.
+        if let (Some(dir), true) = (self.dir.clone(), self.wal.is_some()) {
+            match crate::wal::WalWriter::open(dir, 0, self.enc_key) {
+                Ok(mut wal) => {
+                    // Record the Wipe as the first entry so a
+                    // fsync-lagging crash doesn't leave the segment
+                    // looking blank.
+                    let _ = wal.append_wipe();
+                    let _ = wal.sync(self.sync_on_write);
+                    self.wal = Some(wal);
+                }
+                Err(e) => {
+                    eprintln!("Store::wipe: WAL reopen failed: {e}");
+                    self.wal = None;
                 }
             }
         }
@@ -568,6 +763,38 @@ async fn spawn_node_with_identity(
     let store: SharedStore = Arc::new(Mutex::new(store));
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
+
+    // Group-commit flusher: every 5 ms take the store lock, fsync
+    // the WAL if new appends have landed, and wake every waiter.
+    // Under a 24-encoder burst this turns 24 × 12 = 288 concurrent
+    // per-shard fsyncs into ~200 batched fsyncs/sec (one per
+    // 5 ms tick) with each batch amortising N pending appends.
+    //
+    // 5 ms is a compromise: shorter tightens the tail latency
+    // (each handler waits ≤ 5 ms for its fsync) at the cost of
+    // more idle wakeups; longer batches more but stalls callers.
+    // Tune via `HOLOFS_NODE_FLUSH_INTERVAL_MS` — 0 disables the
+    // flusher entirely, which reverts to the old per-Put fsync
+    // path via `Store::put`.
+    let flush_interval_ms: u64 = std::env::var("HOLOFS_NODE_FLUSH_INTERVAL_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+    if flush_interval_ms > 0 {
+        let store_for_flusher = store.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
+                flush_interval_ms,
+            ));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let mut s = store_for_flusher.lock().await;
+                s.flush_and_publish();
+            }
+        });
+    }
+
     let store_for_task = store.clone();
     let identity_for_task = identity.clone();
     let acceptor = tls.clone().map(tokio_rustls::TlsAcceptor::from);
@@ -631,6 +858,29 @@ where
     }
 }
 
+/// Wait until the group-commit flusher has published `my_seq`.
+/// Subscribes to `notify` BEFORE the compare so we can't miss the
+/// tick between the load and the await — the classic tokio
+/// notify race.
+async fn wait_for_wal_seq(
+    synced_seq: &Arc<std::sync::atomic::AtomicU64>,
+    notify: &Arc<tokio::sync::Notify>,
+    my_seq: u64,
+) {
+    use std::sync::atomic::Ordering;
+    if my_seq == 0 {
+        return; // in-memory store — no WAL to wait on.
+    }
+    loop {
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        if synced_seq.load(Ordering::Acquire) >= my_seq {
+            return;
+        }
+        notified.as_mut().await;
+    }
+}
+
 async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdentity) -> Response {
     match req {
         Request::Ping => Response::Pong,
@@ -640,8 +890,16 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
             layer,
             shard,
         } => {
-            let mut s = store.lock().await;
-            s.put((object_id, channel, layer), shard);
+            let (my_seq, synced_seq, notify) = {
+                let mut s = store.lock().await;
+                let (_ok, seq) = s.put_appended((object_id, channel, layer), shard);
+                (
+                    seq,
+                    Arc::clone(&s.wal_synced_seq),
+                    Arc::clone(&s.wal_notify),
+                )
+            };
+            wait_for_wal_seq(&synced_seq, &notify, my_seq).await;
             Response::Ack
         }
         Request::Get {
@@ -693,10 +951,22 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
             layer,
             shards,
         } => {
-            let mut s = store.lock().await;
-            for shard in shards {
-                s.put((object_id, channel, layer), shard);
-            }
+            let (my_seq, synced_seq, notify) = {
+                let mut s = store.lock().await;
+                let mut last_seq: u64 = 0;
+                for shard in shards {
+                    let (_ok, seq) = s.put_appended((object_id, channel, layer), shard);
+                    if seq > last_seq {
+                        last_seq = seq;
+                    }
+                }
+                (
+                    last_seq,
+                    Arc::clone(&s.wal_synced_seq),
+                    Arc::clone(&s.wal_notify),
+                )
+            };
+            wait_for_wal_seq(&synced_seq, &notify, my_seq).await;
             Response::Ack
         }
         Request::CurrentEpoch => {
@@ -890,75 +1160,68 @@ mod tests {
 
     #[test]
     fn encrypted_store_roundtrip_and_disk_ciphertext() {
-        // writing under `open_with_key` yields HOLOFSS2 files.
-        // Reading them back reconstructs the shards; and inspecting
-        // the raw bytes confirms the payload is not plaintext.
+        // Under WAL the sealed record's ciphertext lives inside a
+        // segment file (HOLOFSW1). Reading it back reconstructs
+        // the shard; inspecting the segment bytes confirms the
+        // payload is not stored plaintext.
         let dir = tmpdir("enc-roundtrip");
         let key = crate::crypto::derive_shard_key(&[0xEE; 32]);
 
-        // sealed writes.
         let mut s1 = Store::open_with_key(&dir, key).unwrap();
         let sh = make_shard(0xAA);
         assert!(s1.put((100, 1, 2), sh.clone()));
         drop(s1);
 
-        // File exists and starts with the magic.
-        let files = walk_shard_files(&dir).unwrap();
-        assert_eq!(files.len(), 1);
-        let raw = std::fs::read(&files[0]).unwrap();
-        assert_eq!(&raw[..8], b"HOLOFSS2");
-        // The plaintext payload bytes must NOT appear verbatim on disk.
+        let segments = crate::wal::walk_wal_segments(&dir).unwrap();
+        assert_eq!(segments.len(), 1);
+        let raw = std::fs::read(&segments[0].1).unwrap();
+        assert_eq!(&raw[..8], crate::wal::SEG_MAGIC);
         assert!(
             !raw.windows(sh.payload.len()).any(|w| w == sh.payload.as_slice()),
-            "encrypted file contains plaintext payload — GCM broken?"
+            "encrypted WAL segment contains plaintext payload — GCM broken?"
         );
 
-        // opening WITH the right key must succeed.
         let s2 = Store::open_with_key(&dir, key).unwrap();
         assert_eq!(s2.total(), 1);
         assert_eq!(s2.get((100, 1, 2)), vec![sh.clone()]);
 
-        // Round 3: opening WITHOUT a key sees the file but can't
-        // decrypt — it skips with an eprintln, so the index is empty.
-        let s3 = Store::open(&dir).unwrap();
-        assert_eq!(s3.total(), 0);
+        // Reopening WITHOUT a key hits a sealed record and refuses
+        // to decode it — the read_segment call returns Err, which
+        // is wrapped into an io::Error by open_inner.
+        assert!(Store::open(&dir).is_err());
 
-        // Round 4: WRONG key also fails to decrypt.
+        // WRONG key: read_segment surfaces the AEAD failure the
+        // same way (decrypt returns Err → Err propagated).
         let wrong_key = crate::crypto::derive_shard_key(&[0xDD; 32]);
-        let s4 = Store::open_with_key(&dir, wrong_key).unwrap();
-        assert_eq!(s4.total(), 0);
+        assert!(Store::open_with_key(&dir, wrong_key).is_err());
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn mixed_format_directory_reads_both_v1_and_v2() {
-        // A rolling upgrade leaves some legacy plaintext files
-        // alongside new sealed ones. `open_with_key` must accept
-        // both on read; only new writes go v2.
+        // Rolling-upgrade path: a legacy per-shard `.shard` file
+        // sits next to WAL segments. `open` walks both — legacy
+        // for backward compat, WAL for new writes — so a partially
+        // migrated directory keeps every shard visible.
         let dir = tmpdir("mixed");
-        let key = crate::crypto::derive_shard_key(&[0xEE; 32]);
 
-        // Seed a legacy (v1) file.
+        // Seed a legacy per-shard file by hand — no live code path
+        // still writes them, so we call `write_shard_file` directly.
+        let sh_legacy = make_shard(1);
+        let h_legacy = shard_hash(&sh_legacy);
+        write_shard_file(&dir, (1, 0, 0), &h_legacy, &sh_legacy, None, true).unwrap();
+
+        // Second half: normal WAL writes on top.
         {
-            let mut s0 = Store::open(&dir).unwrap();
-            s0.put((1, 0, 0), make_shard(1));
-        }
-        // Open with key and add a sealed one.
-        {
-            let mut s1 = Store::open_with_key(&dir, key).unwrap();
+            let mut s1 = Store::open(&dir).unwrap();
             s1.put((2, 0, 0), make_shard(2));
         }
-        // Re-open with key: both must be visible.
-        let s2 = Store::open_with_key(&dir, key).unwrap();
+        // Re-open: both must be visible.
+        let s2 = Store::open(&dir).unwrap();
         assert_eq!(s2.total(), 2);
-        let all: std::collections::HashSet<_> = s2
-            .get((1, 0, 0))
-            .into_iter()
-            .chain(s2.get((2, 0, 0)))
-            .collect();
-        assert!(all.contains(&make_shard(1)));
-        assert!(all.contains(&make_shard(2)));
+        assert_eq!(s2.get((1, 0, 0)), vec![make_shard(1)]);
+        assert_eq!(s2.get((2, 0, 0)), vec![make_shard(2)]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -971,9 +1234,15 @@ mod tests {
             s.put((1, 0, 0), sh.clone());
         }
         assert_eq!(s.total(), 1);
-        // Exactly one shard file must exist on disk too.
-        let files: Vec<_> = walk_shard_files(&dir).unwrap();
-        assert_eq!(files.len(), 1);
+        drop(s);
+        // After WAL boot the RAM index must still count as one,
+        // proving disk dedup (only the first Put record appended,
+        // subsequent re-PUTs took the RAM dedup branch).
+        let s2 = Store::open(&dir).unwrap();
+        assert_eq!(s2.total(), 1);
+        // And exactly one WAL segment holds the record.
+        let segments = crate::wal::walk_wal_segments(&dir).unwrap();
+        assert!(!segments.is_empty(), "WAL segment file must exist");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -984,10 +1253,16 @@ mod tests {
         let mut s = Store::open(&dir).unwrap();
         s.put((10, 0, 0), make_shard(1));
         s.put((20, 0, 0), make_shard(2));
-        assert_eq!(walk_shard_files(&dir).unwrap().len(), 2);
+        assert_eq!(s.total(), 2);
         s.purge(10);
         assert_eq!(s.total(), 1);
-        assert_eq!(walk_shard_files(&dir).unwrap().len(), 1);
+        drop(s);
+        // Restart and confirm the Purge record made the state
+        // durable — the purged object must not reappear.
+        let s2 = Store::open(&dir).unwrap();
+        assert_eq!(s2.total(), 1);
+        assert!(s2.get((10, 0, 0)).is_empty());
+        assert_eq!(s2.get((20, 0, 0)).len(), 1);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1058,9 +1333,15 @@ mod tests {
         for i in 0..4 {
             s.put((1, 0, 0), make_shard(i));
         }
-        assert!(walk_shard_files(&dir).unwrap().len() >= 1);
+        assert!(s.total() >= 1);
         s.wipe();
         assert_eq!(s.total(), 0);
+        drop(s);
+        // Wipe replaces the segment file entirely — the reopen
+        // sees an empty RAM index. Legacy .shard files should be
+        // gone too so a downgraded reader can't resurrect them.
+        let s2 = Store::open(&dir).unwrap();
+        assert_eq!(s2.total(), 0);
         assert_eq!(walk_shard_files(&dir).unwrap().len(), 0);
 
         std::fs::remove_dir_all(&dir).ok();

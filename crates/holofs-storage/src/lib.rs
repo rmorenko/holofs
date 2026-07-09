@@ -4,4 +4,5 @@ pub mod crypto;
 pub mod identity;
 pub mod node_service;
 pub mod tls;
+pub mod wal;
 pub mod whitelist;
