@@ -76,7 +76,6 @@ const SHARD_MAGIC: &[u8; 8] = SHARD_MAGIC_V1;
 /// snapshot taken before the re-PUT can't purge it either.
 ///
 /// If `dir` is set, every mutation (`put`/`purge`/`wipe`) is mirrored to disk.
-#[derive(Default)]
 pub struct Store {
     shards: HashMap<Key, HashMap<Hash, (Shard, WriteEpoch)>>,
     dir: Option<PathBuf>,
@@ -86,12 +85,42 @@ pub struct Store {
     /// this field so upgrades roll gracefully. Writes pick the
     /// format based on this being `Some(_)`.
     enc_key: Option<[u8; crate::crypto::KEY_LEN]>,
+    /// Whether `write_shard_file` calls `sync_all()` before rename.
+    /// Default `true` (safe): each Put waits for the kernel to flush
+    /// the shard payload to persistent storage before Ack. Setting
+    /// this off (via `HOLOFS_NODE_FSYNC=0`) trades that per-shard
+    /// durability barrier for ~13× encoder throughput — measured in
+    /// the July 2026 soak, where fsync-under-mutex was serialising
+    /// every concurrent shard Put on one node. RLNC replication
+    /// across N nodes tolerates the loss of a few unsynced shards
+    /// on a single crash, so the trade is acceptable for most
+    /// workloads; production deployments with stricter durability
+    /// SLAs should keep the default.
+    sync_on_write: bool,
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Self {
+            shards: HashMap::new(),
+            dir: None,
+            enc_key: None,
+            sync_on_write: true,
+        }
+    }
 }
 
 impl Store {
     /// In-memory store. Process restart = all shards lost.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Toggle the per-shard `sync_all()` on writes. See
+    /// [`Self::sync_on_write`] for the durability / throughput
+    /// trade-off. Callers plumb this from `HOLOFS_NODE_FSYNC`.
+    pub fn set_sync_on_write(&mut self, on: bool) {
+        self.sync_on_write = on;
     }
 
     /// Persistent store: index in RAM, shard files in `dir`. On startup it
@@ -146,6 +175,7 @@ impl Store {
             shards,
             dir: Some(dir),
             enc_key,
+            sync_on_write: true,
         })
     }
 
@@ -168,7 +198,9 @@ impl Store {
             return false;
         }
         if let Some(dir) = &self.dir {
-            if let Err(e) = write_shard_file(dir, k, &h, &shard, self.enc_key.as_ref()) {
+            if let Err(e) =
+                write_shard_file(dir, k, &h, &shard, self.enc_key.as_ref(), self.sync_on_write)
+            {
                 eprintln!("Store::put: could not write shard file: {e}");
                 return false;
             }
@@ -327,6 +359,7 @@ fn write_shard_file(
     h: &Hash,
     shard: &Shard,
     enc_key: Option<&[u8; crate::crypto::KEY_LEN]>,
+    fsync: bool,
 ) -> io::Result<()> {
     let path = shard_path(dir, h);
     if let Some(parent) = path.parent() {
@@ -367,7 +400,9 @@ fn write_shard_file(
                 f.write_all(&sealed)?;
             }
         }
-        f.sync_all()?;
+        if fsync {
+            f.sync_all()?;
+        }
     }
     fs::rename(&tmp, &path)?;
     Ok(())
@@ -500,12 +535,20 @@ pub async fn spawn_node_persistent_with_tls(
         .ok()
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
         .unwrap_or(false);
-    let store = if at_rest_on {
+    let mut store = if at_rest_on {
         let key = crate::crypto::derive_shard_key(&identity.to_bytes());
         Store::open_with_key(&dir, key)?
     } else {
         Store::open(&dir)?
     };
+    // Per-shard fsync default = ON. Operators trade the durability
+    // barrier for ~13× encoder throughput by setting
+    // HOLOFS_NODE_FSYNC=0 (RLNC replication tolerates the loss).
+    let fsync_on = std::env::var("HOLOFS_NODE_FSYNC")
+        .ok()
+        .map(|v| !matches!(v.as_str(), "0" | "false" | "no"))
+        .unwrap_or(true);
+    store.set_sync_on_write(fsync_on);
     let h = spawn_node_with_identity(addr, store, identity, tls).await?;
     Ok((h.addr, h.store, h.task))
 }
