@@ -120,7 +120,6 @@ pub async fn tick_once(
     reputation: Option<Arc<Mutex<Reputation>>>,
 ) -> Vec<Event> {
     let is_first_tick = state.ticks == 0;
-    state.ticks += 1;
     let mut events = Vec::new();
 
     // 1. Node addresses come from the first non-directory manifest in
@@ -139,9 +138,18 @@ pub async fn tick_once(
             .find(|m| m.kind != ObjectKind::Directory && !m.nodes.is_empty())
         {
             Some(m) => m.nodes.clone(),
-            None => return events, // empty catalog / only directories — nothing to scan
+            // Empty catalog / only directories — this tick has nothing
+            // to scan. Do NOT bump `ticks`: otherwise the next tick
+            // (fired once seed has landed) sees `is_first_tick=false`
+            // AND `prev_live=∅`, which computes `revived=all_nodes` and
+            // triggers repair_node for every (object × node) pair
+            // concurrently with the seed's own PUT fanout — a real
+            // race that leaves shards under whichever manifest lost
+            // the last-write-wins on catalog.
+            None => return events,
         }
     };
+    state.ticks += 1;
     let total_nodes = nodes_addrs.len();
 
     // 2. Pseudo-manifest for discover_live: the pinger walks nodes_addrs by index.
@@ -428,8 +436,15 @@ mod tests {
         let cfg = MonitorConfig::default();
         let events = tick_once(&gf, cat, &mut state, &cfg, &mut rng, None).await;
         assert!(events.is_empty());
-        // State is still untouched in any visible way.
-        assert_eq!(state.ticks, 1);
+        // An empty-catalog tick must NOT count against `ticks`.
+        // Otherwise the *next* tick (once seed lands and the catalog
+        // gets populated) sees `is_first_tick=false` while
+        // `prev_live=∅`, computes `revived=all_nodes`, and fires
+        // `repair_node` on every (object × node) pair concurrently
+        // with the seed's still-in-flight fanout — a real race that
+        // corrupted objects for random seed files in the July 2026
+        // multi-process cluster.
+        assert_eq!(state.ticks, 0);
     }
 
     #[tokio::test]
