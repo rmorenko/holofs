@@ -151,13 +151,13 @@ pub async fn tick_once(
     // canonical "first entry" used to derive `live_all` would yield an
     // empty live set and panic inside `place_shard`'s zone-aware
     // placement (see holofs-cluster issue tracker; pre-    // bug).
-    let snapshot: Vec<(String, holofs_model::manifest::Manifest)> = {
+    let snapshot: Vec<(String, std::sync::Arc<holofs_model::manifest::Manifest>)> = {
         use holofs_model::manifest::ObjectKind;
         let cat = catalog.lock().await;
         cat.entries
             .iter()
             .filter(|(_, m)| m.kind != ObjectKind::Directory && !m.nodes.is_empty())
-            .map(|(n, m)| (n.clone(), m.clone()))
+            .map(|(n, m)| (n.clone(), std::sync::Arc::clone(m)))
             .collect()
     };
     if snapshot.is_empty() {

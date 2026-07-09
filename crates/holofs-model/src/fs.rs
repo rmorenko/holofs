@@ -16,15 +16,35 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::manifest::{Manifest, ObjectKind};
 use crate::path as catalog_path;
 
 const MAGIC: &[u8; 8] = b"HOLOFSD1";
 
+/// The gateway's in-memory catalog. Every mutation lands here and
+/// then eventually gets flushed to disk by
+/// [`crate::fs::Directory::save_atomic`].
+///
+/// Manifests are stored behind `Arc` so that:
+///
+/// * `Directory::clone()` is O(N) pointer bumps instead of O(N × M)
+///   byte copies (where M is `manifest.shard_hashes.len()`).
+///   `persist_catalog` clones the catalog every flush; before this
+///   refactor a 500-entry catalog with fat `shard_hashes` cost ~5 MB
+///   of allocation + memcpy per flush, and under a 50-worker soak
+///   that contention against the same `Mutex<Directory>` gave the
+///   `stats`/`spotlight`/`similar`/`versions_list` endpoints a
+///   double-digit % 504 rate.
+/// * Snapshots stay valid across concurrent mutations. Callers that
+///   need to mutate an entry go through [`Self::get_mut`], which
+///   uses `Arc::make_mut` — copy-on-write clones the inner
+///   `Manifest` only when another reader (e.g. the persist snapshot)
+///   is still holding a handle to the old value.
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct Directory {
-    pub entries: BTreeMap<String, Manifest>,
+    pub entries: BTreeMap<String, Arc<Manifest>>,
 }
 
 impl Directory {
@@ -33,15 +53,36 @@ impl Directory {
     }
 
     pub fn insert(&mut self, name: String, manifest: Manifest) {
+        self.entries.insert(name, Arc::new(manifest));
+    }
+
+    /// Insert an already-shared manifest. Used by mv-style paths that
+    /// want to move an existing catalog entry to a new key without
+    /// deep-cloning the manifest first.
+    pub fn insert_arc(&mut self, name: String, manifest: Arc<Manifest>) {
         self.entries.insert(name, manifest);
     }
 
+    /// Immutable-borrow lookup. Deref through the `Arc` so callers
+    /// keep the pre-refactor `Option<&Manifest>` ergonomics.
     pub fn get(&self, name: &str) -> Option<&Manifest> {
-        self.entries.get(name)
+        self.entries.get(name).map(|arc| arc.as_ref())
+    }
+
+    /// Copy-on-write mutable access. If the entry's `Arc` is uniquely
+    /// held (typical hot path), returns a `&mut Manifest` into it
+    /// directly. If another reader is still holding the same `Arc`
+    /// (a persist snapshot, an api_stats snapshot, etc.), the entry
+    /// is cloned in place first so the outside snapshot stays
+    /// consistent.
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Manifest> {
+        self.entries.get_mut(name).map(Arc::make_mut)
     }
 
     pub fn remove(&mut self, name: &str) -> Option<Manifest> {
-        self.entries.remove(name)
+        self.entries
+            .remove(name)
+            .map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|arc| (*arc).clone()))
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -93,7 +134,7 @@ impl Directory {
             // created_at = 0 — these placeholders are synthesized for
             // legacy catalogs and we have no honest timestamp for them.
             self.entries
-                .insert(path, Manifest::directory(object_id, 0));
+                .insert(path, Arc::new(Manifest::directory(object_id, 0)));
         }
         n
     }
@@ -206,7 +247,7 @@ impl Directory {
             }
             let manifest = Manifest::decode(&buf[pos..pos + mlen])?;
             pos += mlen;
-            entries.insert(name, manifest);
+            entries.insert(name, Arc::new(manifest));
         }
         Ok(Directory { entries })
     }

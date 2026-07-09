@@ -229,7 +229,7 @@ pub async fn tick_once(
     for &node in &revived {
         for name in &names {
             let mut cat = catalog.lock().await;
-            let Some(m) = cat.entries.get_mut(name) else {
+            let Some(m) = cat.get_mut(name) else {
                 continue;
             };
             match repair_node(gf, rng, m, &live, node, config.repair_d).await {

@@ -46,7 +46,7 @@ pub async fn add_node(
     let mut reports = Vec::new();
     let names: Vec<String> = catalog.names();
     for name in names {
-        let manifest = catalog.entries.get_mut(&name).unwrap();
+        let manifest = catalog.get_mut(&name).unwrap();
         manifest.nodes.push(addr.clone());
         manifest.zones.push(zone);
         let new_idx = manifest.nodes.len() - 1;
@@ -105,7 +105,7 @@ mod tests {
         let m = empty_manifest(vec!["a".into(), "b".into()]);
         dir.insert("o1".into(), m);
 
-        let manifest = dir.entries.get_mut("o1").unwrap();
+        let manifest = dir.get_mut("o1").unwrap();
         manifest.nodes.push("c".into());
         manifest.zones.push(1);
         assert_eq!(manifest.nodes.len(), 3);

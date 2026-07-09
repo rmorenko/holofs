@@ -753,8 +753,8 @@ impl Gateway {
                 // Purge below needs both, and the state flip has to
                 // happen atomically with catalog read to avoid a
                 // concurrent PUT of the same name racing us.
-                let placeholder = cat.entries.get(&name).cloned();
-                if let Some(m) = cat.entries.get_mut(&name) {
+                let placeholder = cat.get(&name).cloned();
+                if let Some(m) = cat.get_mut(&name) {
                     if m.state == ManifestState::Encoding {
                         m.state = ManifestState::Failed;
                     }

@@ -253,9 +253,9 @@ pub async fn bootstrap_cluster(
     {
         use holofs_model::manifest::ManifestState;
         let mut promoted = 0usize;
-        for (_, m) in directory.entries.iter_mut() {
-            if m.state == ManifestState::Encoding {
-                m.state = ManifestState::Failed;
+        for arc in directory.entries.values_mut() {
+            if arc.state == ManifestState::Encoding {
+                std::sync::Arc::make_mut(arc).state = ManifestState::Failed;
                 promoted += 1;
             }
         }

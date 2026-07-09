@@ -96,7 +96,7 @@ async fn rmdir_rejects_non_directory() {
             "docs/readme.txt".into(),
             holofs_model::manifest::Manifest::directory(0xAAAA, 0),
         );
-        cat.entries.get_mut("docs/readme.txt").unwrap().kind =
+        cat.get_mut("docs/readme.txt").unwrap().kind =
             holofs_model::manifest::ObjectKind::Text;
     }
     let err = gw

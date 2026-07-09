@@ -204,8 +204,8 @@ impl Gateway {
                 }
             }
         }
-        let mut moved: Vec<(String, String, Manifest)> = Vec::new();
-        moved.push((old.to_string(), new.to_string(), entry.clone()));
+        let mut moved: Vec<(String, String, std::sync::Arc<Manifest>)> = Vec::new();
+        moved.push((old.to_string(), new.to_string(), std::sync::Arc::new(entry.clone())));
         if entry.kind == ObjectKind::Directory {
             let child_prefix = format!("{old}/");
             for (k, v) in cat.entries.range(child_prefix.clone()..) {
@@ -217,13 +217,13 @@ impl Gateway {
                 if cat.get(&target).is_some() {
                     return Err(GatewayError::AlreadyExists);
                 }
-                moved.push((k.clone(), target, v.clone()));
+                moved.push((k.clone(), target, std::sync::Arc::clone(v)));
             }
         }
         let count = moved.len();
         for (from, to, manifest) in moved {
             cat.remove(&from);
-            cat.insert(to, manifest);
+            cat.insert_arc(to, manifest);
         }
         drop(cat);
         self.invalidate_cache(old).await;
@@ -278,7 +278,7 @@ impl Gateway {
             if remainder.is_empty() || remainder.contains('/') {
                 continue;
             }
-            out.push((k.clone(), v.clone()));
+            out.push((k.clone(), (**v).clone()));
         }
         Ok(out)
     }
