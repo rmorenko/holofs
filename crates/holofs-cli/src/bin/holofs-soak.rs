@@ -419,8 +419,22 @@ async fn spawn_embedded(cli: &Cli) -> Result<Cluster> {
     if cli.enable_versions {
         cmd.arg("--enable-versions");
     }
+    // Capture gateway stderr into a file inside the storage root so
+    // (a) post-mortem diagnostics survive teardown and (b) we don't
+    // depend on the parent to drain a pipe. The previous version used
+    // `Stdio::piped()` without a reader; under sustained 503-load the
+    // gateway's per-error `eprintln!` calls filled the pipe buffer,
+    // Rust's global stderr lock serialized every tokio worker behind
+    // the blocked `write_fmt`, and the whole gateway wedged.
+    let gw_stderr_path = storage_root.join("gateway.log");
+    let gw_stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&gw_stderr_path)
+        .with_context(|| format!("open {}", gw_stderr_path.display()))?;
+    eprintln!("[soak] gateway stderr → {}", gw_stderr_path.display());
     cmd.stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(gw_stderr))
         .kill_on_drop(true);
     let child = cmd
         .spawn()
