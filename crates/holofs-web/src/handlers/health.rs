@@ -364,6 +364,62 @@ pub async fn toggle_node(
     }
 }
 
+/// v3-8: `POST /admin/add_node` — admin-triggered per-object
+/// rebalance. Form body: `addr=<host:port>&zone=<u8>`. Runs
+/// `Gateway::rebalance_add_node` so every catalog manifest's
+/// `nodes` table grows to include the new address and its HRW share
+/// of shards is fanned out via `repair_node`. Returns a JSON summary
+/// listing per-object success/error plus a diagnostic reminder that
+/// the gateway's own `ClusterInfo.node_addrs` still needs a restart
+/// with the new whitelist to bring the cluster topology fully into
+/// agreement.
+pub async fn admin_add_node(
+    Extension(gw): Extension<Arc<Gateway>>,
+    body: Bytes,
+) -> Response {
+    let body_str = match std::str::from_utf8(&body) {
+        Ok(s) => s,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/plain")],
+                "non-utf8 body",
+            )
+                .into_response();
+        }
+    };
+    let addr = parse_urlencoded_field(body_str, "addr").unwrap_or_default();
+    let zone_str = parse_urlencoded_field(body_str, "zone").unwrap_or_default();
+    if addr.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(header::CONTENT_TYPE, "text/plain")],
+            "missing field addr",
+        )
+            .into_response();
+    }
+    let zone: u8 = zone_str.parse().unwrap_or(0);
+
+    let reports = gw.rebalance_add_node(addr.clone(), zone).await;
+    let ok = reports.iter().filter(|r| r.result.is_ok()).count();
+    let failed = reports.iter().filter(|r| r.result.is_err()).count();
+    let body = format!(
+        "{{\"addr\":\"{}\",\"zone\":{},\
+         \"objects_rebalanced\":{},\"objects_failed\":{},\
+         \"warning\":\"gateway ClusterInfo.node_addrs unchanged — restart the gateway with the new whitelist to bring the cluster topology into agreement\"}}",
+        addr.replace('"', "\\\""),
+        zone,
+        ok,
+        failed
+    );
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
 /// `GET /api/health/events` — Server-Sent Events stream pushing one
 /// [`HealthSnapshot`] every 3 seconds. The browser's `EventSource`
 /// keeps the connection open and the Leptos reactive component

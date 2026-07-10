@@ -198,9 +198,13 @@ pub async fn tick_once(
         cat.names()
     };
     for name in &names {
+        // v3-5: Arc<Manifest> clone instead of the deep
+        // `catalog.get(name).cloned()` — the scan only reads the
+        // manifest, so cloning the Arc keeps every field shared with
+        // the catalog entry until the loop iteration ends.
         let manifest = {
             let cat = catalog.read().await;
-            cat.get(name).cloned()
+            cat.entries.get(name).cloned()
         };
         let Some(m) = manifest else { continue };
         match collect_layer_stats(&m, &live).await {

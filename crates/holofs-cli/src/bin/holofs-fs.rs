@@ -182,48 +182,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn blank_manifest(node_addrs: &[String], w: usize, h: usize) -> Manifest {
-    let mut layer_positions: Vec<Vec<u32>> = vec![Vec::new(); NLAYERS];
-    for y in 0..h {
-        for x in 0..w {
-            layer_positions[coeff_layer(x, y, w, h)].push((y * w + x) as u32);
-        }
-    }
-    let n_per_layer: Vec<u32> = (0..NLAYERS)
-        .map(|l| (K as f32 * RED[l]).round() as u32)
-        .collect();
-    let sym_len: Vec<u32> = layer_positions
-        .iter()
-        .map(|pos| {
-            let bytes = pos.len() * 4;
-            ((bytes + K - 1) / K) as u32
-        })
-        .collect();
-    Manifest {
-        object_id: 0,
-        k: K as u16,
-        nlayers: NLAYERS as u8,
-        n_per_layer,
-        sym_len,
-        layer_positions,
-        channels: 3,
-        width: w as u32,
-        height: h as u32,
-        levels: LEVELS as u8,
-        nodes: node_addrs.to_vec(),
-        placement: Placement::Rendezvous,
-        zones: vec![0; node_addrs.len()],
-        data_cid: [0; 32],
-        merkle_root: [0; 32],
-        shard_hashes: vec![vec![Vec::new(); NLAYERS]; 3],
-        kind: holofs_model::manifest::ObjectKind::Image,
-        content_type: "image/png".into(),
-        chunk_lens: vec![],
-        audio_sample_rate: 0,
-        text_minhash: vec![],
-        created_at_unix: 0,
-        encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
-            state: ManifestState::Ready,
-        }
+    // v3-4: delegate to the canonical `Manifest::blank_image`
+    // factory that ingest.rs and bootstrap.rs already share. Prior
+    // to this the RGB layout math (layer_positions / n_per_layer /
+    // sym_len) was inlined here as a third copy.
+    Manifest::blank_image(
+        w,
+        h,
+        node_addrs.to_vec(),
+        vec![0; node_addrs.len()],
+        Placement::Rendezvous,
+    )
 }
 
 fn psnr(orig: &[Vec<f32>], recon: &[Vec<f32>]) -> f64 {

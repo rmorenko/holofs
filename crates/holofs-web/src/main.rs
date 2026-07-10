@@ -185,6 +185,7 @@ async fn main() {
     let admin_cfg_short = admin_cfg.clone();
     let admin_short_routes: Router<LeptosOptions> = Router::new()
         .route("/admin/node", post(handlers::toggle_node))
+        .route("/admin/add_node", post(handlers::admin_add_node))
         .route_layer(from_fn(move |req, next| {
             run_with_deadline(SHORT, to_short.clone(), req, next)
         }))

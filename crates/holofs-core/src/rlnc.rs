@@ -88,9 +88,16 @@ pub fn encode_layer_with_k(
             if ci == 0 {
                 continue;
             }
+            // v3-10: precompute a 256-byte `ci · b` lookup table once
+            // per (shard, i); the inner byte-loop becomes an indexed
+            // XOR instead of a `gf.mul` call. Break-even is at
+            // `symbol_len ~= 256` — for the 512×512 image path where
+            // `symbol_len` is a few kB this is a materially cheaper
+            // inner loop.
+            let mul_table = gf.mul_table(ci);
             let src = &padded[i * symbol_len..(i + 1) * symbol_len];
             for j in 0..symbol_len {
-                payload[j] ^= gf.mul(ci, src[j]);
+                payload[j] ^= mul_table[src[j] as usize];
             }
         }
         shards.push(Shard { coeffs, payload });
@@ -141,9 +148,12 @@ pub fn encode_layer_with_k_random(
             if ci == 0 {
                 continue;
             }
+            // v3-10: same per-scalar lookup table as
+            // `encode_layer_with_k_random` — RLNC-fixed-K path.
+            let mul_table = gf.mul_table(ci);
             let src = &padded[i * symbol_len..(i + 1) * symbol_len];
             for j in 0..symbol_len {
-                payload[j] ^= gf.mul(ci, src[j]);
+                payload[j] ^= mul_table[src[j] as usize];
             }
         }
         shards.push(Shard { coeffs, payload });
@@ -311,9 +321,12 @@ pub fn encode_layer(gf: &Gf, data: &[u8], n: usize, rng: &mut Rng) -> (usize, Ve
             if ci == 0 {
                 continue;
             }
+            // v3-10: same per-scalar lookup as the other RLNC
+            // encode paths — const-K variant.
+            let mul_table = gf.mul_table(ci);
             let src = &padded[i * symbol_len..(i + 1) * symbol_len];
             for j in 0..symbol_len {
-                payload[j] ^= gf.mul(ci, src[j]);
+                payload[j] ^= mul_table[src[j] as usize];
             }
         }
         shards.push(Shard { coeffs, payload });

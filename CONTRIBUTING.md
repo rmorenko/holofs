@@ -78,9 +78,10 @@ Three layers:
   cargo test -p holofs-e2e -- --test-threads=1
   ```
 
-  10 tests are `#[ignore]`'d behind `--include-ignored` because they
-  download the ~155 MiB DistilBERT-multilingual CLIP weights on first
-  run. Pre-warm `~/.cache/huggingface/hub/` in CI runner images.
+  A subset of tests are `#[ignore]`'d behind `--include-ignored`
+  because they download the ~155 MiB DistilBERT-multilingual CLIP
+  weights on first run — exact count drifts with the suite. Pre-warm
+  `~/.cache/huggingface/hub/` in CI runner images.
 
 ### Coverage
 

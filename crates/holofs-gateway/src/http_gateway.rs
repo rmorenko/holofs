@@ -534,6 +534,43 @@ impl Gateway {
         )
     }
 
+    /// v3-8: admin-triggered rebalance. Runs
+    /// [`holofs_cluster::rebalance::add_node`] against every catalog
+    /// manifest so `place_shard` for existing objects starts sending
+    /// its HRW share to `new_addr`. Uses the same snapshot+CAS pattern
+    /// the monitor path uses — `catalog.write()` is held only for the
+    /// short write-back after each per-object network repair.
+    ///
+    /// **Limitation:** this only mutates per-object `manifest.nodes`
+    /// tables. The gateway's own `ClusterInfo.node_addrs` (used by
+    /// the monitor's live-set discovery) is an `Arc<ClusterInfo>`
+    /// shared across the whole gateway and doesn't get updated here;
+    /// operators need to restart the gateway with the new node in the
+    /// whitelist to bring the topology into agreement. This is why
+    /// the endpoint stays admin-gated and returns a diagnostic
+    /// message documenting the follow-up step.
+    pub async fn rebalance_add_node(
+        &self,
+        new_addr: String,
+        zone: u8,
+    ) -> Vec<holofs_cluster::rebalance::AddNodeReport> {
+        use holofs_core::rng::Rng;
+
+        let seed = new_addr
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(u64::from(b)));
+        let mut rng = Rng::new(seed);
+        holofs_cluster::rebalance::add_node(
+            &self.gf,
+            &mut rng,
+            Arc::clone(&self.catalog),
+            new_addr,
+            zone,
+            holofs_core::K,
+        )
+        .await
+    }
+
     /// Owned handles to the per-bucket timeout counters, in
     /// `(short, medium, long)` order. Middleware picks whichever
     /// matches its bucket.

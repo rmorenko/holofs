@@ -414,13 +414,16 @@ sequenceDiagram
 Tous les entiers multi-octets sont **big-endian** sauf indication.
 Les fichiers sont identifiés par une magie de 8 octets à l'offset 0.
 
-### 3.1. Manifeste (`HOLOFSM9`, les héritages `HOLOFSM6/M7/M8` sont acceptés en lecture)
+### 3.1. Manifeste (`HOLOFSMA`, les héritages `HOLOFSM6/M7/M8/M9` sont acceptés en lecture)
 
-Le manifeste porte un discriminant `ObjectKind` (`4 = Directory`) et
-un sélecteur `encoding` en queue (`0 = Rlnc`, `1 = Replicated`). Les
-anciens fichiers `HOLOFSM6/M7/M8` se décodent proprement sous le
+Le manifeste porte un discriminant `ObjectKind` (`4 = Directory`),
+un sélecteur `encoding` en queue (`0 = Rlnc`, `1 = Replicated`) et
+un octet `state` en queue (`0 = Ready`, `1 = Encoding`, `2 = Failed`)
+— ce dernier ajouté dans `HOLOFSMA` pour l'ingest asynchrone. Les
+anciens fichiers `HOLOFSM6/M7/M8/M9` se décodent proprement sous le
 nouveau code — les champs manquants retombent sur les valeurs
-historiques par défaut (`encoding = Rlnc`, `created_at_unix = 0`).
+historiques par défaut (`state = Ready`, `encoding = Rlnc`,
+`created_at_unix = 0`).
 
 Les marqueurs de répertoire ont tous les champs numériques mis à zéro
 et chaque champ `Vec` vide ; leur seul porteur est `object_id` (dérivé
@@ -430,7 +433,7 @@ par SHA-256 du chemin, tag de domaine `holofs-dir-v1\0`) et un
 Un `Manifest` sérialisé décrivant l'encodage d'un objet.
 
 ```
-magic           8  bytes = "HOLOFSM7" (legacy "HOLOFSM6" also accepted)
+magic           8  bytes = "HOLOFSMA" (legacy "HOLOFSM6/M7/M8/M9" also accepted)
 object_id       8  bytes BE
 k               2  bytes BE
 nlayers         1  byte
@@ -1050,10 +1053,11 @@ Même limite `MAX_FRAME = 64 Mio` que le reste du protocole.
 
 ## 10. Additions au format de manifeste
 
-### 10.1 Magie `HOLOFSM9` et sélecteur d'encodage
+### 10.1 Magie `HOLOFSMA` — sélecteurs `encoding` et `state`
 
 Le manifeste sur disque porte un discriminant `encoding` d'un octet
-plus une queue spécifique à la variante :
+plus une queue spécifique à la variante, suivi de l'octet `state`
+introduit dans `HOLOFSMA` :
 
 | Octet | Variante                                                             | Queue |
 |-------|----------------------------------------------------------------------|-------|
@@ -1068,10 +1072,17 @@ La disposition en blocs est ce qui permet à `/api/spotlight.png` de
 n'aller chercher que les blocs dont les coefficients recouvrent le ROI
 demandé.
 
-Compatibilité descendante : les magies héritées `HOLOFSM6`, `HOLOFSM7`
-et `HOLOFSM8` sont encore décodables. Les enregistrements `HOLOFSM8`
-reçoivent `encoding = Rlnc` en lecture ; `HOLOFSM7` / `HOLOFSM6`
-remplissent en plus `created_at_unix = 0`.
+Octet `state` (présent uniquement dans `HOLOFSMA`) : `0=Ready`,
+`1=Encoding`, `2=Failed`. Les PUT en ingest asynchrone
+(`HOLOFS_ASYNC_ENCODE=1`) déposent un placeholder avec
+`state=Encoding` ; le worker en arrière-plan bascule sur `Ready`
+(succès) ou `Failed` (erreur d'encodage / persist).
+
+Compatibilité descendante : les magies héritées `HOLOFSM6`,
+`HOLOFSM7`, `HOLOFSM8` et `HOLOFSM9` sont encore décodables. Les
+enregistrements `HOLOFSM9` reçoivent `state = Ready` en lecture ;
+`HOLOFSM8` reçoit en plus `encoding = Rlnc` ; `HOLOFSM7` /
+`HOLOFSM6` remplissent en plus `created_at_unix = 0`.
 
 ---
 

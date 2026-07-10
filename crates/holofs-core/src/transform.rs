@@ -3,19 +3,26 @@
 
 use crate::LEVELS;
 
-const SQRT2: f32 = std::f32::consts::SQRT_2;
+/// `1/√2` — the Haar normalisation factor. v3-9: precomputed as a
+/// multiplication constant so the inner loop uses one `mul` per
+/// coefficient instead of a `div` — division is materially slower
+/// than multiplication on every ISA we target, and the DWT inner
+/// loop runs Θ(W·H·levels) per plane.
+const INV_SQRT2: f32 = 0.707_106_78_f32;
 
 pub fn haar_forward(d: &mut [f32], w: usize, h: usize, levels: usize) {
+    // v3-9: reusable scratch instead of a fresh `vec![0f32; …]` per
+    // row/column. `cw`/`ch` never grow, so `max(w, h)` is safe.
+    let mut tmp: Vec<f32> = vec![0f32; w.max(h)];
     let (mut cw, mut ch) = (w, h);
     for _ in 0..levels {
         for y in 0..ch {
             let half = cw / 2;
-            let mut tmp = vec![0f32; cw];
             for i in 0..half {
                 let a = d[y * w + 2 * i];
                 let b = d[y * w + 2 * i + 1];
-                tmp[i] = (a + b) / SQRT2;
-                tmp[half + i] = (a - b) / SQRT2;
+                tmp[i] = (a + b) * INV_SQRT2;
+                tmp[half + i] = (a - b) * INV_SQRT2;
             }
             for x in 0..cw {
                 d[y * w + x] = tmp[x];
@@ -23,12 +30,11 @@ pub fn haar_forward(d: &mut [f32], w: usize, h: usize, levels: usize) {
         }
         for x in 0..cw {
             let half = ch / 2;
-            let mut tmp = vec![0f32; ch];
             for i in 0..half {
                 let a = d[(2 * i) * w + x];
                 let b = d[(2 * i + 1) * w + x];
-                tmp[i] = (a + b) / SQRT2;
-                tmp[half + i] = (a - b) / SQRT2;
+                tmp[i] = (a + b) * INV_SQRT2;
+                tmp[half + i] = (a - b) * INV_SQRT2;
             }
             for y in 0..ch {
                 d[y * w + x] = tmp[y];
@@ -40,17 +46,17 @@ pub fn haar_forward(d: &mut [f32], w: usize, h: usize, levels: usize) {
 }
 
 pub fn haar_inverse(d: &mut [f32], w: usize, h: usize, levels: usize) {
+    let mut tmp: Vec<f32> = vec![0f32; w.max(h)];
     for level in (0..levels).rev() {
         let cw = w >> level;
         let ch = h >> level;
         for x in 0..cw {
             let half = ch / 2;
-            let mut tmp = vec![0f32; ch];
             for i in 0..half {
                 let a = d[i * w + x];
                 let dd = d[(half + i) * w + x];
-                tmp[2 * i] = (a + dd) / SQRT2;
-                tmp[2 * i + 1] = (a - dd) / SQRT2;
+                tmp[2 * i] = (a + dd) * INV_SQRT2;
+                tmp[2 * i + 1] = (a - dd) * INV_SQRT2;
             }
             for y in 0..ch {
                 d[y * w + x] = tmp[y];
@@ -58,12 +64,11 @@ pub fn haar_inverse(d: &mut [f32], w: usize, h: usize, levels: usize) {
         }
         for y in 0..ch {
             let half = cw / 2;
-            let mut tmp = vec![0f32; cw];
             for i in 0..half {
                 let a = d[y * w + i];
                 let dd = d[y * w + half + i];
-                tmp[2 * i] = (a + dd) / SQRT2;
-                tmp[2 * i + 1] = (a - dd) / SQRT2;
+                tmp[2 * i] = (a + dd) * INV_SQRT2;
+                tmp[2 * i + 1] = (a - dd) * INV_SQRT2;
             }
             for x in 0..cw {
                 d[y * w + x] = tmp[x];
@@ -77,17 +82,17 @@ pub fn haar_inverse(d: &mut [f32], w: usize, h: usize, levels: usize) {
 /// Multi-level 1D Haar DWT. `n` must be a multiple of `2^levels`.
 pub fn haar_forward_1d(d: &mut [f32], levels: usize) {
     let n = d.len();
+    let mut tmp: Vec<f32> = vec![0f32; n];
     let mut cn = n;
     for _ in 0..levels {
         let half = cn / 2;
-        let mut tmp = vec![0f32; cn];
         for i in 0..half {
             let a = d[2 * i];
             let b = d[2 * i + 1];
-            tmp[i] = (a + b) / SQRT2;
-            tmp[half + i] = (a - b) / SQRT2;
+            tmp[i] = (a + b) * INV_SQRT2;
+            tmp[half + i] = (a - b) * INV_SQRT2;
         }
-        d[..cn].copy_from_slice(&tmp);
+        d[..cn].copy_from_slice(&tmp[..cn]);
         cn /= 2;
     }
 }
@@ -95,17 +100,17 @@ pub fn haar_forward_1d(d: &mut [f32], levels: usize) {
 /// Inverse 1D Haar DWT.
 pub fn haar_inverse_1d(d: &mut [f32], levels: usize) {
     let n = d.len();
+    let mut tmp: Vec<f32> = vec![0f32; n];
     for level in (0..levels).rev() {
         let cn = n >> level;
         let half = cn / 2;
-        let mut tmp = vec![0f32; cn];
         for i in 0..half {
             let a = d[i];
             let dd = d[half + i];
-            tmp[2 * i] = (a + dd) / SQRT2;
-            tmp[2 * i + 1] = (a - dd) / SQRT2;
+            tmp[2 * i] = (a + dd) * INV_SQRT2;
+            tmp[2 * i + 1] = (a - dd) * INV_SQRT2;
         }
-        d[..cn].copy_from_slice(&tmp);
+        d[..cn].copy_from_slice(&tmp[..cn]);
     }
 }
 

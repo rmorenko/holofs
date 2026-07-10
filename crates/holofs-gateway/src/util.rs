@@ -84,7 +84,7 @@ pub(crate) fn guess_text_content_type(name: &str) -> String {
 /// PNG-encode three float channels of shape `w × h` back into an
 /// RGB image buffer. Used by every decode path that ends in an
 /// HTTP `image/png` response body.
-pub(crate) fn encode_png(channels: &[Vec<f32>], w: u32, h: u32) -> Vec<u8> {
+pub fn encode_png(channels: &[Vec<f32>], w: u32, h: u32) -> Vec<u8> {
     let arr: [Vec<f32>; 3] = [
         channels[0].clone(),
         channels[1].clone(),

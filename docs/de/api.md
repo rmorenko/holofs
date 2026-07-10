@@ -417,13 +417,16 @@ Alle Mehr-Byte-Ganzzahlen sind **Big-Endian**, sofern nicht anders
 notiert. Dateien werden durch ein 8-Byte-Magic bei Offset 0
 identifiziert.
 
-### 3.1. Manifest (`HOLOFSM9`, Legacy `HOLOFSM6/M7/M8` beim Lesen akzeptiert)
+### 3.1. Manifest (`HOLOFSMA`, Legacy `HOLOFSM6/M7/M8/M9` beim Lesen akzeptiert)
 
-Das Manifest trägt einen `ObjectKind`-Diskriminator (`4 = Directory`)
-und einen abschließenden `encoding`-Selektor (`0 = Rlnc`, `1 =
-Replicated`). Alte `HOLOFSM6/M7/M8`-Dateien decodieren sauber unter dem
-neuen Code — fehlende Felder fallen auf historische Defaults zurück
-(`encoding = Rlnc`, `created_at_unix = 0`).
+Das Manifest trägt einen `ObjectKind`-Diskriminator (`4 = Directory`),
+einen abschließenden `encoding`-Selektor (`0 = Rlnc`, `1 =
+Replicated`) und einen anschließenden `state`-Selektor (`0 = Ready`,
+`1 = Encoding`, `2 = Failed`) — Letzterer wurde in `HOLOFSMA` für den
+Async-Ingest hinzugefügt. Alte `HOLOFSM6/M7/M8/M9`-Dateien decodieren
+sauber unter dem neuen Code — fehlende Felder fallen auf historische
+Defaults zurück (`state = Ready`, `encoding = Rlnc`,
+`created_at_unix = 0`).
 
 Directory-Marker haben jedes numerische Feld auf null und jedes
 `Vec`-Feld leer; ihr einziger Träger ist `object_id`
@@ -434,7 +437,7 @@ Ein serialisiertes `Manifest`, das die Codierung eines Objekts
 beschreibt.
 
 ```
-magic           8  bytes = "HOLOFSM7" (legacy "HOLOFSM6" also accepted)
+magic           8  bytes = "HOLOFSMA" (legacy "HOLOFSM6/M7/M8/M9" also accepted)
 object_id       8  bytes BE
 k               2  bytes BE
 nlayers         1  byte
@@ -1050,10 +1053,11 @@ Dasselbe `MAX_FRAME = 64 MiB`-Limit wie beim Rest des Protokolls.
 
 ## 10. Manifest-Format-Ergänzungen
 
-### 10.1 `HOLOFSM9`-Magic und Encoding-Selektor
+### 10.1 `HOLOFSMA`-Magic — `encoding`- und `state`-Selektoren
 
 Das On-Disk-Manifest trägt einen Ein-Byte-`encoding`-Diskriminator plus
-einen varianten-spezifischen Schwanz:
+einen varianten-spezifischen Schwanz, gefolgt vom `state`-Byte, das
+in `HOLOFSMA` eingeführt wurde:
 
 | Byte | Variante                                                            | Schwanz |
 |------|---------------------------------------------------------------------|---------|
@@ -1068,9 +1072,16 @@ Block-Layout ist das, was `/api/spotlight.png` erlaubt, nur die
 Blöcke zu holen, deren Koeffizienten die angeforderte ROI
 überlappen.
 
-Rückwärtskompatibilität: Legacy-Magic-Bytes `HOLOFSM6`, `HOLOFSM7` und
-`HOLOFSM8` sind weiterhin decodierbar. `HOLOFSM8`-Records bekommen
-`encoding = Rlnc` beim Lesen; `HOLOFSM7` / `HOLOFSM6` füllen
+`state`-Byte (nur in `HOLOFSMA` vorhanden): `0=Ready`, `1=Encoding`,
+`2=Failed`. Async-Ingest-PUTs (`HOLOFS_ASYNC_ENCODE=1`) legen einen
+Platzhalter mit `state=Encoding` an; der Hintergrund-Worker
+schaltet ihn auf `Ready` (Erfolg) oder `Failed` (Encode-/Persist-
+Fehler).
+
+Rückwärtskompatibilität: Legacy-Magic-Bytes `HOLOFSM6`, `HOLOFSM7`,
+`HOLOFSM8` und `HOLOFSM9` sind weiterhin decodierbar.
+`HOLOFSM9`-Records bekommen `state = Ready` beim Lesen; `HOLOFSM8`
+zusätzlich `encoding = Rlnc`; `HOLOFSM7` / `HOLOFSM6` füllen
 zusätzlich `created_at_unix = 0`.
 
 ---

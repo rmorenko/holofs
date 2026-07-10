@@ -32,7 +32,7 @@ mod repair;
 mod search;
 mod similarity;
 mod spotlight;
-mod util;
+pub mod util;
 mod versions;
 
 pub use decode::DecodedObject;

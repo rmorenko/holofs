@@ -77,6 +77,27 @@ impl Gf {
         }
     }
 
+    /// Precompute a 256-byte lookup table `t[b] = a · b` for a fixed
+    /// scalar `a`. v3-10: RLNC encode multiplies each `ci` against
+    /// every byte of one source chunk — for `symbol_len > 256` it's
+    /// materially cheaper to build the table once and index it than to
+    /// call `mul(ci, b)` per byte. Amortised cost per output byte
+    /// drops from two lookups + one add to one lookup.
+    #[must_use]
+    pub fn mul_table(&self, a: u8) -> [u8; 256] {
+        let mut t = [0u8; 256];
+        if a == 0 {
+            return t;
+        }
+        let log_a = self.log[a as usize] as usize;
+        // t[0] stays 0 (0 · anything = 0). Everything else uses the
+        // same log/exp lookup as `mul` but avoids re-reading `log[a]`.
+        for (b_val, slot) in t.iter_mut().enumerate().skip(1) {
+            *slot = self.exp[log_a + self.log[b_val] as usize];
+        }
+        t
+    }
+
     /// Multiplicative inverse in GF(2⁸).
     ///
     /// # Panics

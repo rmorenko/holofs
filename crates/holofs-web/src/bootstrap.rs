@@ -14,18 +14,16 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, RwLock};
 
-use holofs_client::put_object;
 use holofs_cluster::audit::{self, AuditConfig, AuditEvent, AuditOutcome};
 use holofs_cluster::monitor::{run_periodic, Event, MonitorConfig};
 use holofs_cluster::reputation::Reputation;
-use holofs_codec::image_io::{load_photo, synth};
+use holofs_codec::image_io::synth;
 use holofs_core::gf::Gf;
 use holofs_core::hash::hex;
-use holofs_core::transform::coeff_layer;
-use holofs_core::{dims_from_env, K, LEVELS, NLAYERS, N_NODES, RED};
+use holofs_core::{dims_from_env, K, NLAYERS, N_NODES};
+use holofs_gateway::util::encode_png;
 use holofs_gateway::{ClusterInfo, Gateway};
 use holofs_model::fs::Directory;
-use holofs_model::manifest::Manifest;
 use holofs_model::placement::Placement;
 use holofs_storage::identity::PUBKEY_LEN;
 use holofs_storage::node_service::spawn_node_persistent_with_tls;
@@ -270,38 +268,6 @@ pub async fn bootstrap_cluster(
     );
 
     let should_seed = config.whitelist.is_none() && !config.no_seed && directory.is_empty();
-    if should_seed {
-        let photo_channels = match config.seed_photo.as_deref() {
-            Some(p) => {
-                info!(source = %p.display(), "seeding photo.png");
-                let a = load_photo(p.to_str().expect("non-utf8 seed path"), w, h);
-                vec![a[0].clone(), a[1].clone(), a[2].clone()]
-            }
-            None if std::path::Path::new("assets/sample.png").exists() => {
-                info!(source = "assets/sample.png", "seeding photo.png (Kodak kodim23)");
-                let a = load_photo("assets/sample.png", w, h);
-                vec![a[0].clone(), a[1].clone(), a[2].clone()]
-            }
-            None => {
-                info!(source = "synthetic mandala", "seeding photo.png");
-                let a = synth(w, h);
-                vec![a[0].clone(), a[1].clone(), a[2].clone()]
-            }
-        };
-        let m = put_named(&gf, &node_addrs, &zones, &live, &photo_channels, w, h).await;
-        directory.insert("photo.png".into(), m);
-
-        let mandala = {
-            let a = synth(w, h);
-            vec![a[0].clone(), a[1].clone(), a[2].clone()]
-        };
-        let m = put_named(&gf, &node_addrs, &zones, &live, &mandala, w, h).await;
-        directory.insert("mandala.png".into(), m);
-
-        directory.save_atomic(&catalog_path)?;
-        info!(objects = directory.len(), "seeded catalog");
-    }
-
     let catalog = Arc::new(RwLock::new(directory));
 
     // N5: reputation state persists across restarts. Path fixed at
@@ -387,6 +353,52 @@ pub async fn bootstrap_cluster(
         } else {
             info!(?versions_root, "version history enabled");
         }
+    }
+
+    // v3-11: seed the catalog through Gateway::ingest_bytes so demo objects
+    // travel the exact ingest path a `PUT /photo.png` request would take —
+    // dedup, auto-repair-on-read, versions, embed indexing. The previous
+    // `put_named` helper reimplemented Manifest construction + `put_object`
+    // by hand, which drifted from `ingest_bytes` every time the encoder
+    // pipeline changed. Runs after `enable_embed` / `enable_versions` so
+    // opted-in features apply to the seed objects too.
+    if should_seed {
+        let (photo_bytes, photo_src): (Vec<u8>, &str) = match config.seed_photo.as_deref() {
+            Some(p) => (std::fs::read(p)?, "operator-supplied file"),
+            None if std::path::Path::new("assets/sample.png").exists() => (
+                std::fs::read("assets/sample.png")?,
+                "assets/sample.png (Kodak kodim23)",
+            ),
+            None => {
+                let a = synth(w, h);
+                (
+                    encode_png(&[a[0].clone(), a[1].clone(), a[2].clone()], w as u32, h as u32),
+                    "synthetic mandala",
+                )
+            }
+        };
+        info!(source = photo_src, "seeding photo.png");
+        gateway
+            .ingest_bytes("photo.png", &photo_bytes)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!("seed photo.png failed: {e:?}").into()
+            })?;
+
+        let mandala_bytes = {
+            let a = synth(w, h);
+            encode_png(&[a[0].clone(), a[1].clone(), a[2].clone()], w as u32, h as u32)
+        };
+        info!(source = "synthetic mandala", "seeding mandala.png");
+        gateway
+            .ingest_bytes("mandala.png", &mandala_bytes)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!("seed mandala.png failed: {e:?}").into()
+            })?;
+
+        let objects = catalog.read().await.len();
+        info!(objects, "seeded catalog");
     }
 
     let interval_secs: u64 = crate::runtime_config::RuntimeConfig::get()
@@ -591,34 +603,6 @@ pub async fn bootstrap_cluster(
         node_tasks: node_task_handles,
         shutdown,
     })
-}
-
-/// Build an image manifest for the seed step. v2 P4.1 dedup: the
-/// manifest shape is built by the canonical
-/// `Manifest::blank_image` factory in `holofs-model`; this helper
-/// just fills in `created_at_unix` (which is not part of the layout
-/// contract) and dispatches the seed PUT to the cluster.
-async fn put_named(
-    gf: &Gf,
-    node_addrs: &[String],
-    zones: &[u8],
-    live: &[usize],
-    channels: &[Vec<f32>],
-    w: usize,
-    h: usize,
-) -> Manifest {
-    let mut m = Manifest::blank_image(
-        w,
-        h,
-        node_addrs.to_vec(),
-        zones.to_vec(),
-        Placement::RendezvousZoneAware,
-    );
-    m.created_at_unix = holofs_core::time::now_unix();
-    put_object(gf, &mut m, &live.to_vec(), channels)
-        .await
-        .expect("PUT failed during seed");
-    m
 }
 
 /// Build TLS material for the wire protocol.

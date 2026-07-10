@@ -402,13 +402,15 @@ sequenceDiagram
 Все многобайтовые целые — **big-endian**, если не указано иное. Файлы
 идентифицируются по 8-байтовому магическому префиксу на offset 0.
 
-### 3.1. Manifest (`HOLOFSM9`, legacy `HOLOFSM6/M7/M8` читаются)
+### 3.1. Manifest (`HOLOFSMA`, legacy `HOLOFSM6/M7/M8/M9` читаются)
 
-Манифест несёт discriminant `ObjectKind` (`4 = Directory`) и
-завершающий селектор `encoding` (`0 = Rlnc`, `1 = Replicated`). Старые
-файлы `HOLOFSM6/M7/M8` декодируются под новым кодом чисто —
-недостающие поля откатываются к историческим дефолтам
-(`encoding = Rlnc`, `created_at_unix = 0`).
+Манифест несёт discriminant `ObjectKind` (`4 = Directory`),
+завершающий селектор `encoding` (`0 = Rlnc`, `1 = Replicated`) и
+следом байт `state` (`0 = Ready`, `1 = Encoding`, `2 = Failed`) —
+последний добавлен в `HOLOFSMA` для async-ingest. Старые файлы
+`HOLOFSM6/M7/M8/M9` декодируются под новым кодом чисто — недостающие
+поля откатываются к историческим дефолтам (`state = Ready`,
+`encoding = Rlnc`, `created_at_unix = 0`).
 
 Directory-маркеры имеют все числовые поля обнулёнными и каждый
 `Vec`-филд пустым; их единственный носитель — `object_id`
@@ -418,7 +420,7 @@ Directory-маркеры имеют все числовые поля обнул�
 Сериализованный `Manifest`, описывающий encoding одного объекта.
 
 ```
-magic           8  bytes = "HOLOFSM9" (legacy "HOLOFSM6/M7/M8" тоже принимаются)
+magic           8  bytes = "HOLOFSMA" (legacy "HOLOFSM6/M7/M8/M9" тоже принимаются)
 object_id       8  bytes BE
 k               2  bytes BE
 nlayers         1  byte
@@ -1012,10 +1014,11 @@ RSP_EPOCH:                0x07 | u64 epoch
 
 ## 10. Добавления в формат манифеста
 
-### 10.1 Магический префикс `HOLOFSM9` и селектор encoding
+### 10.1 Магический префикс `HOLOFSMA` — селекторы `encoding` и `state`
 
 Manifest на диске несёт one-byte `encoding`-discriminant плюс
-variant-specific хвост:
+variant-specific хвост, за которым идёт byte `state`, добавленный в
+`HOLOFSMA`:
 
 | Byte | Вариант                                                              | Хвост |
 |------|----------------------------------------------------------------------|-------|
@@ -1029,9 +1032,16 @@ variant-specific хвост:
 позволяет `/api/spotlight.png` фетчить только те блоки, чьи
 коэффициенты перекрывают запрошенный ROI.
 
-Обратная совместимость: legacy magic-байты `HOLOFSM6`, `HOLOFSM7` и
-`HOLOFSM8` всё ещё декодируются. `HOLOFSM8`-записи получают
-`encoding = Rlnc` при чтении; `HOLOFSM7` / `HOLOFSM6` дополнительно
+Байт `state` (присутствует только в `HOLOFSMA`): `0=Ready`,
+`1=Encoding`, `2=Failed`. Async-ingest PUT (`HOLOFS_ASYNC_ENCODE=1`)
+складывает placeholder с `state=Encoding`; фоновый worker
+переключает его на `Ready` (успех) или `Failed` (ошибка кодирования /
+persist).
+
+Обратная совместимость: legacy magic-байты `HOLOFSM6`, `HOLOFSM7`,
+`HOLOFSM8` и `HOLOFSM9` всё ещё декодируются. `HOLOFSM9`-записи
+получают `state = Ready` при чтении; `HOLOFSM8` дополнительно
+получает `encoding = Rlnc`; `HOLOFSM7` / `HOLOFSM6` дополнительно
 заполняют `created_at_unix = 0`.
 
 ---

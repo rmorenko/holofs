@@ -166,8 +166,18 @@ impl Gateway {
                             ))
                         })?
                     };
+                    // v3-7: source `(w, h)` from the retry snapshot,
+                    // not the pre-repair one. Auto-repair only rewrites
+                    // shard_hashes, but a concurrent restore_version
+                    // between the initial snapshot and this retry
+                    // could plant a completely different manifest with
+                    // different dims — using `dim_w`/`dim_h` from the
+                    // stale outer snapshot would then encode_png the
+                    // fresh channels through the old dims and panic.
+                    let rw = repaired.width;
+                    let rh = repaired.height;
                     return match get_object_blocks(&repaired, &live, &all_ids).await {
-                        Ok((ch, b)) => Ok((dim_w, dim_h, ch, b)),
+                        Ok((ch, b)) => Ok((rw, rh, ch, b)),
                         Err(e) => {
                             self.metrics.auto_repair_failures_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -218,8 +228,13 @@ impl Gateway {
                         ))
                     })?
                 };
+                // v3-7: same rationale as the Replicated retry above
+                // — pair the returned channels with `(w, h)` from the
+                // same snapshot they were decoded from.
+                let rw = repaired.width;
+                let rh = repaired.height;
                 match get_object_up_to_layer(&self.gf, &repaired, &live, max_layer).await {
-                    Ok((ch, b)) => Ok((dim_w, dim_h, ch, b)),
+                    Ok((ch, b)) => Ok((rw, rh, ch, b)),
                     Err(e) => {
                         self.metrics.auto_repair_failures_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

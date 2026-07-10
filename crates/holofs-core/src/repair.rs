@@ -42,11 +42,17 @@ pub fn mix_donors(gf: &Gf, donors: &[Shard], need: usize, rng: &mut Rng) -> Vec<
             if alpha == 0 {
                 continue;
             }
+            // v3-10: one lookup table shared across coeffs *and*
+            // payload — same `alpha`. Amortises the 256-byte table
+            // build across `K + slen` byte-multiplications, which
+            // for the standard `slen = 2 KB` is a ~10× reduction in
+            // per-byte work.
+            let mul_table = gf.mul_table(alpha);
             for i in 0..K {
-                nc[i] ^= gf.mul(alpha, src.coeffs[i]);
+                nc[i] ^= mul_table[src.coeffs[i] as usize];
             }
             for j in 0..slen {
-                np[j] ^= gf.mul(alpha, src.payload[j]);
+                np[j] ^= mul_table[src.payload[j] as usize];
             }
         }
         if nc.iter().all(|&b| b == 0) {

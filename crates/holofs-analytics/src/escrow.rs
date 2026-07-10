@@ -33,7 +33,7 @@
 //! ## `.holoshare` format
 //!
 //! ```text
-//! magic           9  bytes = b"HOLOSHAR1"
+//! magic           9  bytes = b"HOLOSHAR2"
 //! escrow_id       16 bytes — UUID-like (derived from data_cid)
 //! shard_idx       2  bytes BE — this share index (0..N-1)
 //! total_n         2  bytes BE — total number of shares

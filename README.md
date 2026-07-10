@@ -291,10 +291,11 @@ source of truth.
 
 The e2e suite spawns a fresh `holofs-web` gateway against a `TempDir`
 storage for every scenario; running them serial (`--test-threads=1`)
-keeps embedded node ports collision-free. Twelve tests are
+keeps embedded node ports collision-free. A subset of tests are
 `#[ignore]`'d behind `--include-ignored` because they download
 ~155 MiB (CLIP) or ~700 MiB (multilingual) of model weights on first
-run.
+run — exact count drifts with the suite; `cargo test -p holofs-e2e`
+prints "N ignored" on its result line.
 
 Line-coverage on measurable code (excluding HTTP-handler / leptos
 SSR code that only runs inside the spawned gateway):

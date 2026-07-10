@@ -189,7 +189,16 @@ impl Gateway {
             ));
         }
         let mut cat = self.catalog.write().await;
-        let entry = cat.get(old).cloned().ok_or(GatewayError::NotFound)?;
+        // v3-6: Arc-clone the existing entry instead of deep-cloning
+        // the whole Manifest just to re-wrap it. `insert_arc` on the
+        // new key shares the same backing storage — mv on a large
+        // manifest (with a full `shard_hashes` tree) used to
+        // duplicate ~1 MB for no reason.
+        let entry_arc = cat
+            .entries
+            .get(old)
+            .cloned()
+            .ok_or(GatewayError::NotFound)?;
         if cat.get(new).is_some() {
             return Err(GatewayError::AlreadyExists);
         }
@@ -205,8 +214,9 @@ impl Gateway {
             }
         }
         let mut moved: Vec<(String, String, std::sync::Arc<Manifest>)> = Vec::new();
-        moved.push((old.to_string(), new.to_string(), std::sync::Arc::new(entry.clone())));
-        if entry.kind == ObjectKind::Directory {
+        let entry_kind = entry_arc.kind;
+        moved.push((old.to_string(), new.to_string(), entry_arc));
+        if entry_kind == ObjectKind::Directory {
             let child_prefix = format!("{old}/");
             for (k, v) in cat.entries.range(child_prefix.clone()..) {
                 if !k.starts_with(&child_prefix) {

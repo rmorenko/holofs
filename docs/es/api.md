@@ -410,13 +410,16 @@ sequenceDiagram
 Todos los enteros multi-byte son **big-endian** a menos que se indique.
 Los archivos se identifican por un magic de 8 bytes en el offset 0.
 
-### 3.1. Manifest (`HOLOFSM9`, legacy `HOLOFSM6/M7/M8` aceptados al leer)
+### 3.1. Manifest (`HOLOFSMA`, legacy `HOLOFSM6/M7/M8/M9` aceptados al leer)
 
-El manifiesto lleva un discriminante `ObjectKind` (`4 = Directory`) y
-un selector `encoding` al final (`0 = Rlnc`, `1 = Replicated`). Los
-archivos viejos `HOLOFSM6/M7/M8` decodifican limpiamente bajo el nuevo
-código — los campos faltantes recaen en los valores por defecto
-históricos (`encoding = Rlnc`, `created_at_unix = 0`).
+El manifiesto lleva un discriminante `ObjectKind` (`4 = Directory`),
+un selector `encoding` al final (`0 = Rlnc`, `1 = Replicated`) y a
+continuación un byte `state` (`0 = Ready`, `1 = Encoding`,
+`2 = Failed`) — este último añadido en `HOLOFSMA` para ingest
+asíncrono. Los archivos viejos `HOLOFSM6/M7/M8/M9` decodifican
+limpiamente bajo el nuevo código — los campos faltantes recaen en
+los valores por defecto históricos (`state = Ready`,
+`encoding = Rlnc`, `created_at_unix = 0`).
 
 Los marcadores de directorio tienen todos los campos numéricos en cero
 y todos los campos `Vec` vacíos; su único portador es `object_id`
@@ -426,7 +429,7 @@ un `content_type` fijo de `inode/directory`.
 Un `Manifest` serializado describiendo la codificación de un objeto.
 
 ```
-magic           8  bytes = "HOLOFSM7" (legacy "HOLOFSM6" también aceptado)
+magic           8  bytes = "HOLOFSMA" (legacy "HOLOFSM6/M7/M8/M9" también aceptado)
 object_id       8  bytes BE
 k               2  bytes BE
 nlayers         1  byte
@@ -1036,10 +1039,11 @@ Mismo límite `MAX_FRAME = 64 MiB` que el resto del protocolo.
 
 ## 10. Adiciones al formato de manifiesto
 
-### 10.1 Magic `HOLOFSM9` y selector de codificación
+### 10.1 Magic `HOLOFSMA` — selectores `encoding` y `state`
 
 El manifiesto en disco lleva un discriminante `encoding` de un byte
-más una cola específica de variante:
+más una cola específica de variante, seguido del byte `state`
+introducido en `HOLOFSMA`:
 
 | Byte | Variante                                                            | Cola |
 |------|---------------------------------------------------------------------|------|
@@ -1053,10 +1057,17 @@ bloques de anchura `block_size` y replica cada bloque entre
 bloques es lo que permite a `/api/spotlight.png` extraer solo los
 bloques cuyos coeficientes se solapan con el ROI solicitado.
 
+Byte `state` (presente solo en `HOLOFSMA`): `0=Ready`, `1=Encoding`,
+`2=Failed`. Los PUT de ingest asíncrono (`HOLOFS_ASYNC_ENCODE=1`)
+almacenan un placeholder con `state=Encoding`; el worker en segundo
+plano cambia a `Ready` (éxito) o `Failed` (error de codificación /
+persistencia).
+
 Compatibilidad hacia atrás: los magic bytes legacy `HOLOFSM6`,
-`HOLOFSM7`, y `HOLOFSM8` siguen siendo decodificables. Los registros
-`HOLOFSM8` obtienen `encoding = Rlnc` al leer; `HOLOFSM7` / `HOLOFSM6`
-adicionalmente rellenan `created_at_unix = 0`.
+`HOLOFSM7`, `HOLOFSM8` y `HOLOFSM9` siguen siendo decodificables.
+Los registros `HOLOFSM9` obtienen `state = Ready` al leer;
+`HOLOFSM8` adicionalmente obtiene `encoding = Rlnc`; `HOLOFSM7` /
+`HOLOFSM6` adicionalmente rellenan `created_at_unix = 0`.
 
 ---
 
