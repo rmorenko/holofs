@@ -584,7 +584,7 @@ impl Gateway {
         // placeholders + their bodies would eventually OOM the
         // gateway. Refuse fast so the caller backs off (or its
         // retry loop pauses on the Retry-After header) instead.
-        if self.objects_encoding.load(Ordering::Acquire) >= self.encode_queue_max as u64 {
+        if self.metrics.objects_encoding.load(Ordering::Acquire) >= self.backpressure.encode_queue_max as u64 {
             return Err(GatewayError::AsyncQueueFull);
         }
 
@@ -695,7 +695,7 @@ impl Gateway {
         // single biggest fast-path win: under 50-worker soak load the
         // 202 p50 dropped from ~7.7 s → single digits of ms because
         // async PUTs no longer serialise on the catalog-persist fd.
-        self.objects_encoding.fetch_add(1, Ordering::Relaxed);
+        self.metrics.objects_encoding.fetch_add(1, Ordering::Relaxed);
         let staged_ms = t0.elapsed().as_millis();
 
         let gw = Arc::clone(self);
@@ -739,7 +739,7 @@ impl Gateway {
         // async PUTs simply spend longer in `Encoding`, polling
         // clients see 503+Retry-After and back off — the natural
         // end-to-end throttle.
-        let _permit = Arc::clone(&self.encode_permits)
+        let _permit = Arc::clone(&self.backpressure.encode_permits)
             .acquire_owned()
             .await
             .expect("encode permit semaphore closed");
@@ -775,9 +775,9 @@ impl Gateway {
                     eprintln!(
                         "PUT-async {name}: encode ok but catalog persist failed: {e:?}"
                     );
-                    self.encode_failed_total.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.encode_failed_total.fetch_add(1, Ordering::Relaxed);
                 } else {
-                    self.encode_completed_total.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.encode_completed_total.fetch_add(1, Ordering::Relaxed);
                     self.embed_object_in_background(name.clone());
                 }
             }
@@ -791,7 +791,7 @@ impl Gateway {
                 drop(cat);
                 self.invalidate_cache(&name).await;
                 let _ = self.persist_catalog().await;
-                self.encode_failed_total.fetch_add(1, Ordering::Relaxed);
+                self.metrics.encode_failed_total.fetch_add(1, Ordering::Relaxed);
 
                 // Best-effort shard cleanup: fire `Purge { object_id }`
                 // at every live node using the REAL manifest surfaced
@@ -811,6 +811,6 @@ impl Gateway {
                 }
             }
         }
-        self.objects_encoding.fetch_sub(1, Ordering::Relaxed);
+        self.metrics.objects_encoding.fetch_sub(1, Ordering::Relaxed);
     }
 }

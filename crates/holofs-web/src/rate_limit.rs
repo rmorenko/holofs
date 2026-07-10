@@ -80,18 +80,14 @@ impl RateLimit {
     /// default) the whole layer is a no-op — every request passes
     /// through untouched.
     pub fn from_env(rejected_total: Arc<AtomicU64>) -> Self {
-        let rps: f64 = std::env::var("HOLOFS_RATE_LIMIT_RPS_PER_IP")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0.0);
-        let burst: f64 = std::env::var("HOLOFS_RATE_LIMIT_BURST")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| rps * 2.0);
-        let idle_secs: u64 = std::env::var("HOLOFS_RATE_LIMIT_IDLE_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(300);
+        let sec = &crate::runtime_config::RuntimeConfig::get().security;
+        let rps = sec.rate_limit_rps_per_ip;
+        let burst = if sec.rate_limit_burst > 0.0 {
+            sec.rate_limit_burst
+        } else {
+            rps * 2.0
+        };
+        let idle_secs = sec.rate_limit_idle_secs;
         let enabled = rps > 0.0 && burst > 0.0;
         if enabled {
             tracing::info!(

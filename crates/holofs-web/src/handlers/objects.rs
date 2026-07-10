@@ -52,10 +52,9 @@ async fn manifest_state(gw: &Gateway, name: &str) -> ManifestState {
 /// Configurable via `HOLOFS_UPLOAD_MAX_SIZE=<bytes>` — default 1 GiB
 /// (four times the in-RAM cap since disk is cheap).
 fn upload_max_size() -> u64 {
-    std::env::var("HOLOFS_UPLOAD_MAX_SIZE")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(1024 * 1024 * 1024)
+    crate::runtime_config::RuntimeConfig::get()
+        .storage
+        .upload_max_size
 }
 
 /// monotonically-increasing counter for tempfile names inside
@@ -70,13 +69,12 @@ fn upload_tmp_path(gw: &Arc<Gateway>) -> std::path::PathBuf {
     // same filesystem — a rename would need same-mount atomicity if
     // we ever start converting the tempfile into the final on-disk
     // artifact, but for now we just read + delete.
-    let storage_root = gw
-        .cluster()
-        .node_addrs
-        .first()
-        .map(|_| std::env::var("HOLOFS_STORAGE_DIR").unwrap_or_else(|_| "./holofs-data".into()))
-        .unwrap_or_else(|| "./holofs-data".into());
-    let dir = std::path::PathBuf::from(storage_root).join("uploads");
+    let storage_root = crate::runtime_config::RuntimeConfig::get()
+        .storage
+        .storage_dir
+        .clone();
+    let _ = gw; // cluster handle kept for potential future per-node routing
+    let dir = storage_root.join("uploads");
     let _ = std::fs::create_dir_all(&dir);
     dir.join(format!("upload-{pid}-{n}.tmp"))
 }
@@ -344,9 +342,9 @@ pub async fn put_object(
     // async ingest — the handler returns 202 as soon as the
     // placeholder manifest is committed and the encode runs on a
     // detached tokio task.
-    let async_mode = std::env::var("HOLOFS_ASYNC_ENCODE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let async_mode = crate::runtime_config::RuntimeConfig::get()
+        .features
+        .async_encode;
     let ingest_result = match q.encoding.as_deref() {
         None | Some("rlnc") => {
             if async_mode {

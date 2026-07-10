@@ -23,11 +23,128 @@ use crate::health::ApiStats;
 use crate::search::EmbedState;
 use crate::versions::VersionsState;
 
-/// Aggregate handle to every N-series counter for `/metrics`. Borrows
-/// from the Gateway so read paths can format them without cloning
-/// eleven Arcs. Consumers touch `.load(Ordering::Relaxed)` on each
-/// atomic and `available_permits() / initial capacity()` on the two
-/// semaphores.
+/// All Prometheus-shaped observability counters for one Gateway
+/// instance. Grouped out of the ~40-field god-object struct into a
+/// dedicated container per the S4-4 review finding; every `_total`
+/// atomic that used to hang directly off `Gateway` now lives here.
+/// Cloning the outer `Arc<Gateway>` still gives shared access to
+/// every counter because each field is itself `Arc<AtomicU64>`.
+pub struct Metrics {
+    /// Auto-repair-on-read attempts / failures — see
+    /// `decode_with_autorepair`.
+    pub auto_repairs_total: Arc<std::sync::atomic::AtomicU64>,
+    /// Auto-repair passes that themselves failed.
+    pub auto_repair_failures_total: Arc<std::sync::atomic::AtomicU64>,
+    /// Background scrub outcomes — objects the scrub healed
+    /// proactively.
+    pub scrub_repairs_total: Arc<std::sync::atomic::AtomicU64>,
+    /// Background scrub ticks executed.
+    pub scrub_runs_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N4 — atomic catalog save-to-disk errors.
+    pub catalog_persist_failures_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N3 — 503 responses on MEDIUM bucket saturation.
+    pub medium_rejected_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N3 — 503 responses on LONG bucket saturation.
+    pub long_rejected_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N7 — 504s on the short-bucket deadline.
+    pub timeout_short_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N7 — 504s on the medium-bucket deadline.
+    pub timeout_medium_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N7 — 504s on the long-bucket deadline.
+    pub timeout_long_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N2 — supervised monitor loop restarts.
+    pub task_restarts_monitor: Arc<std::sync::atomic::AtomicU64>,
+    /// N2 — supervised auditor loop restarts.
+    pub task_restarts_auditor: Arc<std::sync::atomic::AtomicU64>,
+    /// N2 — supervised scrub loop restarts.
+    pub task_restarts_scrub: Arc<std::sync::atomic::AtomicU64>,
+    /// N6 — 401s from `require_admin_token` (missing header).
+    pub admin_auth_missing_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N6 — 401s from `require_admin_token` (bad token).
+    pub admin_auth_bad_total: Arc<std::sync::atomic::AtomicU64>,
+    /// N6 — 403s when admin surface has no token set at all.
+    pub admin_auth_disabled_total: Arc<std::sync::atomic::AtomicU64>,
+    /// 429s from the per-IP rate limit middleware.
+    pub rate_limit_rejected_total: Arc<std::sync::atomic::AtomicU64>,
+    /// Gauge — objects currently being encoded (async ingest).
+    pub objects_encoding: Arc<std::sync::atomic::AtomicU64>,
+    /// Async encodes that finished Ready.
+    pub encode_completed_total: Arc<std::sync::atomic::AtomicU64>,
+    /// Async encodes that finished Failed.
+    pub encode_failed_total: Arc<std::sync::atomic::AtomicU64>,
+    /// `persist_catalog` group-commit dirty ticket generator.
+    pub persist_dirty_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// `persist_catalog` most-recently-fsynced dirty ticket.
+    pub persist_flushed_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// `persist_catalog` callers whose ticket was covered by an
+    /// in-flight flush and so paid zero fsync.
+    pub persist_coalesced_total: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Metrics {
+    fn new() -> Self {
+        use std::sync::atomic::AtomicU64;
+        let a = || Arc::new(AtomicU64::new(0));
+        Self {
+            auto_repairs_total: a(),
+            auto_repair_failures_total: a(),
+            scrub_repairs_total: a(),
+            scrub_runs_total: a(),
+            catalog_persist_failures_total: a(),
+            medium_rejected_total: a(),
+            long_rejected_total: a(),
+            timeout_short_total: a(),
+            timeout_medium_total: a(),
+            timeout_long_total: a(),
+            task_restarts_monitor: a(),
+            task_restarts_auditor: a(),
+            task_restarts_scrub: a(),
+            admin_auth_missing_total: a(),
+            admin_auth_bad_total: a(),
+            admin_auth_disabled_total: a(),
+            rate_limit_rejected_total: a(),
+            objects_encoding: a(),
+            encode_completed_total: a(),
+            encode_failed_total: a(),
+            persist_dirty_epoch: a(),
+            persist_flushed_epoch: a(),
+            persist_coalesced_total: a(),
+        }
+    }
+}
+
+/// Backpressure permits and related tunables. Grouped out of Gateway
+/// per S4-4; kept as bare `Arc` fields because `configure_limits` /
+/// `configure_encode_limit` still need to swap the semaphores at
+/// bootstrap (`Arc::get_mut` only works while refcount is 1 — that
+/// window is what `configure_*` relies on).
+pub struct Backpressure {
+    /// MEDIUM bucket permits (decodes / PUT / dir ops).
+    pub medium_permits: Arc<tokio::sync::Semaphore>,
+    /// LONG bucket permits (semantic search, similar, spotlight, GC).
+    pub long_permits: Arc<tokio::sync::Semaphore>,
+    /// Async-ingest background encoder concurrency cap.
+    pub encode_permits: Arc<tokio::sync::Semaphore>,
+    /// Intake ceiling for async ingest — objects in `state=Encoding`
+    /// are refused above this via `AsyncQueueFull` (503+Retry-After).
+    pub encode_queue_max: usize,
+}
+
+impl Backpressure {
+    fn new() -> Self {
+        Self {
+            medium_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MEDIUM_CONCURRENCY)),
+            long_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_LONG_CONCURRENCY)),
+            encode_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_ENCODE_CONCURRENCY)),
+            encode_queue_max: DEFAULT_ENCODE_QUEUE_MAX,
+        }
+    }
+}
+
+/// Aggregate handle to every N-series counter for `/metrics`. Now a
+/// thin borrowed view over [`Metrics`] and [`Backpressure`]; consumers
+/// still touch `.load(Ordering::Relaxed)` on each atomic and
+/// `available_permits() / initial capacity()` on the two semaphores.
 pub struct ObservabilityCounters<'gw> {
     pub medium_permits: &'gw Arc<tokio::sync::Semaphore>,
     pub long_permits: &'gw Arc<tokio::sync::Semaphore>,
@@ -215,90 +332,15 @@ pub struct Gateway {
     /// window is enough to heal a real hole while keeping the
     /// gateway responsive.
     pub(crate) auto_repair_cooldown: Mutex<HashMap<String, std::time::Instant>>,
-    /// Auto-repair-on-read counters. Bumped from
-    /// `decode_with_autorepair` when the first decode attempt
-    /// hits `ClientError::LayerLost` and the retry path kicks in.
-    /// Surfaced via `ApiStats`.
-    pub(crate) auto_repairs_total: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) auto_repair_failures_total: Arc<std::sync::atomic::AtomicU64>,
-    /// Background-scrub counters: how many objects this gateway has
-    /// proactively repaired before any user GET tripped a 503.
-    /// Bumped from the scrub task spawned at bootstrap (see
-    /// `scrub_tick`).
-    pub(crate) scrub_repairs_total: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) scrub_runs_total: Arc<std::sync::atomic::AtomicU64>,
-    /// N4: how many times `persist_catalog` saw the on-disk write
-    /// return an IO error. Pre-N4 this was swallowed via `eprintln!`
-    /// and callers succeeded anyway; now they refuse with
-    /// `GatewayError::Persist` and increment this counter. A
-    /// non-zero value here means the catalog on disk is behind the
-    /// catalog in memory and the next restart will lose writes.
-    pub(crate) catalog_persist_failures_total: Arc<std::sync::atomic::AtomicU64>,
-    /// N3: backpressure permits + rejection counters for the two
-    /// non-cheap route buckets. `medium_permits` caps decode / PUT /
-    /// dir-op concurrency (default 64); `long_permits` caps semantic
-    /// search / spotlight / GC (default 8). Both configurable via
-    /// `HOLOFS_MEDIUM_CONCURRENCY` / `HOLOFS_LONG_CONCURRENCY`.
-    ///
-    /// The `holofs-web` middleware wraps every request in a
-    /// `try_acquire_owned` — on failure it bumps `*_rejected_total`
-    /// and returns 503 Service Unavailable so a bursting client
-    /// can back off instead of piling up axum tasks that all fight
-    /// for the same 40-node cluster.
-    pub(crate) medium_permits: Arc<tokio::sync::Semaphore>,
-    pub(crate) long_permits: Arc<tokio::sync::Semaphore>,
-    pub(crate) medium_rejected_total: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) long_rejected_total: Arc<std::sync::atomic::AtomicU64>,
-    /// N7: 504 counter — bumped by the timeout middleware in
-    /// `holofs-web` each time a handler exceeds its bucket deadline.
-    /// Split by bucket via `holofs_handler_timeouts_total{bucket=…}`
-    /// in `/metrics`.
-    pub(crate) timeout_short_total: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) timeout_medium_total: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) timeout_long_total: Arc<std::sync::atomic::AtomicU64>,
-    /// N2: supervised-task restart counters. Bumped every time
-    /// `supervised_spawn` decides to restart after a panic
-    /// (or an unexpected voluntary return). Emitted in `/metrics`
-    /// as `holofs_supervised_task_restarts_total{task=…}`. Only
-    /// the three long-lived tasks live here; ad-hoc supervised
-    /// spawns would need to grow this map.
-    pub(crate) task_restarts_monitor: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) task_restarts_auditor: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) task_restarts_scrub: Arc<std::sync::atomic::AtomicU64>,
-    /// N6: admin bearer-token auth failures. Bumped by the
-    /// `require_admin_token` middleware on 401 (bad or missing
-    /// token) and 403 (admin surface disabled entirely). Emitted
-    /// in `/metrics` as `holofs_admin_auth_failures_total{outcome=…}`
-    /// split by rejection reason.
-    pub(crate) admin_auth_missing_total: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) admin_auth_bad_total: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) admin_auth_disabled_total: Arc<std::sync::atomic::AtomicU64>,
-    /// 429 responses caused by the per-IP rate limit
-    /// middleware. Zero when the limit is disabled
-    /// (`HOLOFS_RATE_LIMIT_RPS_PER_IP=0`). Emitted in `/metrics`
-    /// as `holofs_rate_limit_rejected_total`.
-    pub(crate) rate_limit_rejected_total: Arc<std::sync::atomic::AtomicU64>,
-    /// Async-ingest lifecycle counters. Zero for the sync path
-    /// (default). `objects_encoding` is a gauge — currently-active
-    /// background encode tasks. `encode_completed_total` /
-    /// `encode_failed_total` are cumulative counts of finished
-    /// tasks by outcome. Emitted in `/metrics`.
-    pub(crate) objects_encoding: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) encode_completed_total: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) encode_failed_total: Arc<std::sync::atomic::AtomicU64>,
-    /// Dedicated backpressure for async-ingest background encoders.
-    /// See [`DEFAULT_ENCODE_CONCURRENCY`] for why this is separate
-    /// from `medium_permits` — reusing MEDIUM meant one saturating
-    /// PUT storm blocked out mkdir / rmdir / put_new on their HTTP
-    /// gate (97 % 503 in the July 2026 soak).
-    pub(crate) encode_permits: Arc<tokio::sync::Semaphore>,
-    /// Intake ceiling for async ingest — see
-    /// [`DEFAULT_ENCODE_QUEUE_MAX`]. Compared against
-    /// `objects_encoding.load()` at the top of
-    /// `ingest_bytes_async`; over the ceiling we return
-    /// `AsyncQueueFull` (503+Retry-After) so the queue can't grow
-    /// past a bounded RAM footprint.
-    pub(crate) encode_queue_max: usize,
+    /// All Prometheus-shaped counters. Grouped out of Gateway per
+    /// the S4-4 review finding — see [`Metrics`] for the field list.
+    /// Cloning `Arc<Gateway>` keeps every counter shared because
+    /// each is itself an `Arc<AtomicU64>`.
+    pub(crate) metrics: Metrics,
+    /// Backpressure permits and related tunables. See
+    /// [`Backpressure`]; mutated only at bootstrap through
+    /// `Gateway::configure_*`.
+    pub(crate) backpressure: Backpressure,
     /// TTL cache for `api_stats`. `api_stats` is O(N × M) — N
     /// manifests × M shard hashes — and must clone the whole
     /// catalog to avoid holding the mutex during the walk. Under
@@ -310,21 +352,12 @@ pub struct Gateway {
     /// sub-second freshness, and the mutex churn drops to at most
     /// two contended acquisitions per second.
     pub(crate) stats_cache: Arc<tokio::sync::Mutex<Option<(std::time::Instant, ApiStats)>>>,
-    /// Group-commit coalescing for [`Self::persist_catalog`]. Every
-    /// mutation increments `persist_dirty_epoch` after it commits;
-    /// the flush leader (single-writer serialised on
-    /// `persist_flush_mutex`) atomically snapshots the catalog +
-    /// the current dirty epoch, writes, then publishes to
-    /// `persist_flushed_epoch`. Concurrent callers whose ticket is
-    /// already covered by an in-flight or completed flush skip the
-    /// fsync entirely and count in `persist_coalesced_total`.
-    /// Under the July 2026 soak this cut per-mutation persist
-    /// latency from ~100 ms (fsync serialisation) to near-zero for
-    /// followers.
-    pub(crate) persist_dirty_epoch: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) persist_flushed_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// Group-commit coalescing for [`Self::persist_catalog`]. The
+    /// `persist_dirty_epoch` / `persist_flushed_epoch` /
+    /// `persist_coalesced_total` counters now live on [`Metrics`];
+    /// only the leader mutex stays on Gateway because it is not a
+    /// counter and doesn't fit either grouped struct cleanly.
     pub(crate) persist_flush_mutex: Arc<tokio::sync::Mutex<()>>,
-    pub(crate) persist_coalesced_total: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// PNG cache entry: fully-encoded body + the layer it was decoded at
@@ -374,9 +407,7 @@ impl Gateway {
         cluster: Arc<ClusterInfo>,
         catalog_path: Option<std::path::PathBuf>,
     ) -> Arc<Self> {
-        use std::sync::atomic::AtomicU64;
         let n = cluster.node_addrs.len();
-        let atomic_u64 = || Arc::new(AtomicU64::new(0));
         Arc::new(Self {
             catalog,
             catalog_path,
@@ -392,34 +423,9 @@ impl Gateway {
             escrow_cache: Mutex::new(HashMap::new()),
             fingerprint_cache: Mutex::new(HashMap::new()),
             auto_repair_cooldown: Mutex::new(HashMap::new()),
-            auto_repairs_total: atomic_u64(),
-            auto_repair_failures_total: atomic_u64(),
-            scrub_repairs_total: atomic_u64(),
-            scrub_runs_total: atomic_u64(),
-            catalog_persist_failures_total: atomic_u64(),
-            medium_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MEDIUM_CONCURRENCY)),
-            long_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_LONG_CONCURRENCY)),
-            medium_rejected_total: atomic_u64(),
-            long_rejected_total: atomic_u64(),
-            timeout_short_total: atomic_u64(),
-            timeout_medium_total: atomic_u64(),
-            timeout_long_total: atomic_u64(),
-            task_restarts_monitor: atomic_u64(),
-            task_restarts_auditor: atomic_u64(),
-            task_restarts_scrub: atomic_u64(),
-            admin_auth_missing_total: atomic_u64(),
-            admin_auth_bad_total: atomic_u64(),
-            admin_auth_disabled_total: atomic_u64(),
-            rate_limit_rejected_total: atomic_u64(),
-            objects_encoding: atomic_u64(),
-            encode_completed_total: atomic_u64(),
-            encode_failed_total: atomic_u64(),
-            encode_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_ENCODE_CONCURRENCY)),
-            encode_queue_max: DEFAULT_ENCODE_QUEUE_MAX,
-            persist_dirty_epoch: atomic_u64(),
-            persist_flushed_epoch: atomic_u64(),
+            metrics: Metrics::new(),
+            backpressure: Backpressure::new(),
             persist_flush_mutex: Arc::new(tokio::sync::Mutex::new(())),
-            persist_coalesced_total: atomic_u64(),
             stats_cache: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
@@ -431,8 +437,8 @@ impl Gateway {
     /// afterwards would race with in-flight `try_acquire_owned`
     /// calls and lose their permits.
     pub fn configure_limits(&mut self, medium: usize, long: usize) {
-        self.medium_permits = Arc::new(tokio::sync::Semaphore::new(medium));
-        self.long_permits = Arc::new(tokio::sync::Semaphore::new(long));
+        self.backpressure.medium_permits = Arc::new(tokio::sync::Semaphore::new(medium));
+        self.backpressure.long_permits = Arc::new(tokio::sync::Semaphore::new(long));
     }
 
     /// N3: reset the async-ingest encode-worker concurrency cap.
@@ -440,7 +446,7 @@ impl Gateway {
     /// Same lifecycle constraint as [`Self::configure_limits`]: safe
     /// only before axum starts serving.
     pub fn configure_encode_limit(&mut self, encode: usize) {
-        self.encode_permits = Arc::new(tokio::sync::Semaphore::new(encode));
+        self.backpressure.encode_permits = Arc::new(tokio::sync::Semaphore::new(encode));
     }
 
     /// Set the async-ingest intake ceiling — see
@@ -448,7 +454,7 @@ impl Gateway {
     /// `HOLOFS_ENCODE_QUEUE_MAX` and applies it once before axum
     /// begins serving.
     pub fn configure_encode_queue_max(&mut self, queue_max: usize) {
-        self.encode_queue_max = queue_max;
+        self.backpressure.encode_queue_max = queue_max;
     }
 
     /// Handle for the /metrics endpoint (backpressure permits +
@@ -457,24 +463,24 @@ impl Gateway {
     /// bundle without leaking the private field names.
     pub fn observability_counters(&self) -> ObservabilityCounters<'_> {
         ObservabilityCounters {
-            medium_permits: &self.medium_permits,
-            long_permits: &self.long_permits,
-            medium_rejected_total: &self.medium_rejected_total,
-            long_rejected_total: &self.long_rejected_total,
-            timeout_short_total: &self.timeout_short_total,
-            timeout_medium_total: &self.timeout_medium_total,
-            timeout_long_total: &self.timeout_long_total,
-            task_restarts_monitor: &self.task_restarts_monitor,
-            task_restarts_auditor: &self.task_restarts_auditor,
-            task_restarts_scrub: &self.task_restarts_scrub,
-            catalog_persist_failures_total: &self.catalog_persist_failures_total,
-            admin_auth_missing_total: &self.admin_auth_missing_total,
-            admin_auth_bad_total: &self.admin_auth_bad_total,
-            admin_auth_disabled_total: &self.admin_auth_disabled_total,
-            rate_limit_rejected_total: &self.rate_limit_rejected_total,
-            objects_encoding: &self.objects_encoding,
-            encode_completed_total: &self.encode_completed_total,
-            encode_failed_total: &self.encode_failed_total,
+            medium_permits: &self.backpressure.medium_permits,
+            long_permits: &self.backpressure.long_permits,
+            medium_rejected_total: &self.metrics.medium_rejected_total,
+            long_rejected_total: &self.metrics.long_rejected_total,
+            timeout_short_total: &self.metrics.timeout_short_total,
+            timeout_medium_total: &self.metrics.timeout_medium_total,
+            timeout_long_total: &self.metrics.timeout_long_total,
+            task_restarts_monitor: &self.metrics.task_restarts_monitor,
+            task_restarts_auditor: &self.metrics.task_restarts_auditor,
+            task_restarts_scrub: &self.metrics.task_restarts_scrub,
+            catalog_persist_failures_total: &self.metrics.catalog_persist_failures_total,
+            admin_auth_missing_total: &self.metrics.admin_auth_missing_total,
+            admin_auth_bad_total: &self.metrics.admin_auth_bad_total,
+            admin_auth_disabled_total: &self.metrics.admin_auth_disabled_total,
+            rate_limit_rejected_total: &self.metrics.rate_limit_rejected_total,
+            objects_encoding: &self.metrics.objects_encoding,
+            encode_completed_total: &self.metrics.encode_completed_total,
+            encode_failed_total: &self.metrics.encode_failed_total,
         }
     }
 
@@ -483,7 +489,7 @@ impl Gateway {
     /// `RateLimit` config so both the middleware and `/metrics`
     /// see the same atomic.
     pub fn rate_limit_rejected_counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
-        Arc::clone(&self.rate_limit_rejected_total)
+        Arc::clone(&self.metrics.rate_limit_rejected_total)
     }
 
     /// Owned handles to the three admin-auth failure counters, in
@@ -497,9 +503,9 @@ impl Gateway {
         Arc<std::sync::atomic::AtomicU64>,
     ) {
         (
-            Arc::clone(&self.admin_auth_missing_total),
-            Arc::clone(&self.admin_auth_bad_total),
-            Arc::clone(&self.admin_auth_disabled_total),
+            Arc::clone(&self.metrics.admin_auth_missing_total),
+            Arc::clone(&self.metrics.admin_auth_bad_total),
+            Arc::clone(&self.metrics.admin_auth_disabled_total),
         )
     }
 
@@ -508,12 +514,18 @@ impl Gateway {
     /// pair into a `from_fn` closure to enforce backpressure per
     /// bucket.
     pub fn medium_bucket(&self) -> (Arc<tokio::sync::Semaphore>, Arc<std::sync::atomic::AtomicU64>) {
-        (Arc::clone(&self.medium_permits), Arc::clone(&self.medium_rejected_total))
+        (
+            Arc::clone(&self.backpressure.medium_permits),
+            Arc::clone(&self.metrics.medium_rejected_total),
+        )
     }
 
     /// See [`Self::medium_bucket`].
     pub fn long_bucket(&self) -> (Arc<tokio::sync::Semaphore>, Arc<std::sync::atomic::AtomicU64>) {
-        (Arc::clone(&self.long_permits), Arc::clone(&self.long_rejected_total))
+        (
+            Arc::clone(&self.backpressure.long_permits),
+            Arc::clone(&self.metrics.long_rejected_total),
+        )
     }
 
     /// Owned handles to the per-bucket timeout counters, in
@@ -527,9 +539,9 @@ impl Gateway {
         Arc<std::sync::atomic::AtomicU64>,
     ) {
         (
-            Arc::clone(&self.timeout_short_total),
-            Arc::clone(&self.timeout_medium_total),
-            Arc::clone(&self.timeout_long_total),
+            Arc::clone(&self.metrics.timeout_short_total),
+            Arc::clone(&self.metrics.timeout_medium_total),
+            Arc::clone(&self.metrics.timeout_long_total),
         )
     }
 
@@ -544,9 +556,9 @@ impl Gateway {
         Arc<std::sync::atomic::AtomicU64>,
     ) {
         (
-            Arc::clone(&self.task_restarts_monitor),
-            Arc::clone(&self.task_restarts_auditor),
-            Arc::clone(&self.task_restarts_scrub),
+            Arc::clone(&self.metrics.task_restarts_monitor),
+            Arc::clone(&self.metrics.task_restarts_auditor),
+            Arc::clone(&self.metrics.task_restarts_scrub),
         )
     }
 
@@ -647,11 +659,11 @@ impl Gateway {
         // mutation commits (they call persist_catalog last), so any
         // ticket ≤ current dirty_epoch is guaranteed observable in
         // the catalog at the moment we hold `persist_flush_mutex`.
-        let my_ticket = self.persist_dirty_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        let my_ticket = self.metrics.persist_dirty_epoch.fetch_add(1, Ordering::AcqRel) + 1;
 
         // Fast path: an earlier flush already covers our mutation.
-        if self.persist_flushed_epoch.load(Ordering::Acquire) >= my_ticket {
-            self.persist_coalesced_total.fetch_add(1, Ordering::Relaxed);
+        if self.metrics.persist_flushed_epoch.load(Ordering::Acquire) >= my_ticket {
+            self.metrics.persist_coalesced_total.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
 
@@ -660,8 +672,8 @@ impl Gateway {
         // rest re-check on entry and return.
         let _flush_guard = self.persist_flush_mutex.lock().await;
 
-        if self.persist_flushed_epoch.load(Ordering::Acquire) >= my_ticket {
-            self.persist_coalesced_total.fetch_add(1, Ordering::Relaxed);
+        if self.metrics.persist_flushed_epoch.load(Ordering::Acquire) >= my_ticket {
+            self.metrics.persist_coalesced_total.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
 
@@ -685,12 +697,13 @@ impl Gateway {
         // fsync / rename in `write_atomic`.
         let (encoded, flush_epoch) = {
             let cat = self.catalog.read().await;
-            let ep = self.persist_dirty_epoch.load(Ordering::Acquire);
+            let ep = self.metrics.persist_dirty_epoch.load(Ordering::Acquire);
             (cat.encode(), ep)
         };
 
         if let Err(e) = holofs_model::fs::write_atomic(path, &encoded) {
-            self.catalog_persist_failures_total
+            self.metrics
+                .catalog_persist_failures_total
                 .fetch_add(1, Ordering::Relaxed);
             tracing::error!(
                 error = %e,
@@ -703,7 +716,7 @@ impl Gateway {
             )));
         }
 
-        self.persist_flushed_epoch
+        self.metrics.persist_flushed_epoch
             .store(flush_epoch, Ordering::Release);
         Ok(())
     }
@@ -750,7 +763,7 @@ mod tests {
         // No catalog_path → success, no counter bump.
         assert!(gw.persist_catalog().await.is_ok());
         assert_eq!(
-            gw.catalog_persist_failures_total.load(Ordering::Relaxed),
+            gw.metrics.catalog_persist_failures_total.load(Ordering::Relaxed),
             0
         );
     }
@@ -769,7 +782,7 @@ mod tests {
             other => panic!("expected Persist, got {other:?}"),
         }
         assert_eq!(
-            gw.catalog_persist_failures_total.load(Ordering::Relaxed),
+            gw.metrics.catalog_persist_failures_total.load(Ordering::Relaxed),
             1,
             "counter should have incremented once"
         );

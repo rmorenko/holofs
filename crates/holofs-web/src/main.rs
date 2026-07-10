@@ -578,7 +578,10 @@ fn build_mcp_router(gateway: Arc<holofs_gateway::Gateway>) -> Router<LeptosOptio
     use axum::http::{header, StatusCode};
     use axum::middleware::{from_fn, Next};
 
-    let token = std::env::var("HOLOFS_MCP_TOKEN").ok().filter(|s| !s.is_empty());
+    let token = holofs_web::runtime_config::RuntimeConfig::get()
+        .mcp
+        .token
+        .clone();
     let writes = token.is_some();
     let svc = holofs_mcp::make_mcp_service(gateway, writes);
 

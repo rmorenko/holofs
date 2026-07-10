@@ -147,7 +147,7 @@ impl Gateway {
     /// them mid-flight.
     pub async fn scrub_tick(self: &Arc<Self>) -> ScrubReport {
         use std::collections::{HashMap, HashSet};
-        self.scrub_runs_total
+        self.metrics.scrub_runs_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Snapshot live + catalog. We only need names of decodable
@@ -233,7 +233,7 @@ impl Gateway {
             match self.repair_object_inplace(name).await {
                 Ok(()) => {
                     repaired_ok += 1;
-                    self.scrub_repairs_total
+                    self.metrics.scrub_repairs_total
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 Err(e) => {
@@ -329,15 +329,19 @@ impl Gateway {
             dedup_savings_pct: (dedup_pct * 100.0).round() / 100.0,
             bytes_total: total_payload_bytes,
             auto_repairs_total: self
+                .metrics
                 .auto_repairs_total
                 .load(std::sync::atomic::Ordering::Relaxed),
             auto_repair_failures_total: self
+                .metrics
                 .auto_repair_failures_total
                 .load(std::sync::atomic::Ordering::Relaxed),
             scrub_runs_total: self
+                .metrics
                 .scrub_runs_total
                 .load(std::sync::atomic::Ordering::Relaxed),
             scrub_repairs_total: self
+                .metrics
                 .scrub_repairs_total
                 .load(std::sync::atomic::Ordering::Relaxed),
         }

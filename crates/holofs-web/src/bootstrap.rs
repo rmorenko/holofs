@@ -81,41 +81,28 @@ pub struct TlsOptions {
 }
 
 impl BootstrapConfig {
-    /// Build a config from environment variables, mirroring
-    /// `holofs-http`'s `HOLOFS_*` env contract.
+    /// Build a config from the process-wide [`RuntimeConfig`] snapshot
+    /// (which itself is populated from env at bootstrap). Prior to
+    /// S4-5 this method inlined every `HOLOFS_*` env read — a typo
+    /// here vs. the twin read in `main.rs` was a real regression
+    /// vector. Now every knob has one canonical source.
     pub fn from_env() -> Self {
-        let storage = std::env::var("HOLOFS_STORAGE_DIR")
-            .ok()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("./holofs-data"));
-        let catalog = std::env::var("HOLOFS_CATALOG").ok().map(PathBuf::from);
-        let whitelist = std::env::var("HOLOFS_WHITELIST").ok().map(PathBuf::from);
-        let admin_pubkey = std::env::var("HOLOFS_ADMIN_PUBKEY")
-            .ok()
-            .and_then(|s| parse_pubkey_hex(&s));
-        let seed_photo = std::env::var("HOLOFS_SEED_PHOTO").ok().map(PathBuf::from);
-        let no_seed = std::env::var("HOLOFS_NO_SEED")
-            .ok()
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let enable_embed = std::env::var("HOLOFS_ENABLE_EMBED")
-            .ok()
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let enable_versions = std::env::var("HOLOFS_ENABLE_VERSIONS")
-            .ok()
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        let cfg = crate::runtime_config::RuntimeConfig::init();
+        let admin_pubkey = cfg
+            .storage
+            .admin_pubkey
+            .as_deref()
+            .and_then(parse_pubkey_hex);
         Self {
-            storage,
-            catalog,
-            whitelist,
+            storage: cfg.storage.storage_dir.clone(),
+            catalog: cfg.storage.catalog.clone(),
+            whitelist: cfg.storage.whitelist.clone(),
             admin_pubkey,
-            seed_photo,
-            no_seed,
+            seed_photo: cfg.storage.seed_photo.clone(),
+            no_seed: cfg.storage.no_seed,
             tls: TlsOptions::default(),
-            enable_embed,
-            enable_versions,
+            enable_embed: cfg.features.enable_embed,
+            enable_versions: cfg.features.enable_versions,
         }
     }
 }
@@ -193,10 +180,7 @@ pub async fn bootstrap_cluster(
         let n = addrs.len();
         (addrs, zs, n)
     } else {
-        let base_port: u16 = std::env::var("HOLOFS_EMBED_BASE_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(9100);
+        let base_port: u16 = crate::runtime_config::RuntimeConfig::get().embed_cluster.base_port;
         info!(
             mode = "embedded",
             storage = %config.storage.display(),
@@ -359,34 +343,14 @@ pub async fn bootstrap_cluster(
     // gets an Arc handle. `Arc::get_mut` succeeds only while the
     // refcount is 1 — right here, before any spawn or clone — so we
     // don't need interior mutability on the semaphore fields.
-    let medium_cap: usize = std::env::var("HOLOFS_MEDIUM_CONCURRENCY")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(holofs_gateway::DEFAULT_MEDIUM_CONCURRENCY);
-    let long_cap: usize = std::env::var("HOLOFS_LONG_CONCURRENCY")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(holofs_gateway::DEFAULT_LONG_CONCURRENCY);
-    let encode_cap: usize = std::env::var("HOLOFS_ENCODE_CONCURRENCY")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(holofs_gateway::DEFAULT_ENCODE_CONCURRENCY);
-    // Default queue_max scales with the encoder cap (4×). Fixed
-    // Default queue_max scales with the encoder cap. The 4×
-    // multiplier gave 97 % put_new 503s under a 50-worker soak at
-    // encode_cap=24 — the queue would fill during a burst before
-    // encoders could drain it, and every `wait_for_encode` client
-    // sat retrying. Bumping to 8× more than doubled the overall
-    // soak throughput (8 867 → 12 649 ops in 3 min) because the
-    // wider buffer absorbs bursts, workers stop looping on
-    // `AsyncQueueFull` retries, and every other endpoint gets
-    // more CPU / node HTTP headroom. Memory cost: 8× is ~200
-    // pending PUTs × ~50 KB body = 10 MB max — well within
-    // gateway RAM budget.
-    let encode_queue_max: usize = std::env::var("HOLOFS_ENCODE_QUEUE_MAX")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| encode_cap.saturating_mul(8).max(holofs_gateway::DEFAULT_ENCODE_QUEUE_MAX));
+    // Every knob comes from the typed `RuntimeConfig` snapshot (S4-5)
+    // so the resolve-once, read-many pattern replaces the four inline
+    // env::var lookups this block used to run.
+    let rc = crate::runtime_config::RuntimeConfig::get();
+    let medium_cap = rc.reliability.medium_concurrency;
+    let long_cap = rc.reliability.long_concurrency;
+    let encode_cap = rc.reliability.encode_concurrency;
+    let encode_queue_max = rc.reliability.encode_queue_max;
     if let Some(gw_mut) = Arc::get_mut(&mut gateway) {
         gw_mut.configure_limits(medium_cap, long_cap);
         gw_mut.configure_encode_limit(encode_cap);
@@ -413,9 +377,9 @@ pub async fn bootstrap_cluster(
         // each name's archive to the N most-recent versions on every
         // PUT. Unset / 0 → unlimited history (manual /api/versions/delete
         // remains the only way to free shards).
-        let keep_last: usize = std::env::var("HOLOFS_VERSIONS_KEEP_LAST")
-            .ok()
-            .and_then(|s| s.parse().ok())
+        let keep_last: usize = crate::runtime_config::RuntimeConfig::get()
+            .reliability
+            .versions_keep_last
             .unwrap_or(0);
         if keep_last > 0 {
             gateway.set_versions_keep_last(keep_last).await;
@@ -425,10 +389,9 @@ pub async fn bootstrap_cluster(
         }
     }
 
-    let interval_secs: u64 = std::env::var("HOLOFS_MONITOR_INTERVAL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(15);
+    let interval_secs: u64 = crate::runtime_config::RuntimeConfig::get()
+        .reliability
+        .monitor_interval_secs;
     let monitor_cfg = MonitorConfig {
         poll_interval: std::time::Duration::from_secs(interval_secs),
         ..MonitorConfig::default()
@@ -467,10 +430,9 @@ pub async fn bootstrap_cluster(
         },
     );
 
-    let audit_interval: u64 = std::env::var("HOLOFS_AUDIT_INTERVAL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(30);
+    let audit_interval: u64 = crate::runtime_config::RuntimeConfig::get()
+        .reliability
+        .audit_interval_secs;
     let audit_cfg = AuditConfig {
         interval: std::time::Duration::from_secs(audit_interval),
         ..AuditConfig::default()
@@ -504,10 +466,9 @@ pub async fn bootstrap_cluster(
     // one auditor cycle by default) and atomic-rename over
     // `<storage>/reputation.bin`. We also snapshot once at
     // shutdown so the last observations don't get lost.
-    let reputation_persist_secs: u64 = std::env::var("HOLOFS_REPUTATION_PERSIST_INTERVAL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(30);
+    let reputation_persist_secs: u64 = crate::runtime_config::RuntimeConfig::get()
+        .reliability
+        .reputation_persist_interval_secs;
     let rep_persist_path = reputation_path.clone();
     let rep_persist_rep = Arc::clone(&reputation);
     let rep_persist_shutdown = shutdown.clone();
@@ -568,10 +529,9 @@ pub async fn bootstrap_cluster(
     // from the old reputation cascade, stale node failures, etc.
     // *before* any user GET trips a 503. Set the interval to 0 to
     // disable entirely (the auto-repair-on-read path stays active).
-    let scrub_interval_secs: u64 = std::env::var("HOLOFS_SCRUB_INTERVAL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(600);
+    let scrub_interval_secs: u64 = crate::runtime_config::RuntimeConfig::get()
+        .reliability
+        .scrub_interval_secs;
     let scrub = if scrub_interval_secs > 0 {
         let scrub_gw = Arc::clone(&gateway);
         let interval = std::time::Duration::from_secs(scrub_interval_secs);

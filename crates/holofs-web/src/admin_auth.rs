@@ -61,14 +61,9 @@ impl AdminAuth {
         bad_counter: Arc<AtomicU64>,
         disabled_counter: Arc<AtomicU64>,
     ) -> Self {
-        let expected = std::env::var("HOLOFS_ADMIN_TOKEN")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(|t| format!("Bearer {t}"));
-        let unauthenticated_allowed = std::env::var("HOLOFS_ADMIN_UNAUTHENTICATED")
-            .ok()
-            .as_deref()
-            == Some("1");
+        let admin = &crate::runtime_config::RuntimeConfig::get().admin;
+        let expected = admin.token.as_deref().map(|t| format!("Bearer {t}"));
+        let unauthenticated_allowed = admin.unauthenticated_allowed;
         match (&expected, unauthenticated_allowed) {
             (Some(_), _) => tracing::info!("admin surface: bearer-token auth enabled"),
             (None, true) => tracing::warn!(

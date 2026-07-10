@@ -134,7 +134,7 @@ impl Gateway {
                     if self.auto_repair_cooldown_hit(name).await {
                         return Err(ClientError::LayerLost { channel, layer });
                     }
-                    self.auto_repairs_total
+                    self.metrics.auto_repairs_total
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Err(e) = self.repair_object_inplace(name).await {
                         // A concurrent DELETE between "decide to repair"
@@ -142,7 +142,7 @@ impl Gateway {
                         // the object is gone, there's nothing to fix.
                         // Don't count it against `auto_repair_failures`.
                         if !is_object_gone(&e) {
-                            self.auto_repair_failures_total
+                            self.metrics.auto_repair_failures_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             eprintln!("auto-repair: {name}: {e}");
                         }
@@ -159,7 +159,7 @@ impl Gateway {
                     return match get_object_blocks(&repaired, &live, &all_ids).await {
                         Ok(v) => Ok(v),
                         Err(e) => {
-                            self.auto_repair_failures_total
+                            self.metrics.auto_repair_failures_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             Err(e)
                         }
@@ -181,7 +181,7 @@ impl Gateway {
                 if self.auto_repair_cooldown_hit(name).await {
                     return Err(ClientError::LayerLost { channel, layer });
                 }
-                self.auto_repairs_total
+                self.metrics.auto_repairs_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 eprintln!(
                     "auto-repair: {name} decode failed on (c={channel}, l={layer}); \
@@ -190,7 +190,7 @@ impl Gateway {
                 );
                 if let Err(e) = self.repair_object_inplace(name).await {
                     if !is_object_gone(&e) {
-                        self.auto_repair_failures_total
+                        self.metrics.auto_repair_failures_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         eprintln!("auto-repair: {name}: repair pass itself failed: {e}");
                     }
@@ -211,7 +211,7 @@ impl Gateway {
                 match get_object_up_to_layer(&self.gf, &repaired, &live, max_layer).await {
                     Ok(v) => Ok(v),
                     Err(e) => {
-                        self.auto_repair_failures_total
+                        self.metrics.auto_repair_failures_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         Err(e)
                     }
