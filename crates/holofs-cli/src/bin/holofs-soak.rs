@@ -211,6 +211,10 @@ struct Cluster {
     children: Vec<(String, Child)>,
     storage_root: PathBuf,
     tempdir: Option<tempdir_guard::TempDir>,
+    /// Bound node wire addresses (`host:port`). Populated in
+    /// `spawn_multi_process`; empty for `embedded` / `external`
+    /// topologies where soak has no direct node handle.
+    node_addrs: Vec<String>,
 }
 
 /// Tiny hand-rolled tempdir (no external crate). Removes the directory
@@ -427,6 +431,7 @@ async fn spawn_embedded(cli: &Cli) -> Result<Cluster> {
         children: vec![("gateway".to_string(), child)],
         storage_root: storage_root.clone(),
         tempdir,
+        node_addrs: Vec::new(),
     };
 
     if let Err(e) = wait_for_gateway(&base_url, parse_duration(&cli.boot_timeout)?).await {
@@ -451,6 +456,7 @@ async fn spawn_multi_process(cli: &Cli) -> Result<Cluster> {
     // 1. Spawn N nodes.
     let mut children: Vec<(String, Child)> = Vec::with_capacity(cli.nodes + 1);
     let mut node_specs: Vec<String> = Vec::with_capacity(cli.nodes);
+    let mut node_addrs: Vec<String> = Vec::with_capacity(cli.nodes);
     for i in 0..cli.nodes {
         let port = cli
             .node_base_port
@@ -479,6 +485,7 @@ async fn spawn_multi_process(cli: &Cli) -> Result<Cluster> {
         .await?;
         let zone = i % 4;
         node_specs.push(format!("{bound_addr}={pubkey}:{zone}"));
+        node_addrs.push(bound_addr);
         children.push((format!("node-{i:02}"), child));
     }
 
@@ -500,6 +507,7 @@ async fn spawn_multi_process(cli: &Cli) -> Result<Cluster> {
                 children,
                 storage_root: storage_root.clone(),
                 tempdir,
+                node_addrs: node_addrs.clone(),
             };
             cluster.shutdown().await;
             bail!("holofs-admin gen-key exited with {status}");
@@ -519,6 +527,7 @@ async fn spawn_multi_process(cli: &Cli) -> Result<Cluster> {
                 children,
                 storage_root: storage_root.clone(),
                 tempdir,
+                node_addrs: node_addrs.clone(),
             };
             cluster.shutdown().await;
             bail!("holofs-admin pubkey exited with {}", out.status);
@@ -551,6 +560,7 @@ async fn spawn_multi_process(cli: &Cli) -> Result<Cluster> {
             children,
             storage_root: storage_root.clone(),
             tempdir,
+            node_addrs: node_addrs.clone(),
         };
         cluster.shutdown().await;
         bail!("holofs-admin sign-whitelist exited with {sign_status}");
@@ -612,6 +622,7 @@ async fn spawn_multi_process(cli: &Cli) -> Result<Cluster> {
         children,
         storage_root: storage_root.clone(),
         tempdir,
+        node_addrs,
     };
     if let Err(e) = wait_for_gateway(&base_url, parse_duration(&cli.boot_timeout)?).await {
         cluster.shutdown().await;
@@ -1626,6 +1637,79 @@ async fn worker(
 // Metrics collector — /metrics + /api/stats every N seconds
 // ============================================================================
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct PutTimings {
+    cpu_ms_avg: f64,
+    fanout_ms_avg: f64,
+    count: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct NodePutTimings {
+    addr: String,
+    avg_lock_ms: f64,
+    avg_append_ms: f64,
+    avg_wal_ms: f64,
+    count: u64,
+}
+
+/// Ask every multi-process node for its process-wide PUT breakdown.
+/// Called once at soak end. Errors per-node are silently dropped so
+/// one dead node does not eat the summary for the others.
+async fn fetch_node_put_timings(addrs: &[String]) -> Vec<NodePutTimings> {
+    let mut out = Vec::with_capacity(addrs.len());
+    for addr in addrs {
+        match holofs_client::node_put_timings(addr).await {
+            Ok((lock_ns, append_ns, wal_ns, count)) if count > 0 => {
+                let denom = count as f64;
+                out.push(NodePutTimings {
+                    addr: addr.clone(),
+                    avg_lock_ms: lock_ns as f64 / denom / 1_000_000.0,
+                    avg_append_ms: append_ns as f64 / denom / 1_000_000.0,
+                    avg_wal_ms: wal_ns as f64 / denom / 1_000_000.0,
+                    count,
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Scrape /metrics once and pull out the process-wide `put_object`
+/// timing counters. Returns `None` if the scrape fails or no PUTs
+/// were recorded (fresh cluster). Called once at soak end.
+async fn fetch_put_timings(client: &reqwest::Client, base: &str) -> Option<PutTimings> {
+    let body = client
+        .get(format!("{base}/metrics"))
+        .send()
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    let mut cpu_ns: u64 = 0;
+    let mut fanout_ns: u64 = 0;
+    let mut count: u64 = 0;
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("holofs_put_cpu_nanoseconds_sum ") {
+            cpu_ns = rest.trim().parse().ok()?;
+        } else if let Some(rest) = line.strip_prefix("holofs_put_fanout_nanoseconds_sum ") {
+            fanout_ns = rest.trim().parse().ok()?;
+        } else if let Some(rest) = line.strip_prefix("holofs_put_count_total ") {
+            count = rest.trim().parse().ok()?;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    Some(PutTimings {
+        cpu_ms_avg: cpu_ns as f64 / count as f64 / 1_000_000.0,
+        fanout_ms_avg: fanout_ns as f64 / count as f64 / 1_000_000.0,
+        count,
+    })
+}
+
 async fn metrics_collector(
     base: String,
     client: reqwest::Client,
@@ -2073,11 +2157,54 @@ async fn main() -> Result<()> {
     // Final summary.
     let summary = counters.snapshot();
     let ended = chrono::Utc::now().to_rfc3339();
+
+    // Grab one last /metrics scrape so the summary carries the honest
+    // cpu-vs-fanout split (process-wide counters inside `put_object`).
+    // File-based tracing here would cost the very throughput we measure.
+    let put_split = fetch_put_timings(&client, &base_url).await;
+    if let Some(ref t) = put_split {
+        eprintln!(
+            "[soak] put_object avg: cpu={:.1}ms fanout={:.1}ms count={} (fanout share {:.1}%)",
+            t.cpu_ms_avg,
+            t.fanout_ms_avg,
+            t.count,
+            if t.cpu_ms_avg + t.fanout_ms_avg > 0.0 {
+                t.fanout_ms_avg * 100.0 / (t.cpu_ms_avg + t.fanout_ms_avg)
+            } else {
+                0.0
+            }
+        );
+    }
+
+    // Pull node-side breakdown of PUT wall time so we can compare
+    // the client-side fanout number (measured just before this) against
+    // (lock_wait + put_appended + wal_wait) as seen by each node.
+    let node_splits = match cluster.as_ref() {
+        Some(c) => fetch_node_put_timings(&c.node_addrs).await,
+        None => Vec::new(),
+    };
+    if !node_splits.is_empty() {
+        let n = node_splits.len();
+        let sum_lock: f64 = node_splits.iter().map(|s| s.avg_lock_ms).sum();
+        let sum_append: f64 = node_splits.iter().map(|s| s.avg_append_ms).sum();
+        let sum_wal: f64 = node_splits.iter().map(|s| s.avg_wal_ms).sum();
+        let total_count: u64 = node_splits.iter().map(|s| s.count).sum();
+        eprintln!(
+            "[soak] node PUT avg (avg across {n} nodes): lock={:.2}ms append={:.2}ms wal={:.2}ms count/node≈{}",
+            sum_lock / n as f64,
+            sum_append / n as f64,
+            sum_wal / n as f64,
+            total_count / n as u64,
+        );
+    }
+
     let final_view = json!({
         "run_id": run_id,
         "ended_at": ended,
         "config": cfg,
         "rollup": summary,
+        "put_timings": put_split,
+        "node_put_timings": node_splits,
     });
     write_json(&run_dir.join("summary.json"), &final_view).await?;
 

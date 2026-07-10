@@ -208,6 +208,29 @@ pub async fn metrics(Extension(gw): Extension<Arc<Gateway>>) -> Response {
         obs.encode_failed_total.load(Ordering::Relaxed)
     ));
 
+    // Cpu-vs-fanout split for `put_object`. Two atomics/PUT — the
+    // previous attempt at file-based tracing (`/tmp/encode_timing.log`)
+    // stole ~14% of throughput to lock contention, which corrupted
+    // the very numbers it was trying to measure.
+    body.push_str("# HELP holofs_put_cpu_nanoseconds_sum Sum of CPU-phase (RLNC + DWT + hash) nanoseconds inside put_object.\n");
+    body.push_str("# TYPE holofs_put_cpu_nanoseconds_sum counter\n");
+    body.push_str(&format!(
+        "holofs_put_cpu_nanoseconds_sum {}\n",
+        holofs_client::PUT_CPU_NS_SUM.load(Ordering::Relaxed)
+    ));
+    body.push_str("# HELP holofs_put_fanout_nanoseconds_sum Sum of fanout-phase (network) nanoseconds inside put_object.\n");
+    body.push_str("# TYPE holofs_put_fanout_nanoseconds_sum counter\n");
+    body.push_str(&format!(
+        "holofs_put_fanout_nanoseconds_sum {}\n",
+        holofs_client::PUT_FANOUT_NS_SUM.load(Ordering::Relaxed)
+    ));
+    body.push_str("# HELP holofs_put_count_total Number of put_object completions contributing to CPU / fanout ns sums.\n");
+    body.push_str("# TYPE holofs_put_count_total counter\n");
+    body.push_str(&format!(
+        "holofs_put_count_total {}\n",
+        holofs_client::PUT_COUNT.load(Ordering::Relaxed)
+    ));
+
     body.push_str("# HELP holofs_rate_limit_rejected_total v0.7 per-IP rate limit rejections (429 responses).\n");
     body.push_str("# TYPE holofs_rate_limit_rejected_total counter\n");
     body.push_str(&format!(

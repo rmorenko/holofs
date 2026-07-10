@@ -40,6 +40,21 @@ use holofs_core::merkle::{shard_hash, Hash};
 use holofs_core::rlnc::Shard;
 use holofs_wire::{read_frame, write_frame, Request, Response};
 
+/// Process-wide breakdown of the node-side PUT wall-time. Every completed
+/// `Request::Put` / `Request::PutBatch` bumps three ns counters and one
+/// count counter, so a caller can read a `(lock_wait, put_appended,
+/// wal_wait)` triple. Cheap: three `fetch_add` per PUT — well below the
+/// noise floor of any file-based tracing we tried. Read via the
+/// `Request::PutTimings` wire frame (added specifically for the July 2026
+/// fanout-amplification study).
+pub static NODE_PUT_LOCK_WAIT_NS_SUM: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static NODE_PUT_APPEND_NS_SUM: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static NODE_PUT_WAL_WAIT_NS_SUM: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static NODE_PUT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 type Key = (u64, u8, u8);
 /// Milliseconds since UNIX_EPOCH. Assigned by `Store::put` at
 /// write-time (or reconstructed from filesystem mtime on
@@ -947,16 +962,23 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
             layer,
             shard,
         } => {
-            let (my_seq, synced_seq, notify) = {
-                let mut s = store.lock().await;
-                let (_ok, seq) = s.put_appended((object_id, channel, layer), shard);
-                (
-                    seq,
-                    Arc::clone(&s.wal_synced_seq),
-                    Arc::clone(&s.wal_notify),
-                )
-            };
+            let t_lock = std::time::Instant::now();
+            let mut s = store.lock().await;
+            let lock_ns = t_lock.elapsed().as_nanos() as u64;
+            let t_append = std::time::Instant::now();
+            let (_ok, my_seq) = s.put_appended((object_id, channel, layer), shard);
+            let synced_seq = Arc::clone(&s.wal_synced_seq);
+            let notify = Arc::clone(&s.wal_notify);
+            drop(s);
+            let append_ns = t_append.elapsed().as_nanos() as u64;
+            let t_wal = std::time::Instant::now();
             wait_for_wal_seq(&synced_seq, &notify, my_seq).await;
+            let wal_ns = t_wal.elapsed().as_nanos() as u64;
+            use std::sync::atomic::Ordering;
+            NODE_PUT_LOCK_WAIT_NS_SUM.fetch_add(lock_ns, Ordering::Relaxed);
+            NODE_PUT_APPEND_NS_SUM.fetch_add(append_ns, Ordering::Relaxed);
+            NODE_PUT_WAL_WAIT_NS_SUM.fetch_add(wal_ns, Ordering::Relaxed);
+            NODE_PUT_COUNT.fetch_add(1, Ordering::Relaxed);
             Response::Ack
         }
         Request::Get {
@@ -1008,22 +1030,29 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
             layer,
             shards,
         } => {
-            let (my_seq, synced_seq, notify) = {
-                let mut s = store.lock().await;
-                let mut last_seq: u64 = 0;
-                for shard in shards {
-                    let (_ok, seq) = s.put_appended((object_id, channel, layer), shard);
-                    if seq > last_seq {
-                        last_seq = seq;
-                    }
+            let t_lock = std::time::Instant::now();
+            let mut s = store.lock().await;
+            let lock_ns = t_lock.elapsed().as_nanos() as u64;
+            let t_append = std::time::Instant::now();
+            let mut last_seq: u64 = 0;
+            for shard in shards {
+                let (_ok, seq) = s.put_appended((object_id, channel, layer), shard);
+                if seq > last_seq {
+                    last_seq = seq;
                 }
-                (
-                    last_seq,
-                    Arc::clone(&s.wal_synced_seq),
-                    Arc::clone(&s.wal_notify),
-                )
-            };
-            wait_for_wal_seq(&synced_seq, &notify, my_seq).await;
+            }
+            let synced_seq = Arc::clone(&s.wal_synced_seq);
+            let notify = Arc::clone(&s.wal_notify);
+            drop(s);
+            let append_ns = t_append.elapsed().as_nanos() as u64;
+            let t_wal = std::time::Instant::now();
+            wait_for_wal_seq(&synced_seq, &notify, last_seq).await;
+            let wal_ns = t_wal.elapsed().as_nanos() as u64;
+            use std::sync::atomic::Ordering;
+            NODE_PUT_LOCK_WAIT_NS_SUM.fetch_add(lock_ns, Ordering::Relaxed);
+            NODE_PUT_APPEND_NS_SUM.fetch_add(append_ns, Ordering::Relaxed);
+            NODE_PUT_WAL_WAIT_NS_SUM.fetch_add(wal_ns, Ordering::Relaxed);
+            NODE_PUT_COUNT.fetch_add(1, Ordering::Relaxed);
             Response::Ack
         }
         Request::CurrentEpoch => {
@@ -1037,6 +1066,15 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
             let mut s = store.lock().await;
             s.purge_by_hashes_up_to(&set, max_epoch);
             Response::Ack
+        }
+        Request::PutTimings => {
+            use std::sync::atomic::Ordering;
+            Response::PutTimings {
+                lock_wait_ns: NODE_PUT_LOCK_WAIT_NS_SUM.load(Ordering::Relaxed),
+                put_appended_ns: NODE_PUT_APPEND_NS_SUM.load(Ordering::Relaxed),
+                wal_wait_ns: NODE_PUT_WAL_WAIT_NS_SUM.load(Ordering::Relaxed),
+                count: NODE_PUT_COUNT.load(Ordering::Relaxed),
+            }
         }
     }
 }

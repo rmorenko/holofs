@@ -195,6 +195,14 @@ fn is_likely_transient(e: &io::Error) -> bool {
 
 // === Encode and dispatch ===================================================
 
+/// Process-wide counters split PUT wall time into the RLNC/DWT CPU phase and
+/// the network fan-out phase. Two `AtomicU64::fetch_add` per PUT — far below
+/// any file/lock instrumentation we tried. Read via `Gateway::api_stats` /
+/// `/health` for honest cpu-vs-fanout ratios under concurrent load.
+pub static PUT_CPU_NS_SUM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PUT_FANOUT_NS_SUM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PUT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Deterministically encode channels (RNG seeded by data_cid), dispatch shards
 /// across nodes, compute hashes and the Merkle root. The manifest is mutated:
 /// `data_cid`, `object_id`, `merkle_root`, and `shard_hashes` are written into
@@ -234,6 +242,7 @@ pub async fn put_object(
     let mut leaves_flat: Vec<Hash> = Vec::new();
     let mut per_node_reqs: Vec<Vec<Request>> = vec![Vec::new(); manifest.nodes.len()];
 
+    let t_cpu = std::time::Instant::now();
     for c in 0..manifest.channels as usize {
         let mut plane = channels[c].clone();
         haar_forward(&mut plane, w, h, levels);
@@ -265,8 +274,16 @@ pub async fn put_object(
             }
         }
     }
+    let cpu_ns = t_cpu.elapsed().as_nanos() as u64;
 
+    let t_fanout = std::time::Instant::now();
     fanout_puts(&manifest.nodes, per_node_reqs).await?;
+    let fanout_ns = t_fanout.elapsed().as_nanos() as u64;
+
+    use std::sync::atomic::Ordering;
+    PUT_CPU_NS_SUM.fetch_add(cpu_ns, Ordering::Relaxed);
+    PUT_FANOUT_NS_SUM.fetch_add(fanout_ns, Ordering::Relaxed);
+    PUT_COUNT.fetch_add(1, Ordering::Relaxed);
 
     manifest.shard_hashes = shard_hashes;
     manifest.merkle_root = merkle_root(&leaves_flat);
@@ -283,6 +300,16 @@ async fn fanout_puts(
 ) -> Result<(), ClientError> {
     use futures_util::future::try_join_all;
 
+    // Concurrent frames per node. Coalescing already merges consecutive
+    // Put frames that share (object_id, channel, layer) into one PutBatch,
+    // but the tail — one PutBatch per layer × channel — still totals
+    // ~15 frames per PUT on an 8-node cluster. The July 2026 soak study
+    // showed each of those frames paying its own group-commit fsync tick
+    // on the node (55 ms wal_wait × 15 = 800 ms of the 1.4 s fanout wall).
+    // Firing them at once through the keepalive pool lets one WAL tick
+    // absorb the whole batch instead of paying it 15 times in series.
+    const PER_NODE_INFLIGHT: usize = 8;
+
     let tasks = per_node_reqs
         .into_iter()
         .enumerate()
@@ -291,18 +318,18 @@ async fn fanout_puts(
             let addr = nodes[node_idx].clone();
             let batched = coalesce_puts(reqs);
             async move {
-                // Sequential per node so we don't blow through the
-                // pool's per-addr keepalive cap; parallel across
-                // nodes so the wall clock is the slowest node, not
-                // the sum. Runs of consecutive `Put` frames that
-                // share `(object_id, channel, layer)` are coalesced
-                // into one `PutBatch` upstream — that saves one
-                // group-commit tick per extra shard on the node's
-                // WAL flusher, which under the July 2026 soak was
-                // the difference between ~4 encodes/s and ~7
-                // encodes/s aggregate.
-                for req in batched {
-                    match rpc(&addr, req).await? {
+                use futures_util::stream::StreamExt;
+                let inflight = PER_NODE_INFLIGHT.min(batched.len().max(1));
+                let mut stream = futures_util::stream::iter(batched.into_iter().map({
+                    let addr = addr.clone();
+                    move |req| {
+                        let addr = addr.clone();
+                        async move { rpc(&addr, req).await }
+                    }
+                }))
+                .buffer_unordered(inflight);
+                while let Some(res) = stream.next().await {
+                    match res? {
                         Response::Ack => {}
                         Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
                         other => {
@@ -1687,6 +1714,28 @@ pub async fn purge_object(manifest: &Manifest, live: &LiveNodes) -> Result<(), C
         }
     }
     Ok(())
+}
+
+/// diagnostic: fetch a node's process-wide breakdown of PUT wall
+/// time as `(lock_wait_ns, put_appended_ns, wal_wait_ns, count)`.
+/// Zero-cost on hot path — counters are three `fetch_add` per PUT
+/// on the node side. Used by the July 2026 fanout amplification
+/// study to pin down whether the 500× slowdown lives in the store
+/// mutex, the WAL append, or the group-commit fsync wait.
+pub async fn node_put_timings(addr: &str) -> Result<(u64, u64, u64, u64), ClientError> {
+    match rpc(addr, Request::PutTimings).await? {
+        Response::PutTimings {
+            lock_wait_ns,
+            put_appended_ns,
+            wal_wait_ns,
+            count,
+        } => Ok((lock_wait_ns, put_appended_ns, wal_wait_ns, count)),
+        Response::Error(msg) => Err(ClientError::RemoteError(msg)),
+        other => Err(ClientError::UnexpectedResponse {
+            expected: "PutTimings from PutTimings",
+            got: format!("{other:?}"),
+        }),
+    }
 }
 
 /// enumerate every shard hash a node currently stores.

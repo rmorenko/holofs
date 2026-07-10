@@ -109,6 +109,10 @@ pub enum Request {
         hashes: Vec<Hash>,
         max_epoch: u64,
     },
+    /// diagnostic: dump the node's process-wide breakdown of PUT
+    /// wall time — `(lock_wait, put_appended, wal_wait, count)` in
+    /// nanoseconds. Added to trace fanout amplification under load.
+    PutTimings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +138,13 @@ pub enum Response {
     Epoch {
         epoch: u64,
     },
+    /// diagnostic: reply to [`Request::PutTimings`].
+    PutTimings {
+        lock_wait_ns: u64,
+        put_appended_ns: u64,
+        wal_wait_ns: u64,
+        count: u64,
+    },
     Error(String),
 }
 
@@ -150,6 +161,7 @@ const OP_PUT_BATCH: u8 = 0x09;
 // epoch-GC ops.
 const OP_CURRENT_EPOCH: u8 = 0x0a;
 const OP_PURGE_BY_HASH_UP_TO: u8 = 0x0b;
+const OP_PUT_TIMINGS: u8 = 0x0c;
 
 const RSP_PONG: u8 = 0x00;
 const RSP_ACK: u8 = 0x01;
@@ -160,6 +172,7 @@ const RSP_AUTH: u8 = 0x05;
 const RSP_HASHES: u8 = 0x06;
 // epoch-GC: raw u64 write-epoch (ms since UNIX_EPOCH).
 const RSP_EPOCH: u8 = 0x07;
+const RSP_PUT_TIMINGS: u8 = 0x08;
 const RSP_ERR: u8 = 0xff;
 
 impl Request {
@@ -242,6 +255,7 @@ impl Request {
                     b.extend_from_slice(h);
                 }
             }
+            Request::PutTimings => b.push(OP_PUT_TIMINGS),
         }
         b
     }
@@ -327,6 +341,7 @@ impl Request {
                 }
                 Ok(Request::PurgeByHashUpTo { hashes, max_epoch })
             }
+            OP_PUT_TIMINGS => Ok(Request::PutTimings),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unknown op: {other:#x}"),
@@ -376,6 +391,18 @@ impl Response {
             Response::Epoch { epoch } => {
                 b.push(RSP_EPOCH);
                 b.extend_from_slice(&epoch.to_be_bytes());
+            }
+            Response::PutTimings {
+                lock_wait_ns,
+                put_appended_ns,
+                wal_wait_ns,
+                count,
+            } => {
+                b.push(RSP_PUT_TIMINGS);
+                b.extend_from_slice(&lock_wait_ns.to_be_bytes());
+                b.extend_from_slice(&put_appended_ns.to_be_bytes());
+                b.extend_from_slice(&wal_wait_ns.to_be_bytes());
+                b.extend_from_slice(&count.to_be_bytes());
             }
             Response::Error(msg) => {
                 b.push(RSP_ERR);
@@ -431,6 +458,12 @@ impl Response {
                 Ok(Response::Hashes(hashes))
             }
             RSP_EPOCH => Ok(Response::Epoch { epoch: c.u64()? }),
+            RSP_PUT_TIMINGS => Ok(Response::PutTimings {
+                lock_wait_ns: c.u64()?,
+                put_appended_ns: c.u64()?,
+                wal_wait_ns: c.u64()?,
+                count: c.u64()?,
+            }),
             RSP_ERR => {
                 let n = c.u32()? as usize;
                 let bytes = c.take(n)?;
