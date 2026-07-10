@@ -967,14 +967,23 @@ async fn rebalance_add_node_preserves_decodability() {
 
     // Spin up an extra node and add it to the catalog via add_node.
     let (extra_addr, _extra_store, _h) = spawn_node((Ipv4Addr::LOCALHOST, 0).into()).await.unwrap();
-    let mut dir = holofs_model::fs::Directory::new();
-    dir.insert("obj".into(), manifest.clone());
+    let mut dir_local = holofs_model::fs::Directory::new();
+    dir_local.insert("obj".into(), manifest.clone());
+    let dir = std::sync::Arc::new(tokio::sync::RwLock::new(dir_local));
 
-    let reports = add_node(&gf, &mut rng, &mut dir, extra_addr.to_string(), 0, K).await;
+    let reports = add_node(
+        &gf,
+        &mut rng,
+        std::sync::Arc::clone(&dir),
+        extra_addr.to_string(),
+        0,
+        K,
+    )
+    .await;
     assert_eq!(reports.len(), 1);
     assert!(reports[0].result.is_ok(), "rebalance failed");
 
-    let manifest_after = dir.get("obj").unwrap().clone();
+    let manifest_after = dir.read().await.get("obj").unwrap().clone();
     assert_eq!(manifest_after.nodes.len(), N_NODES + 1);
     assert_eq!(manifest_after.zones.len(), N_NODES + 1);
 

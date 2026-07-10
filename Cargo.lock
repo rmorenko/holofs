@@ -1873,6 +1873,7 @@ dependencies = [
 name = "holofs-gateway"
 version = "1.0.0"
 dependencies = [
+ "bytes",
  "futures-util",
  "holofs-analytics",
  "holofs-client",

@@ -32,7 +32,11 @@ use crate::Gateway;
 #[derive(Debug, Clone)]
 pub struct DecodedObject {
     /// Final encoded body (PNG, WAV, UTF-8 text, or raw opaque bytes).
-    pub bytes: Vec<u8>,
+    ///
+    /// v2 P2.2: `Bytes` instead of `Vec<u8>` so a PNG cache-hit can
+    /// share the same buffer with the response builder — the pre-
+    /// P2.2 shape copied the whole PNG on every GET.
+    pub bytes: bytes::Bytes,
     /// `Content-Type` to put on the response.
     pub content_type: String,
     /// Object kind, useful for `X-Holofs-Kind`.
@@ -86,7 +90,7 @@ impl Gateway {
         let decode_ms = t0.elapsed().as_millis();
         let png = encode_png(&channels, width, height);
         let entry = Arc::new(CachedFile {
-            bytes: png,
+            bytes: bytes::Bytes::from(png),
             max_layer,
             bytes_downloaded: bytes,
             decode_ms,
@@ -110,10 +114,15 @@ impl Gateway {
         name: &str,
         max_layer: Option<u8>,
     ) -> Result<DecodedObject, GatewayError> {
+        // v2 P2.1: use `entries.get(name).cloned()` — that's an Arc
+        // clone, not the deep `catalog.get(name).cloned()` which
+        // copies the whole `shard_hashes` (Vec<Vec<Vec<[u8;32]>>>,
+        // ~1 MB for a 512×512 image). Every GET landed here.
         let manifest = self
             .catalog
             .read()
             .await
+            .entries
             .get(name)
             .cloned()
             .ok_or(GatewayError::NotFound)?;
@@ -162,7 +171,7 @@ impl Gateway {
                     manifest.audio_sample_rate,
                 );
                 Ok(DecodedObject {
-                    bytes: wav,
+                    bytes: bytes::Bytes::from(wav),
                     content_type: "audio/wav".into(),
                     kind,
                     max_layer: Some(layer),
@@ -184,7 +193,7 @@ impl Gateway {
                         .map_err(|e| GatewayError::Decode(format!("text decode: {e}")))?;
                 let decode_ms = t0.elapsed().as_millis();
                 Ok(DecodedObject {
-                    bytes,
+                    bytes: bytes::Bytes::from(bytes),
                     content_type: manifest.content_type.clone(),
                     kind,
                     max_layer: None,
@@ -207,7 +216,7 @@ impl Gateway {
                     })?;
                 let decode_ms = t0.elapsed().as_millis();
                 Ok(DecodedObject {
-                    bytes,
+                    bytes: bytes::Bytes::from(bytes),
                     content_type: manifest.content_type.clone(),
                     kind,
                     max_layer: None,

@@ -73,7 +73,10 @@ pub(crate) fn partial_response(name: &str, obj: DecodedObject, range: ByteRange)
     let total = obj.bytes.len() as u64;
     let start = range.start as usize;
     let end_inclusive = range.end_inclusive as usize;
-    let slice = obj.bytes[start..=end_inclusive].to_vec();
+    // Zero-copy sub-slice: `Bytes::slice` bumps the refcount and
+    // exposes a windowed view of the same buffer. Prior `.to_vec()`
+    // copied every byte in the range on every `Range:` request.
+    let slice = obj.bytes.slice(start..=end_inclusive);
     let slice_len = slice.len();
 
     let mut builder = Response::builder()

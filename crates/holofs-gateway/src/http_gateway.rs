@@ -364,8 +364,14 @@ pub struct Gateway {
 /// + the accounting metadata the response headers echo back. Lives
 /// under [`Gateway::cache`] keyed by `(name, max_layer)`; entries are
 /// dropped by [`Gateway::invalidate_cache`] on PUT / DELETE.
+///
+/// v2 P2.2: `bytes` is now `Bytes` (the shared-ownership byte buffer
+/// from the `bytes` crate) so a cache-hit response body is a single
+/// refcount bump instead of the pre-P2.2 `Vec::clone` of every PNG
+/// byte. Under a hot get_random workload the pre-P2.2 copy showed
+/// up as mem-BW pressure alongside the P2/#3 Manifest clones.
 pub(crate) struct CachedFile {
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) bytes: bytes::Bytes,
     pub(crate) max_layer: u8,
     pub(crate) bytes_downloaded: u64,
     pub(crate) decode_ms: u128,

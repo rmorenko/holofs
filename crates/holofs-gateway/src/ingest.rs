@@ -338,7 +338,7 @@ impl Gateway {
         if live.is_empty() {
             return Err(GatewayError::ClusterDegraded);
         }
-        let prev = self.catalog.read().await.get(name).cloned();
+        let prev = self.catalog.read().await.entries.get(name).cloned();
         if let Some(old) = &prev {
             // when versioning is on we archive the prior
             // manifest as a side file AND skip the shard purge — the
@@ -507,7 +507,7 @@ impl Gateway {
         if live.is_empty() {
             return Err(GatewayError::ClusterDegraded);
         }
-        let prev = self.catalog.read().await.get(name).cloned();
+        let prev = self.catalog.read().await.entries.get(name).cloned();
         if let Some(old) = &prev {
             if self.versions_enabled().await {
                 if let Err(e) = self.archive_version(name, old).await {
@@ -685,7 +685,7 @@ impl Gateway {
         // Handle prior object: archive-if-versions, else purge orphaned
         // shards. Do it before we insert the placeholder so orphan sweep
         // can't see two entries under the same name.
-        let prev = self.catalog.read().await.get(name).cloned();
+        let prev = self.catalog.read().await.entries.get(name).cloned();
         if let Some(old) = &prev {
             if self.versions_enabled().await {
                 if let Err(e) = self.archive_version(name, old).await {

@@ -102,7 +102,7 @@ impl Gateway {
         let live = self.effective_live().await;
         let manifest = {
             let cat = self.catalog.read().await;
-            cat.get(name).cloned().ok_or_else(|| {
+            cat.entries.get(name).cloned().ok_or_else(|| {
                 ClientError::RemoteError(format!("decode_with_autorepair: {name} not in catalog"))
             })?
         };
@@ -160,7 +160,7 @@ impl Gateway {
                     }
                     let repaired = {
                         let cat = self.catalog.read().await;
-                        cat.get(name).cloned().ok_or_else(|| {
+                        cat.entries.get(name).cloned().ok_or_else(|| {
                             ClientError::RemoteError(format!(
                                 "decode_with_autorepair: {name} disappeared mid-repair"
                             ))
@@ -212,7 +212,7 @@ impl Gateway {
                 // repaired version.
                 let repaired = {
                     let cat = self.catalog.read().await;
-                    cat.get(name).cloned().ok_or_else(|| {
+                    cat.entries.get(name).cloned().ok_or_else(|| {
                         ClientError::RemoteError(format!(
                             "decode_with_autorepair: {name} disappeared from catalog mid-repair"
                         ))
@@ -247,6 +247,10 @@ impl Gateway {
     pub async fn repair_object_inplace(&self, name: &str) -> Result<(), ClientError> {
         use std::collections::HashSet;
         let live = self.effective_live().await;
+        // v2 P2.1 doesn't apply here: `repair_node` needs `&mut
+        // Manifest` to append fresh shard hashes, so this callsite
+        // keeps the owned deep-clone. All read-only sites went to
+        // `entries.get(...).cloned()` (Arc clone).
         let mut manifest = {
             let cat = self.catalog.read().await;
             cat.get(name).cloned().ok_or_else(|| {
