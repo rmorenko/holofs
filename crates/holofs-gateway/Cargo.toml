@@ -18,6 +18,7 @@ holofs-embed.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 png.workspace = true
+futures-util = { workspace = true, features = [ "alloc" ] }
 
 [lints]
 workspace = true

@@ -145,38 +145,65 @@ impl Gateway {
         };
         let target_parent = parent_dir(name);
 
+        // Filter the candidate pool BEFORE spawning fingerprint work so
+        // we only pay `gather_layer` for actual neighbours of the
+        // right kind + scope. Then compute per-candidate similarities
+        // in parallel — the sequential-await version cost O(N × 45 ms)
+        // when the fingerprint cache was cold (fresh-PUT-heavy soak),
+        // pushing p95 to 32 s. Parallelising over the LONG-bucket's
+        // 8 permits caps concurrency naturally.
+        let candidates: Vec<(String, holofs_model::manifest::ObjectKind)> = snapshot
+            .names()
+            .into_iter()
+            .filter(|n| n != name && in_scope(target_parent, n, scope))
+            .filter_map(|n| {
+                snapshot
+                    .get(&n)
+                    .filter(|m| m.kind == manifest.kind)
+                    .map(|m| (n.clone(), m.kind))
+            })
+            .collect();
+        // Bound in-flight fingerprints to 8 — matches the LONG bucket's
+        // permit budget so a concurrent `spotlight` / `search` request
+        // isn't starved by one heavyweight `/similar` call.
+        // Unbounded `join_all` under a 500-manifest catalog fired
+        // ~500 concurrent `gather_layer` RPCs at nodes, which
+        // starved the encoder fanout and dropped total soak
+        // throughput 25 % even though the `similar` handler itself
+        // was faster.
+        use futures_util::stream::StreamExt;
+        let neighbor_futs = candidates.into_iter().map(|(n, _kind)| {
+            let target_fp = target_fp;
+            let target_manifest_hash = manifest.text_minhash.clone();
+            let snapshot = &snapshot;
+            async move {
+                let m = snapshot.get(&n)?;
+                let (sim, method) = if is_text {
+                    let j = holofs_analytics::shingle::jaccard_similarity(
+                        &target_manifest_hash,
+                        &m.text_minhash,
+                    );
+                    (j * 100.0, SimilarityMethod::Jaccard)
+                } else {
+                    let fp = self.compute_fingerprint(m).await;
+                    let sim = holofs_analytics::fingerprint::fingerprint_similarity_pct(
+                        &target_fp, &fp,
+                    );
+                    (sim, SimilarityMethod::DHash)
+                };
+                Some(SimilarMatch {
+                    name: n,
+                    similarity_pct: sim,
+                    method,
+                })
+            }
+        });
+        let mut stream = futures_util::stream::iter(neighbor_futs).buffer_unordered(4);
         let mut neighbors: Vec<SimilarMatch> = Vec::new();
-        for n in snapshot.names() {
-            if n == name {
-                continue;
+        while let Some(m) = stream.next().await {
+            if let Some(m) = m {
+                neighbors.push(m);
             }
-            if !in_scope(target_parent, &n, scope) {
-                continue;
-            }
-            let m = match snapshot.get(&n) {
-                Some(m) => m,
-                None => continue,
-            };
-            if m.kind != manifest.kind {
-                continue;
-            }
-            let (sim, method) = if is_text {
-                let j = holofs_analytics::shingle::jaccard_similarity(
-                    &manifest.text_minhash,
-                    &m.text_minhash,
-                );
-                (j * 100.0, SimilarityMethod::Jaccard)
-            } else {
-                let fp = self.compute_fingerprint(m).await;
-                let sim =
-                    holofs_analytics::fingerprint::fingerprint_similarity_pct(&target_fp, &fp);
-                (sim, SimilarityMethod::DHash)
-            };
-            neighbors.push(SimilarMatch {
-                name: n,
-                similarity_pct: sim,
-                method,
-            });
         }
         neighbors.sort_by(|a, b| {
             b.similarity_pct
