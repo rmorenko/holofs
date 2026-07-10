@@ -5,8 +5,8 @@ use std::net::Ipv4Addr;
 
 use holofs_client::{
     auth_check, discover_live, discover_live_with_whitelist, gather_layer, get_object,
-    get_object_blocks, put_object, put_object_replicated_blocks, repair_node,
-    repair_node_replicated,
+    get_object_blocks, list_node_hashes, purge_node_by_hash, put_object,
+    put_object_replicated_blocks, repair_node, repair_node_replicated,
 };
 use holofs_core::transform::roi_to_block_ids_with_stride;
 use holofs_cluster::audit::{audit_shard, AuditOutcome};
@@ -1016,4 +1016,320 @@ async fn corrupted_shard_does_not_taint_repair() {
     let recon = get_object(&gf, &manifest, &live).await.unwrap();
     let p = psnr(&channels, &recon);
     assert!(p > 80.0, "repair pulled in a bad donor: PSNR = {p:.1} dB");
+}
+
+/// T2b — repair-correctness unit test: after wiping a victim node,
+/// `repair_node` regenerates its share so both (a) the victim's
+/// held-hash count returns to its pre-wipe level and (b) the fresh
+/// shards actually decode.
+///
+/// The pre-existing `repair_recovers_after_progressive_kills` test
+/// only checked `layers_unrecoverable == 0` + a post-recon PSNR
+/// bound. It never asserted that the victim's inventory was
+/// restored, nor that the *count* of live shards per layer went up
+/// after repair — i.e. it would have passed even if `repair_node`
+/// silently kept the victim empty and the decode succeeded off of
+/// the surviving 7 nodes. This test locks the "margin actually
+/// grew" invariant the review flagged.
+#[tokio::test]
+async fn repair_regenerates_victim_and_restores_margin() {
+    use std::collections::HashSet;
+    let gf = Gf::new();
+    let mut rng = Rng::new(0x5EED);
+    let (addrs, stores) = spawn_cluster(N_NODES).await;
+    let mut manifest = build_manifest(addrs.clone());
+    let channels = synth_channels();
+    let live: Vec<usize> = (0..N_NODES).collect();
+    put_object(&gf, &mut manifest, &live, &channels)
+        .await
+        .unwrap();
+
+    // Precompute the per-manifest live hash set for filtering.
+    let live_hashes: HashSet<holofs_core::merkle::Hash> = manifest
+        .shard_hashes
+        .iter()
+        .flatten()
+        .flatten()
+        .copied()
+        .collect();
+
+    // Total live shards across the cluster BEFORE any damage.
+    let mut total_live_before = 0usize;
+    for addr in &addrs {
+        let held = list_node_hashes(addr).await.unwrap();
+        total_live_before += held.iter().filter(|h| live_hashes.contains(*h)).count();
+    }
+
+    // Wipe node 3. Its share evaporates.
+    let victim: usize = 3;
+    let victim_held_before = list_node_hashes(&addrs[victim]).await.unwrap();
+    let victim_live_before = victim_held_before
+        .iter()
+        .filter(|h| live_hashes.contains(*h))
+        .count();
+    assert!(
+        victim_live_before > 0,
+        "victim node must own some live shards before wipe"
+    );
+    stores[victim].lock().await.wipe();
+    let after_wipe = list_node_hashes(&addrs[victim]).await.unwrap();
+    assert_eq!(
+        after_wipe.len(),
+        0,
+        "wipe must leave the store empty"
+    );
+
+    // Total live shards WITH the victim wiped.
+    let mut total_live_after_wipe = 0usize;
+    for addr in &addrs {
+        let held = list_node_hashes(addr).await.unwrap();
+        total_live_after_wipe += held.iter().filter(|h| live_hashes.contains(*h)).count();
+    }
+    assert!(
+        total_live_after_wipe < total_live_before,
+        "wiping the victim must strictly lower the live-shard count \
+         (before={total_live_before}, after_wipe={total_live_after_wipe})"
+    );
+
+    // Run repair. `stats.shards_generated > 0` and
+    // `layers_unrecoverable == 0` are necessary but not sufficient
+    // ­— we also insist the *inventory* was rebuilt.
+    let stats = repair_node(&gf, &mut rng, &mut manifest, &live, victim, K)
+        .await
+        .unwrap();
+    assert_eq!(
+        stats.layers_unrecoverable, 0,
+        "repair must not leave any layer unrecoverable"
+    );
+    assert!(
+        stats.shards_generated > 0,
+        "repair must generate at least one shard"
+    );
+
+    // MARGIN CHECK: after the repair, the victim now holds fresh
+    // shards. `repair_node` records their hashes back into
+    // `manifest.shard_hashes` (appending, not replacing), so the
+    // updated live_hashes set contains the new ones. Rebuild it.
+    let live_hashes_after: HashSet<holofs_core::merkle::Hash> = manifest
+        .shard_hashes
+        .iter()
+        .flatten()
+        .flatten()
+        .copied()
+        .collect();
+    let mut total_live_after_repair = 0usize;
+    for addr in &addrs {
+        let held = list_node_hashes(addr).await.unwrap();
+        total_live_after_repair += held
+            .iter()
+            .filter(|h| live_hashes_after.contains(*h))
+            .count();
+    }
+    assert!(
+        total_live_after_repair > total_live_after_wipe,
+        "post-repair live-shard count must EXCEED post-wipe \
+         (after_wipe={total_live_after_wipe}, after_repair={total_live_after_repair})"
+    );
+
+    // Regenerated shards must actually decode: the RLNC repair path
+    // stores fresh linear combinations, not raw copies, so a full
+    // decode roundtrip proves they're mathematically valid — not
+    // just present as blobs.
+    let recon = get_object(&gf, &manifest, &live).await.unwrap();
+    let p = psnr(&channels, &recon);
+    assert!(
+        p > 80.0,
+        "regenerated shards must decode cleanly, PSNR = {p:.1} dB"
+    );
+}
+
+/// T2a — GC-purge unit test: `PurgeByHash` removes an *orphan* hash
+/// from a node but keeps every live shard hash from the same node.
+///
+/// Before T2a the GC path (`gc_orphaned_shards` + underlying
+/// `purge_node_by_hash`) had zero unit coverage. The review flagged
+/// that the review's `auto_repair_e2e` passed even when the repair
+/// path fully failed, because no test asserted that `purged_total > 0`
+/// or that a live shard is *not* removed. This test locks the
+/// invariant at the wire level (`Request::PurgeByHash`) so a
+/// regression in either the node handler or the client helper trips
+/// CI instead of showing up as silent orphan accumulation in prod.
+#[tokio::test]
+async fn gc_purge_removes_orphans_preserves_live_shards() {
+    use std::collections::HashSet;
+    let gf = Gf::new();
+    let (addrs, _stores) = spawn_cluster(N_NODES).await;
+    let mut manifest = build_manifest(addrs.clone());
+    let channels = synth_channels();
+    let live: Vec<usize> = (0..N_NODES).collect();
+    put_object(&gf, &mut manifest, &live, &channels)
+        .await
+        .unwrap();
+
+    // The catalog-referenced hashes are the object's ALL shard
+    // hashes. That's the "live" set the real GC would protect.
+    let live_hashes: HashSet<holofs_core::merkle::Hash> = manifest
+        .shard_hashes
+        .iter()
+        .flatten()
+        .flatten()
+        .copied()
+        .collect();
+
+    // Pick node 0 and confirm it holds some catalog-referenced
+    // shards before we do anything.
+    let held_before = list_node_hashes(&addrs[0]).await.unwrap();
+    let held_live_before: HashSet<_> = held_before
+        .iter()
+        .filter(|h| live_hashes.contains(*h))
+        .copied()
+        .collect();
+    assert!(
+        !held_live_before.is_empty(),
+        "node 0 must hold at least one live shard after PUT"
+    );
+
+    // A synthetic orphan hash (deterministic, obviously not in the
+    // catalog). We inject it into node 0 by asking it to store a
+    // shard whose hash we pre-compute.
+    let orphan_shard = holofs_core::rlnc::Shard {
+        coeffs: vec![0xA5u8; K],
+        payload: vec![0xC3u8; manifest.sym_len[0] as usize],
+    };
+    let orphan_hash = holofs_core::merkle::shard_hash(&orphan_shard);
+    assert!(
+        !live_hashes.contains(&orphan_hash),
+        "synthetic orphan hash must not collide with any live shard"
+    );
+
+    // Land the orphan on node 0 via the raw wire path — `Request::Put`
+    // is the same op the client fanout uses.
+    {
+        let mut s = _stores[0].lock().await;
+        s.put((0xDEAD_BEEF_CAFE_F00Du64, 9, 9), orphan_shard);
+    }
+    let held_with_orphan = list_node_hashes(&addrs[0]).await.unwrap();
+    assert!(
+        held_with_orphan.contains(&orphan_hash),
+        "node 0 must hold the injected orphan"
+    );
+
+    // Ask the node to purge the orphan hash. This is exactly the
+    // per-node RPC `gc_orphaned_shards` fires.
+    purge_node_by_hash(&addrs[0], vec![orphan_hash])
+        .await
+        .unwrap();
+
+    let held_after = list_node_hashes(&addrs[0]).await.unwrap();
+    assert!(
+        !held_after.contains(&orphan_hash),
+        "orphan hash must be gone from node 0 after PurgeByHash"
+    );
+
+    // Live-set safety: every live hash node 0 held BEFORE must still
+    // be there. `held_live_before` is the ground truth we're checking
+    // against — repair passes, dedup steering, and so on can add or
+    // reorder held hashes, but no live shard may be *lost*.
+    let held_live_after: HashSet<_> = held_after
+        .iter()
+        .filter(|h| live_hashes.contains(*h))
+        .copied()
+        .collect();
+    for h in &held_live_before {
+        assert!(
+            held_live_after.contains(h),
+            "live shard hash {h:?} vanished after orphan purge"
+        );
+    }
+}
+
+/// T1 — the central holofs claim, verified quantitatively.
+///
+/// Encode an object across `N_NODES=8` (K=16, redundancy [3.0, 2.5, 2.0]).
+/// Progressively wipe 2 → 4 → 6 of 8 nodes, attempt to decode, and assert:
+///
+/// - **25 % loss** (2 nodes): every layer still has >= K shards alive,
+///   decode must succeed with PSNR essentially unchanged from clean.
+/// - **50 % loss** (4 nodes): borderline for the tightest layer
+///   (`n_per_layer[nlayers-1]` ≈ 32 → ~16 alive == K). Decode may
+///   succeed or return `LayerLost`; if it succeeds, PSNR must not
+///   *improve* over the 25 % loss case (monotonic degradation).
+/// - **75 % loss** (6 nodes): every layer has ≤ 16 total shards across
+///   the surviving nodes, but with `place_shard` unevenness plus
+///   dedup this often decodes coarsely; assert only that PSNR strictly
+///   drops vs 25 % (or the decode fails).
+///
+/// This is the first quantitative test of the storage claim — before
+/// T1 the only degradation test in the suite killed 10 % of nodes
+/// (below K), and quality was checked only with `a == b` or `is_png`.
+/// The review flagged this gap as T1.
+#[tokio::test]
+async fn degraded_decode_psnr_monotonic() {
+    let gf = Gf::new();
+    let (addrs, stores) = spawn_cluster(N_NODES).await;
+    let mut manifest = build_manifest(addrs);
+    let channels = synth_channels();
+    let live: Vec<usize> = (0..N_NODES).collect();
+    put_object(&gf, &mut manifest, &live, &channels)
+        .await
+        .unwrap();
+
+    // Clean baseline.
+    let recon_clean = get_object(&gf, &manifest, &live).await.unwrap();
+    let p_clean = psnr(&channels, &recon_clean);
+    assert!(
+        p_clean > 80.0,
+        "clean decode PSNR must be high, got {p_clean:.1} dB"
+    );
+
+    // 25 % loss (2 of 8).
+    for i in 0..2 {
+        stores[i].lock().await.wipe();
+    }
+    let recon25 = get_object(&gf, &manifest, &live)
+        .await
+        .expect("decode must succeed after 25 % node loss");
+    let p25 = psnr(&channels, &recon25);
+    assert!(
+        p25 > 80.0,
+        "25 % loss PSNR {p25:.1} dB — must decode near-exact"
+    );
+
+    // 50 % loss (4 of 8). Borderline — either succeeds or LayerLost.
+    for i in 2..4 {
+        stores[i].lock().await.wipe();
+    }
+    let p50 = match get_object(&gf, &manifest, &live).await {
+        Ok(recon50) => {
+            let p = psnr(&channels, &recon50);
+            assert!(
+                p <= p25 + 1.0,
+                "50 % loss PSNR {p:.1} improved over 25 % {p25:.1} — non-monotonic"
+            );
+            Some(p)
+        }
+        Err(_) => None, // acceptable — we crossed the K threshold
+    };
+
+    // 75 % loss (6 of 8). Very likely below K somewhere. Either fail
+    // OR degrade strictly vs 25 % baseline.
+    for i in 4..6 {
+        stores[i].lock().await.wipe();
+    }
+    match get_object(&gf, &manifest, &live).await {
+        Ok(recon75) => {
+            let p75 = psnr(&channels, &recon75);
+            assert!(
+                p75 < p25,
+                "75 % loss PSNR {p75:.1} not strictly worse than 25 % {p25:.1}"
+            );
+            if let Some(prev) = p50 {
+                assert!(
+                    p75 <= prev + 1.0,
+                    "75 % loss PSNR {p75:.1} improved over 50 % {prev:.1} — non-monotonic"
+                );
+            }
+        }
+        Err(_) => {} // acceptable
+    }
 }

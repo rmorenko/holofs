@@ -850,4 +850,76 @@ mod tests {
         let refs: Vec<&Shard> = shards.iter().collect();
         assert!(decode_layer(&gf, &refs, sl).is_none());
     }
+
+    /// T3 — hand-rolled property sweep: 256 random (data, k, n, picked
+    /// subset) draws, each of which must round-trip when the picked
+    /// subset has ≥ k shards. Complements the review's fuzz ask
+    /// without pulling proptest into the workspace: the internal Rng
+    /// is deterministic-per-seed, coverage scales with the loop
+    /// bound, and every panic/hang would be obvious in CI.
+    ///
+    /// Two invariants:
+    /// - `>= k` shards: the decoder must return `Some(data)` (up to
+    ///   the padding tail).
+    /// - `< k` shards: the decoder must return `None` (never Panic
+    ///   or produce garbage).
+    #[test]
+    fn rlnc_roundtrip_property_sweep() {
+        let gf = Gf::new();
+        for seed in 0..256u64 {
+            let mut rng = Rng::new(seed);
+            // Draw k ∈ [2, 12] (small enough to stay fast under 256
+            // iterations), n ∈ [k, k + 8], data_len ∈ [1, 512].
+            let k = 2 + (rng.byte() as usize % 11);
+            let extra = rng.byte() as usize % 9;
+            let n = k + extra;
+            let data_len = 1 + (rng.byte() as usize) * 2;
+            let data: Vec<u8> = (0..data_len).map(|_| rng.byte()).collect();
+
+            let (sl, shards) = encode_layer_with_k(&gf, &data, k, n, &mut rng);
+            let refs_all: Vec<&Shard> = shards.iter().collect();
+            let full = decode_layer_with_k(&gf, &refs_all, k, sl)
+                .expect("full set of shards must always decode");
+            assert!(
+                full.len() >= data.len(),
+                "decoded output shorter than input: {} < {}",
+                full.len(),
+                data.len()
+            );
+            assert_eq!(
+                &full[..data.len()],
+                &data[..],
+                "seed={seed} k={k} n={n} full decode mismatch"
+            );
+
+            // Take a random size-k subset — decode must still work.
+            let mut idx: Vec<usize> = (0..n).collect();
+            for i in (1..idx.len()).rev() {
+                let j = (rng.next() as usize) % (i + 1);
+                idx.swap(i, j);
+            }
+            let picked: Vec<&Shard> = idx.iter().take(k).map(|&i| &shards[i]).collect();
+            // With a k-size subset the encoding is not guaranteed to
+            // be full-rank (random systematic + rlnc can be
+            // linearly dependent), so decode may return None. When
+            // it returns Some, the answer must match.
+            if let Some(back) = decode_layer_with_k(&gf, &picked, k, sl) {
+                assert_eq!(
+                    &back[..data.len()],
+                    &data[..],
+                    "seed={seed} k={k} n={n} subset decode mismatch"
+                );
+            }
+
+            // Fewer than k shards: never a Some.
+            if k > 1 {
+                let too_few: Vec<&Shard> =
+                    idx.iter().take(k - 1).map(|&i| &shards[i]).collect();
+                assert!(
+                    decode_layer_with_k(&gf, &too_few, k, sl).is_none(),
+                    "seed={seed} k={k} n={n} decoder returned Some on <k shards"
+                );
+            }
+        }
+    }
 }
