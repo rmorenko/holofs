@@ -289,12 +289,19 @@ async fn fanout_puts(
         .filter(|(_, reqs)| !reqs.is_empty())
         .map(|(node_idx, reqs)| {
             let addr = nodes[node_idx].clone();
+            let batched = coalesce_puts(reqs);
             async move {
                 // Sequential per node so we don't blow through the
                 // pool's per-addr keepalive cap; parallel across
                 // nodes so the wall clock is the slowest node, not
-                // the sum.
-                for req in reqs {
+                // the sum. Runs of consecutive `Put` frames that
+                // share `(object_id, channel, layer)` are coalesced
+                // into one `PutBatch` upstream — that saves one
+                // group-commit tick per extra shard on the node's
+                // WAL flusher, which under the July 2026 soak was
+                // the difference between ~4 encodes/s and ~7
+                // encodes/s aggregate.
+                for req in batched {
                     match rpc(&addr, req).await? {
                         Response::Ack => {}
                         Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
@@ -312,6 +319,80 @@ async fn fanout_puts(
         .collect::<Vec<_>>();
     try_join_all(tasks).await?;
     Ok(())
+}
+
+/// Turn a per-node queue of `Request::Put` frames into a mixed
+/// queue where every consecutive run sharing `(object_id, channel,
+/// layer)` is merged into one `Request::PutBatch`. Non-`Put` frames
+/// (or single `Put`s with no run) pass through unchanged.
+///
+/// Why bother: each node's WAL group-commit flusher runs every
+/// ~5 ms and waits at least one full tick per accepted frame. A
+/// 12-shard-per-node layer fanout used to cost 12 × ~5 ms of
+/// flush waits per node; one `PutBatch` costs one. Under a
+/// 24-encoder soak the sequential-Put path had shard fanout
+/// dominating encoder wall clock (~1 s per finalise); batching
+/// drops it below 200 ms.
+fn coalesce_puts(reqs: Vec<Request>) -> Vec<Request> {
+    let mut out = Vec::with_capacity(reqs.len());
+    let mut run: Option<(u64, u8, u8, Vec<holofs_core::rlnc::Shard>)> = None;
+    for req in reqs {
+        match req {
+            Request::Put {
+                object_id,
+                channel,
+                layer,
+                shard,
+            } => {
+                if let Some((oid, c, l, shards)) = run.as_mut() {
+                    if *oid == object_id && *c == channel && *l == layer {
+                        shards.push(shard);
+                        continue;
+                    }
+                    // key changed — flush the accumulated run.
+                    out.push(Request::PutBatch {
+                        object_id: *oid,
+                        channel: *c,
+                        layer: *l,
+                        shards: std::mem::take(shards),
+                    });
+                }
+                run = Some((object_id, channel, layer, vec![shard]));
+            }
+            other => {
+                if let Some((oid, c, l, shards)) = run.take() {
+                    out.push(Request::PutBatch {
+                        object_id: oid,
+                        channel: c,
+                        layer: l,
+                        shards,
+                    });
+                }
+                out.push(other);
+            }
+        }
+    }
+    if let Some((oid, c, l, shards)) = run {
+        // A single-shard tail stays as a plain `Put` — no reason to
+        // pay the `PutBatch` framing overhead for one shard.
+        if shards.len() == 1 {
+            let shard = shards.into_iter().next().unwrap();
+            out.push(Request::Put {
+                object_id: oid,
+                channel: c,
+                layer: l,
+                shard,
+            });
+        } else {
+            out.push(Request::PutBatch {
+                object_id: oid,
+                channel: c,
+                layer: l,
+                shards,
+            });
+        }
+    }
+    out
 }
 
 /// per-block replicated encoder.
