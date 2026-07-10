@@ -25,6 +25,19 @@ use holofs_model::placement::{place_replicas, ShardKey};
 use crate::error::GatewayError;
 use crate::Gateway;
 
+/// Returns `true` when a `repair_object_inplace` error is the
+/// concurrent-DELETE race — the object legitimately vanished from
+/// the catalog between the decode failure that triggered the repair
+/// and the repair's own catalog lookup. This isn't a repair
+/// *failure*, it's a "nothing to repair" outcome, and shouldn't
+/// pollute `auto_repair_failures_total`.
+fn is_object_gone(e: &ClientError) -> bool {
+    matches!(
+        e,
+        ClientError::RemoteError(msg) if msg.contains("not in catalog")
+    )
+}
+
 impl Gateway {
     /// Wrap [`get_object_up_to_layer`] with eager auto-repair on
     /// [`ClientError::LayerLost`]. The first decode attempt runs
@@ -88,9 +101,15 @@ impl Gateway {
                     self.auto_repairs_total
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Err(e) = self.repair_object_inplace(name).await {
-                        self.auto_repair_failures_total
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        eprintln!("auto-repair: {name}: {e}");
+                        // A concurrent DELETE between "decide to repair"
+                        // and "actually repair" is a legitimate race —
+                        // the object is gone, there's nothing to fix.
+                        // Don't count it against `auto_repair_failures`.
+                        if !is_object_gone(&e) {
+                            self.auto_repair_failures_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            eprintln!("auto-repair: {name}: {e}");
+                        }
                         return Err(ClientError::LayerLost { channel, layer });
                     }
                     let repaired = {
@@ -124,9 +143,11 @@ impl Gateway {
                     live.len()
                 );
                 if let Err(e) = self.repair_object_inplace(name).await {
-                    self.auto_repair_failures_total
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    eprintln!("auto-repair: {name}: repair pass itself failed: {e}");
+                    if !is_object_gone(&e) {
+                        self.auto_repair_failures_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!("auto-repair: {name}: repair pass itself failed: {e}");
+                    }
                     return Err(ClientError::LayerLost { channel, layer });
                 }
                 // Re-snapshot the (now-mutated) manifest from the

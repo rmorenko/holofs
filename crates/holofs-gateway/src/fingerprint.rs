@@ -49,6 +49,16 @@ impl Gateway {
         if matches!(manifest.kind, ObjectKind::Opaque | ObjectKind::Text) {
             return holofs_analytics::fingerprint::perceptual_fingerprint(manifest, &[]);
         }
+        // Content-addressed cache: `object_id` is the first 8 bytes
+        // of `data_cid`, which is `sha256(source_content, params)`.
+        // If we've fingerprinted this object before its content
+        // hasn't changed and the result is byte-identical.
+        // `/api/similar` visits every same-kind neighbour, so the
+        // cache lets a warm catalog answer in microseconds instead
+        // of ~45 ms per neighbour (per-channel `gather_layer`).
+        if let Some(fp) = self.fingerprint_cache.lock().await.get(&manifest.object_id) {
+            return *fp;
+        }
         let live = self.effective_live().await;
         // gather L0 for every channel (up to 3 — fingerprint
         // covers RGB). Per-channel means power the new 45-bit dHash; a
@@ -74,7 +84,12 @@ impl Gateway {
                 .collect();
             per_channel.push(verified);
         }
-        holofs_analytics::fingerprint::perceptual_fingerprint(manifest, &per_channel)
+        let fp = holofs_analytics::fingerprint::perceptual_fingerprint(manifest, &per_channel);
+        self.fingerprint_cache
+            .lock()
+            .await
+            .insert(manifest.object_id, fp);
+        fp
     }
 
     /// Perceptual fingerprint of an object for `GET /api/fingerprint/<name>`.

@@ -176,6 +176,22 @@ pub struct Gateway {
     /// Temporary cache of generated escrow shares: escrow_id_hex → Vec<ShareFile>.
     /// Kept only until the gateway restarts (shares are not part of the cluster).
     pub(crate) escrow_cache: Mutex<HashMap<String, Vec<holofs_analytics::escrow::ShareFile>>>,
+    /// Perceptual-fingerprint cache. `compute_fingerprint` on
+    /// image/audio does a per-channel `gather_layer` HTTP fanout to
+    /// nodes — 3 channels × ~15 ms each = ~45 ms even under warm
+    /// pool. `/api/similar/<name>` visits every same-kind
+    /// neighbour, so the raw path is O(N × 45 ms) and hit ~32 s
+    /// p50 on a 500-manifest catalog under a 50-worker soak.
+    ///
+    /// The fingerprint is a pure function of the manifest's
+    /// content bytes; `manifest.object_id` is derived from the
+    /// SHA-256 of exactly those bytes, so keying on `object_id`
+    /// gives content-addressed cache semantics — a re-PUT of the
+    /// same file hits the entry; a PUT-replace with different
+    /// content just creates a fresh entry (the stale one is
+    /// harmless clutter). No invalidation logic needed.
+    pub(crate) fingerprint_cache:
+        Mutex<HashMap<u64, holofs_analytics::fingerprint::Fingerprint>>,
     /// Auto-repair-on-read counters. Bumped from
     /// `decode_with_autorepair` when the first decode attempt
     /// hits `ClientError::LayerLost` and the retry path kicks in.
@@ -321,6 +337,7 @@ impl Gateway {
             cache: Mutex::new(HashMap::new()),
             shard_cache: Mutex::new(HashMap::new()),
             escrow_cache: Mutex::new(HashMap::new()),
+            fingerprint_cache: Mutex::new(HashMap::new()),
             auto_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             auto_repair_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scrub_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -376,6 +393,7 @@ impl Gateway {
             cache: Mutex::new(HashMap::new()),
             shard_cache: Mutex::new(HashMap::new()),
             escrow_cache: Mutex::new(HashMap::new()),
+            fingerprint_cache: Mutex::new(HashMap::new()),
             auto_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             auto_repair_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scrub_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
