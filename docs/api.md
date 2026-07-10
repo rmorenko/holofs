@@ -240,7 +240,7 @@ gateway (no `--enable-embed`) → 503 + hint about the missing flag.
 | `GET`  | `/holo/<name>`                | Progressive reveal: layer-by-layer page that streams a new image for every DWT layer L0 → L_max |
 | `GET`  | `/preview/stream/<name>`      | `multipart/x-mixed-replace` body; each part is the same object decoded one extra layer deep |
 | `GET`  | `/api/spotlight.png?name=…&x=…&y=…&w=…&h=…&mode=…` | Holographic spotlight: sharp inside the ROI, smooth outside. `name=` is the catalog path (`a=` from earlier drafts of this doc is wrong). Coords are normalised floats in `[0, 1]`; the pixel-coord variant (`x_px`/`y_px`/…) is no longer accepted. |
-| `GET`  | `/spotlight?name=…`           | SSR page with ROI picker |
+| `GET`  | `/spotlight?a=…`              | SSR page with ROI picker. `a=<catalog path>` — the SSR route reads the query param `a` (a leftover from the mix.png `?a=&b=` shape); the JSON `.png` endpoint above uses `name=`. |
 
 ### Garbage collection + uploads
 
@@ -1019,10 +1019,11 @@ Same `MAX_FRAME = 64 MiB` limit as the rest of the protocol.
 
 ## 10. Manifest format additions
 
-### 10.1 `HOLOFSM9` magic and encoding selector
+### 10.1 `HOLOFSMA` magic — `encoding` + `state` selectors
 
-The on-disk manifest carries a one-byte `encoding` discriminant plus
-a variant-specific tail:
+The current on-disk manifest carries a one-byte `encoding`
+discriminant plus a variant-specific tail, followed by the async-
+ingest `state` byte introduced in `HOLOFSMA`:
 
 | Byte | Variant                                                             | Tail |
 |------|---------------------------------------------------------------------|------|
@@ -1036,9 +1037,15 @@ The `Replicated` variant groups each layer's DWT coefficients into
 what lets `/api/spotlight.png` fetch only the blocks whose
 coefficients overlap the requested ROI.
 
+State byte (only present in `HOLOFSMA`): `0=Ready`, `1=Encoding`,
+`2=Failed`. Async-ingest PUTs (`HOLOFS_ASYNC_ENCODE=1`) stage a
+placeholder with `state=Encoding`; the background worker flips it to
+`Ready` on success or `Failed` on encode / persist error.
+
 Backwards compatibility: legacy magic bytes `HOLOFSM6`, `HOLOFSM7`,
-and `HOLOFSM8` are still decodable. `HOLOFSM8` records get
-`encoding = Rlnc` on read; `HOLOFSM7` / `HOLOFSM6` additionally fill
+`HOLOFSM8`, and `HOLOFSM9` are still decodable. `HOLOFSM9` records
+get `state = Ready` on read; `HOLOFSM8` additionally gets
+`encoding = Rlnc`; `HOLOFSM7` / `HOLOFSM6` additionally fill
 `created_at_unix = 0`.
 
 ---

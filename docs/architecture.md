@@ -53,6 +53,7 @@ graph BT
     wire --> cluster
     storage --> cluster
     client --> cluster
+    testutils --> client
     testutils --> cluster
     core --> analytics
     model --> analytics

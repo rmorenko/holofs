@@ -593,9 +593,11 @@ pub async fn bootstrap_cluster(
     })
 }
 
-/// Build an image manifest for the seed step. Copy of the helper in
-/// `holofs-http.rs`; both files will be deduplicated in when the
-/// legacy gateway binary is retired.
+/// Build an image manifest for the seed step. v2 P4.1 dedup: the
+/// manifest shape is built by the canonical
+/// `Manifest::blank_image` factory in `holofs-model`; this helper
+/// just fills in `created_at_unix` (which is not part of the layout
+/// contract) and dispatches the seed PUT to the cluster.
 async fn put_named(
     gf: &Gf,
     node_addrs: &[String],
@@ -605,45 +607,14 @@ async fn put_named(
     w: usize,
     h: usize,
 ) -> Manifest {
-    let mut layer_positions: Vec<Vec<u32>> = vec![Vec::new(); NLAYERS];
-    for y in 0..h {
-        for x in 0..w {
-            layer_positions[coeff_layer(x, y, w, h)].push((y * w + x) as u32);
-        }
-    }
-    let n_per_layer: Vec<u32> = (0..NLAYERS)
-        .map(|l| (K as f32 * RED[l]).round() as u32)
-        .collect();
-    let sym_len: Vec<u32> = layer_positions
-        .iter()
-        .map(|pos| ((pos.len() * 4 + K - 1) / K) as u32)
-        .collect();
-    let mut m = Manifest {
-        object_id: 0,
-        k: K as u16,
-        nlayers: NLAYERS as u8,
-        n_per_layer,
-        sym_len,
-        layer_positions,
-        channels: 3,
-        width: w as u32,
-        height: h as u32,
-        levels: LEVELS as u8,
-        nodes: node_addrs.to_vec(),
-        placement: Placement::RendezvousZoneAware,
-        zones: zones.to_vec(),
-        data_cid: [0; 32],
-        merkle_root: [0; 32],
-        shard_hashes: vec![vec![Vec::new(); NLAYERS]; 3],
-        kind: holofs_model::manifest::ObjectKind::Image,
-        content_type: "image/png".into(),
-        chunk_lens: vec![],
-        audio_sample_rate: 0,
-        text_minhash: vec![],
-        created_at_unix: holofs_core::time::now_unix(),
-        encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
-            state: holofs_model::manifest::ManifestState::Ready,
-        };
+    let mut m = Manifest::blank_image(
+        w,
+        h,
+        node_addrs.to_vec(),
+        zones.to_vec(),
+        Placement::RendezvousZoneAware,
+    );
+    m.created_at_unix = holofs_core::time::now_unix();
     put_object(gf, &mut m, &live.to_vec(), channels)
         .await
         .expect("PUT failed during seed");

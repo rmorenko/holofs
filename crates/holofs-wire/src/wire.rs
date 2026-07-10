@@ -261,7 +261,7 @@ impl Request {
     }
 
     pub fn decode(buf: &[u8]) -> io::Result<Self> {
-        let mut c = Cursor::new(buf);
+        let mut c = make_cursor(buf);
         let op = c.u8()?;
         match op {
             OP_PING => Ok(Request::Ping),
@@ -415,7 +415,7 @@ impl Response {
     }
 
     pub fn decode(buf: &[u8]) -> io::Result<Self> {
-        let mut c = Cursor::new(buf);
+        let mut c = make_cursor(buf);
         let tag = c.u8()?;
         match tag {
             RSP_PONG => Ok(Response::Pong),
@@ -496,49 +496,16 @@ fn decode_shard(c: &mut Cursor<'_>) -> io::Result<Shard> {
 }
 
 // === Helper buffer cursor ==================================================
+//
+// v2 P4.3: the local `struct Cursor` extracted to
+// [`holofs_core::cursor::BeCursor`] so both hand-rolled binary
+// decoders in the workspace (wire + manifest) share one
+// implementation. The alias keeps the callsite spellings inside this
+// file unchanged.
+type Cursor<'a> = holofs_core::cursor::BeCursor<'a>;
 
-struct Cursor<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Cursor<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Cursor { buf, pos: 0 }
-    }
-    fn u8(&mut self) -> io::Result<u8> {
-        let b = self.take(1)?;
-        Ok(b[0])
-    }
-    fn u16(&mut self) -> io::Result<u16> {
-        let b = self.take(2)?;
-        Ok(u16::from_be_bytes([b[0], b[1]]))
-    }
-    fn u32(&mut self) -> io::Result<u32> {
-        let b = self.take(4)?;
-        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-    }
-    fn u64(&mut self) -> io::Result<u64> {
-        let b = self.take(8)?;
-        let mut a = [0u8; 8];
-        a.copy_from_slice(b);
-        Ok(u64::from_be_bytes(a))
-    }
-    fn take(&mut self, n: usize) -> io::Result<&'a [u8]> {
-        if self.pos + n > self.buf.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "buffer truncated",
-            ));
-        }
-        let s = &self.buf[self.pos..self.pos + n];
-        self.pos += n;
-        Ok(s)
-    }
-    /// Bytes still available past the current cursor position.
-    fn remaining(&self) -> usize {
-        self.buf.len().saturating_sub(self.pos)
-    }
+fn make_cursor(buf: &[u8]) -> Cursor<'_> {
+    Cursor::new(buf, "buffer truncated")
 }
 
 /// Cap a wire-supplied element count `n` to what could physically fit in

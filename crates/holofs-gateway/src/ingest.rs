@@ -245,49 +245,18 @@ impl Gateway {
     }
 
     /// Blank manifest for an image object. Width/height come from the cluster
-    /// config. 3 channels (RGB), NLAYERS DWT bands.
+    /// Blank RGB image manifest. v2 P4.1 dedup: forwards to the
+    /// canonical `Manifest::blank_image` factory in `holofs-model`
+    /// so this gateway path and `holofs_web::bootstrap::put_named`
+    /// share one implementation.
     fn blank_manifest(&self) -> Manifest {
-        let w = self.cluster.width;
-        let h = self.cluster.height;
-        let mut layer_positions: Vec<Vec<u32>> = vec![Vec::new(); NLAYERS];
-        for y in 0..h {
-            for x in 0..w {
-                layer_positions[coeff_layer(x, y, w, h)].push((y * w + x) as u32);
-            }
-        }
-        let n_per_layer: Vec<u32> = (0..NLAYERS)
-            .map(|l| (K as f32 * RED[l]).round() as u32)
-            .collect();
-        let sym_len: Vec<u32> = layer_positions
-            .iter()
-            .map(|pos| ((pos.len() * 4 + K - 1) / K) as u32)
-            .collect();
-        Manifest {
-            object_id: 0,
-            k: K as u16,
-            nlayers: NLAYERS as u8,
-            n_per_layer,
-            sym_len,
-            layer_positions,
-            channels: 3,
-            width: w as u32,
-            height: h as u32,
-            levels: LEVELS as u8,
-            nodes: self.cluster.node_addrs.clone(),
-            placement: self.cluster.placement,
-            zones: self.cluster.zones.clone(),
-            data_cid: [0; 32],
-            merkle_root: [0; 32],
-            shard_hashes: vec![vec![Vec::new(); NLAYERS]; 3],
-            kind: ObjectKind::Image,
-            content_type: "image/png".into(),
-            chunk_lens: vec![],
-            audio_sample_rate: 0,
-            text_minhash: vec![],
-            created_at_unix: 0,
-            encoding: ObjectEncoding::Rlnc,
-            state: ManifestState::Ready,
-        }
+        Manifest::blank_image(
+            self.cluster.width,
+            self.cluster.height,
+            self.cluster.node_addrs.clone(),
+            self.cluster.zones.clone(),
+            self.cluster.placement,
+        )
     }
 
     /// Auto-detect kind and ingest bytes (image → audio → text → opaque).

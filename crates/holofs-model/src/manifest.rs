@@ -218,6 +218,75 @@ impl Manifest {
     /// machinery. `created_at_unix` is Unix epoch seconds; pass `0` for
     /// directories whose creation time is unknown (e.g. synthesized by
     /// the legacy-catalog migration in `Directory::synthesize_missing_directories`).
+    /// Build a blank RGB image manifest ready for `put_object` to
+    /// fill in `data_cid`, `merkle_root`, and `shard_hashes`.
+    ///
+    /// v2 P4.1: single source of truth for the image manifest
+    /// layout. Prior to this the same shape was inlined in
+    /// `Gateway::blank_manifest` (ingest.rs) *and* the seed helper
+    /// `holofs_web::bootstrap::put_named` — a canonical maintenance
+    /// trap that the review flagged for dedup. The factory lives on
+    /// `Manifest` itself so both call sites now share it.
+    ///
+    /// - `w`, `h`: source image dimensions in pixels. Must be
+    ///   multiples of `2^LEVELS`; asserted by DWT downstream, not here.
+    /// - `nodes`: the current cluster's per-node RPC addresses.
+    /// - `zones`: parallel to `nodes`; zone/rack id for anti-affinity
+    ///   under `RendezvousZoneAware`.
+    /// - `placement`: chosen scheme — bootstrap uses
+    ///   `RendezvousZoneAware`; the gateway pulls from
+    ///   `ClusterInfo::placement`.
+    pub fn blank_image(
+        w: usize,
+        h: usize,
+        nodes: Vec<String>,
+        zones: Vec<u8>,
+        placement: Placement,
+    ) -> Self {
+        use holofs_core::transform::coeff_layer;
+        use holofs_core::{K, LEVELS, NLAYERS, RED};
+
+        let mut layer_positions: Vec<Vec<u32>> = vec![Vec::new(); NLAYERS];
+        for y in 0..h {
+            for x in 0..w {
+                layer_positions[coeff_layer(x, y, w, h)].push((y * w + x) as u32);
+            }
+        }
+        let n_per_layer: Vec<u32> = (0..NLAYERS)
+            .map(|l| (K as f32 * RED[l]).round() as u32)
+            .collect();
+        let sym_len: Vec<u32> = layer_positions
+            .iter()
+            .map(|pos| ((pos.len() * 4 + K - 1) / K) as u32)
+            .collect();
+        Self {
+            object_id: 0,
+            k: K as u16,
+            nlayers: NLAYERS as u8,
+            n_per_layer,
+            sym_len,
+            layer_positions,
+            channels: 3,
+            width: w as u32,
+            height: h as u32,
+            levels: LEVELS as u8,
+            nodes,
+            placement,
+            zones,
+            data_cid: [0; 32],
+            merkle_root: [0; 32],
+            shard_hashes: vec![vec![Vec::new(); NLAYERS]; 3],
+            kind: ObjectKind::Image,
+            content_type: "image/png".into(),
+            chunk_lens: vec![],
+            audio_sample_rate: 0,
+            text_minhash: vec![],
+            created_at_unix: 0,
+            encoding: ObjectEncoding::Rlnc,
+            state: ManifestState::Ready,
+        }
+    }
+
     pub fn directory(object_id: u64, created_at_unix: u64) -> Self {
         Self {
             object_id,
@@ -301,11 +370,13 @@ impl Manifest {
     }
 }
 
-/// Current on-disk magic. bumped from `HOLOFSM8` to
-/// `HOLOFSM9` to append the new `ObjectEncoding` tail (one byte for
-/// the variant, plus variant-specific payload). Pure-append schema
-/// extension: readers see the new bytes, legacy readers decode
-/// through and default `encoding` to `Rlnc`.
+/// Current on-disk magic. Bumped `HOLOFSM8` → `HOLOFSM9` to append
+/// the `ObjectEncoding` tail (one byte for the variant, plus
+/// variant-specific payload); then bumped `HOLOFSM9` → `HOLOFSMA`
+/// to append the async-ingest `state` byte. Pure-append schema
+/// extensions each time: readers see the new bytes, legacy readers
+/// decode through and default missing fields (`encoding = Rlnc`,
+/// `state = Ready`).
 const MAGIC: &[u8; 8] = b"HOLOFSMA";
 /// Previous MAGIC — has every field of `HOLOFSMA` *except* the
 /// trailing `state` byte introduced by the async-ingest work.
@@ -333,11 +404,7 @@ impl Manifest {
         b.extend_from_slice(&self.width.to_be_bytes());
         b.extend_from_slice(&self.height.to_be_bytes());
         b.push(self.levels);
-        b.push(match self.placement {
-            Placement::RoundRobin => 0,
-            Placement::Rendezvous => 1,
-            Placement::RendezvousZoneAware => 2,
-        });
+        b.push(self.placement.tag());
 
         assert_eq!(self.n_per_layer.len(), self.nlayers as usize);
         assert_eq!(self.sym_len.len(), self.nlayers as usize);
@@ -422,7 +489,7 @@ impl Manifest {
     }
 
     pub fn decode(buf: &[u8]) -> io::Result<Self> {
-        let mut c = Cursor::new(buf);
+        let mut c = make_cursor(buf);
         let magic_bytes = c.take(8)?;
         let mut magic = [0u8; 8];
         magic.copy_from_slice(magic_bytes);
@@ -447,17 +514,13 @@ impl Manifest {
         let width = c.u32()?;
         let height = c.u32()?;
         let levels = c.u8()?;
-        let placement = match c.u8()? {
-            0 => Placement::RoundRobin,
-            1 => Placement::Rendezvous,
-            2 => Placement::RendezvousZoneAware,
-            other => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("unknown placement scheme: {other}"),
-                ))
-            }
-        };
+        let placement_tag = c.u8()?;
+        let placement = Placement::from_tag(placement_tag).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown placement scheme: {placement_tag}"),
+            )
+        })?;
 
         let mut n_per_layer = Vec::with_capacity(nlayers as usize);
         for _ in 0..nlayers {
@@ -608,45 +671,13 @@ impl Manifest {
     }
 }
 
-struct Cursor<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-impl<'a> Cursor<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Cursor { buf, pos: 0 }
-    }
-    fn u8(&mut self) -> io::Result<u8> {
-        Ok(self.take(1)?[0])
-    }
-    fn u16(&mut self) -> io::Result<u16> {
-        let b = self.take(2)?;
-        Ok(u16::from_be_bytes([b[0], b[1]]))
-    }
-    fn u32(&mut self) -> io::Result<u32> {
-        let b = self.take(4)?;
-        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-    }
-    fn u64(&mut self) -> io::Result<u64> {
-        let b = self.take(8)?;
-        let mut a = [0u8; 8];
-        a.copy_from_slice(b);
-        Ok(u64::from_be_bytes(a))
-    }
-    fn take(&mut self, n: usize) -> io::Result<&'a [u8]> {
-        if self.pos + n > self.buf.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "manifest truncated",
-            ));
-        }
-        let s = &self.buf[self.pos..self.pos + n];
-        self.pos += n;
-        Ok(s)
-    }
-    fn remaining(&self) -> usize {
-        self.buf.len().saturating_sub(self.pos)
-    }
+// v2 P4.3: private `struct Cursor` extracted to
+// [`holofs_core::cursor::BeCursor`]. Alias + wrapper keep the local
+// callsite spelling unchanged.
+type Cursor<'a> = holofs_core::cursor::BeCursor<'a>;
+
+fn make_cursor(buf: &[u8]) -> Cursor<'_> {
+    Cursor::new(buf, "manifest truncated")
 }
 
 /// Cap a manifest-supplied element count `n` to what could physically

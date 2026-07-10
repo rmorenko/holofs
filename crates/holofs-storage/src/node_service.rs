@@ -40,6 +40,52 @@ use holofs_core::merkle::{shard_hash, Hash};
 use holofs_core::rlnc::Shard;
 use holofs_wire::{read_frame, write_frame, Request, Response};
 
+/// Node-service knobs read from `HOLOFS_*` env vars at `spawn_node`
+/// start-up. v2 P4.4 collects the three settings into one typed
+/// snapshot so the env vocabulary lives in a single place per-crate,
+/// mirroring what `holofs_web::runtime_config::RuntimeConfig` does for
+/// the web layer. All fields are start-up only (`spawn_node` reads
+/// them once); a `set_var` after boot has no effect on an already-
+/// running node.
+#[derive(Debug, Clone)]
+pub struct NodeConfig {
+    /// Opt in to at-rest shard encryption via `HOLOFS_AT_REST_ENC=1`.
+    /// Key material derives from the node's own identity seed.
+    pub at_rest_encryption: bool,
+    /// Per-shard fsync. Default `true`; operators trade the
+    /// durability barrier for ~13× encoder throughput by setting
+    /// `HOLOFS_NODE_FSYNC=0`.
+    pub fsync_on_write: bool,
+    /// Group-commit flusher tick interval, silently clamped to ≥ 1 ms
+    /// (see B3 in `holofs-review.md`). Configurable via
+    /// `HOLOFS_NODE_FLUSH_INTERVAL_MS`; default 5 ms.
+    pub flush_interval_ms: u64,
+}
+
+impl NodeConfig {
+    /// Read the current environment. Called from `spawn_node`; kept
+    /// public so tests / benchmarks that construct nodes without
+    /// going through `spawn_node` can share the same env vocabulary.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            at_rest_encryption: std::env::var("HOLOFS_AT_REST_ENC")
+                .ok()
+                .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false),
+            fsync_on_write: std::env::var("HOLOFS_NODE_FSYNC")
+                .ok()
+                .map(|v| !matches!(v.as_str(), "0" | "false" | "no"))
+                .unwrap_or(true),
+            flush_interval_ms: std::env::var("HOLOFS_NODE_FLUSH_INTERVAL_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5)
+                .max(1),
+        }
+    }
+}
+
 /// Process-wide breakdown of the node-side PUT wall-time. Every completed
 /// `Request::Put` / `Request::PutBatch` bumps three ns counters and one
 /// count counter, so a caller can read a `(lock_wait, put_appended,
@@ -762,24 +808,14 @@ pub async fn spawn_node_persistent_with_tls(
     // both plaintext (v1) and sealed (v2) files, so nothing needs
     // to move on a rolling upgrade.
     let identity = NodeIdentity::load_or_create(dir.join("identity.key"))?;
-    let at_rest_on = std::env::var("HOLOFS_AT_REST_ENC")
-        .ok()
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false);
-    let mut store = if at_rest_on {
+    let cfg = NodeConfig::from_env();
+    let mut store = if cfg.at_rest_encryption {
         let key = crate::crypto::derive_shard_key(&identity.to_bytes());
         Store::open_with_key(&dir, key)?
     } else {
         Store::open(&dir)?
     };
-    // Per-shard fsync default = ON. Operators trade the durability
-    // barrier for ~13× encoder throughput by setting
-    // HOLOFS_NODE_FSYNC=0 (RLNC replication tolerates the loss).
-    let fsync_on = std::env::var("HOLOFS_NODE_FSYNC")
-        .ok()
-        .map(|v| !matches!(v.as_str(), "0" | "false" | "no"))
-        .unwrap_or(true);
-    store.set_sync_on_write(fsync_on);
+    store.set_sync_on_write(cfg.fsync_on_write);
     let h = spawn_node_with_identity(addr, store, identity, tls).await?;
     Ok((h.addr, h.store, h.task))
 }
@@ -819,11 +855,7 @@ async fn spawn_node_with_identity(
     // Silently clamping to 1 ms is the least-surprising behaviour:
     // it matches the doc's stated goal (aggressive per-tick
     // batching) without breaking the handler contract.
-    let flush_interval_ms: u64 = std::env::var("HOLOFS_NODE_FLUSH_INTERVAL_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5)
-        .max(1);
+    let flush_interval_ms: u64 = NodeConfig::from_env().flush_interval_ms;
     {
         let store_for_flusher = store.clone();
         tokio::spawn(async move {

@@ -32,6 +32,7 @@ pub mod gf;
 pub mod hash;
 pub mod merkle;
 pub mod repair;
+pub mod cursor;
 pub mod rlnc;
 pub mod rng;
 pub mod time;

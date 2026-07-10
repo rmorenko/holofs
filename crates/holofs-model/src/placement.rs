@@ -18,6 +18,34 @@ pub enum Placement {
     RendezvousZoneAware,
 }
 
+impl Placement {
+    /// Stable on-disk discriminant used by `Manifest::encode` /
+    /// `Manifest::decode`. Extracted here (v2 P4.2) so the encoder
+    /// and decoder can't silently drift — before, both sides
+    /// inlined the match `Rendezvous => 1` etc., and any new variant
+    /// had to be added twice.
+    #[must_use]
+    pub const fn tag(self) -> u8 {
+        match self {
+            Placement::RoundRobin => 0,
+            Placement::Rendezvous => 1,
+            Placement::RendezvousZoneAware => 2,
+        }
+    }
+
+    /// Inverse of [`Self::tag`]. Returns `None` on an unknown byte —
+    /// callers surface that as an `InvalidData` decode error.
+    #[must_use]
+    pub const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Placement::RoundRobin),
+            1 => Some(Placement::Rendezvous),
+            2 => Some(Placement::RendezvousZoneAware),
+            _ => None,
+        }
+    }
+}
+
 /// Shard key — uniquely identifies a position inside an object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShardKey {
