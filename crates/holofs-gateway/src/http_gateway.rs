@@ -696,13 +696,23 @@ impl Gateway {
         // the snapshot exactly. Publish that value to
         // flushed_epoch after the write succeeds; followers waiting
         // on the mutex see their ticket covered.
-        let (snapshot, flush_epoch) = {
+        //
+        // Pre-#4 this cloned the whole Directory (O(M) BTreeMap
+        // rebuild + Arc clone per entry), then released the lock,
+        // then called `save_atomic` on the clone. The clone was
+        // technically cheap thanks to `Arc<Manifest>` (P2), but the
+        // BTreeMap itself was still walked and re-allocated. Encoding
+        // in-place under the read-lock skips the intermediate clone
+        // entirely — the read-lock is held for the encode duration
+        // (memory-only, no I/O), then dropped before the fs::write /
+        // fsync / rename in `write_atomic`.
+        let (encoded, flush_epoch) = {
             let cat = self.catalog.read().await;
             let ep = self.persist_dirty_epoch.load(Ordering::Acquire);
-            (cat.clone(), ep)
+            (cat.encode(), ep)
         };
 
-        if let Err(e) = snapshot.save_atomic(path) {
+        if let Err(e) = holofs_model::fs::write_atomic(path, &encoded) {
             self.catalog_persist_failures_total
                 .fetch_add(1, Ordering::Relaxed);
             tracing::error!(

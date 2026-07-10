@@ -593,21 +593,51 @@ pub async fn get_object_up_to_layer(
     live: &LiveNodes,
     max_layer: u8,
 ) -> Result<(Vec<Vec<f32>>, u64), ClientError> {
+    use futures_util::future::try_join_all;
+
     let w = manifest.width as usize;
     let h = manifest.height as usize;
     let levels = manifest.levels as usize;
     let nlayers = manifest.nlayers as usize;
-    let mut out = vec![vec![0f32; w * h]; manifest.channels as usize];
-    let mut bytes_used: u64 = 0;
+    let channels = manifest.channels as usize;
 
-    for c in 0..manifest.channels as usize {
-        let mut plane = vec![0f32; w * h];
+    // Fan out every (channel, layer) fetch at once. Combined with the
+    // parallel `gather_layer` (fan-out across nodes), this collapses
+    // the pre-fix `O(C·L·N)` sequential RTT into a single ~max-RTT
+    // hop — the biggest single win on the GET path per the review's
+    // 3a bottleneck analysis.
+    let mut fetches = Vec::with_capacity(channels * nlayers);
+    for c in 0..channels {
         for l in 0..nlayers {
             if (l as u8) > max_layer {
-                // Skip this layer — its coefficients stay zero.
                 continue;
             }
-            let raw = gather_layer(manifest, live, c as u8, l as u8).await?;
+            fetches.push(async move {
+                let raw = gather_layer(manifest, live, c as u8, l as u8).await?;
+                Ok::<(usize, usize, Vec<Shard>), ClientError>((c, l, raw))
+            });
+        }
+    }
+    let fetched = try_join_all(fetches).await?;
+
+    // CPU chunk stays sequential — decode + IDWT are CPU-bound and
+    // running them in parallel wouldn't help on the single tokio
+    // worker anyway. Sort so each channel's layers are processed
+    // in order (haar_inverse needs L0 before it can lay down L1).
+    let mut per_channel: Vec<Vec<(usize, Vec<Shard>)>> = vec![Vec::new(); channels];
+    for (c, l, raw) in fetched {
+        per_channel[c].push((l, raw));
+    }
+    let mut out = vec![vec![0f32; w * h]; channels];
+    let mut bytes_used: u64 = 0;
+    for c in 0..channels {
+        let mut plane = vec![0f32; w * h];
+        // Layers already come in ascending order (loop above emitted
+        // them that way), but sort defensively — a future rewrite
+        // that changes emission order (e.g. buffer_unordered) must
+        // stay correct.
+        per_channel[c].sort_by_key(|(l, _)| *l);
+        for (l, raw) in per_channel[c].drain(..) {
             let expected: HashSet<Hash> = manifest.shard_hashes[c][l].iter().copied().collect();
             let verified: Vec<Shard> = raw
                 .into_iter()
@@ -1369,35 +1399,46 @@ pub async fn get_opaque_object(
 }
 
 /// Gather live shards for a (channel, layer) from all live nodes.
+///
+/// Every node's `Get` fires in parallel: on a `LiveNodes` of 40 the
+/// previous sequential loop paid `40 × RTT` per (channel, layer) —
+/// which the review's 3a analysis pinned as the single largest
+/// contributor to GET latency (~O(C·L·N) RTT of ~84 hops for an
+/// RGB × 7-layer × 4-node image). Fan-out collapses that to `max
+/// RTT`, and any single-node failure aborts the fan-out and
+/// surfaces the underlying `ClientError`.
 pub async fn gather_layer(
     manifest: &Manifest,
     live: &LiveNodes,
     channel: u8,
     layer: u8,
 ) -> Result<Vec<Shard>, ClientError> {
-    let mut acc = Vec::new();
-    for &node in live {
+    use futures_util::future::try_join_all;
+
+    let tasks = live.iter().filter_map(|&node| {
         // Manifests written when the cluster had fewer nodes carry a
         // shorter `manifest.nodes` — `add_node` extends existing
         // manifests but a monitor tick can race that mutation. Skip
         // out-of-range indices instead of panicking on a raw index.
-        let Some(addr) = manifest.nodes.get(node) else {
-            continue;
-        };
+        let addr = manifest.nodes.get(node)?.clone();
         let req = Request::Get {
             object_id: manifest.object_id,
             channel,
             layer,
         };
-        match rpc(addr, req).await? {
-            Response::Shards(mut v) => acc.append(&mut v),
-            Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
-            other => {
-                return Err(ClientError::UnexpectedResponse { expected: "Shards", got: format!("{other:?}") })
+        Some(async move {
+            match rpc(&addr, req).await? {
+                Response::Shards(v) => Ok::<Vec<Shard>, ClientError>(v),
+                Response::Error(msg) => Err(ClientError::RemoteError(msg)),
+                other => Err(ClientError::UnexpectedResponse {
+                    expected: "Shards",
+                    got: format!("{other:?}"),
+                }),
             }
-        }
-    }
-    Ok(acc)
+        })
+    });
+    let per_node = try_join_all(tasks).await?;
+    Ok(per_node.into_iter().flatten().collect())
 }
 
 // === Repair ================================================================

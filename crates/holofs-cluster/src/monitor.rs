@@ -226,19 +226,53 @@ pub async fn tick_once(
     }
 
     // 5. For every revived node — run repair_node for each object.
+    //
+    // Before the refactor this held `catalog.write()` across the
+    // entire `repair_node(...).await` — every network hop of a repair
+    // pass over M objects × N revived nodes serialised every GET / PUT
+    // / mkdir in the whole gateway ("writer convoy" per the review's
+    // §3a bottleneck #2). We now snapshot an `Arc<Manifest>` clone
+    // under a short read-lock, run `repair_node` on an owned mutable
+    // copy without any catalog lock, then take a short write-lock
+    // just long enough to swap the mutated manifest back — gated on
+    // a data_cid CAS so a concurrent PUT-replace's fresh manifest is
+    // not clobbered by our stale repair.
     for &node in &revived {
         for name in &names {
-            let mut cat = catalog.write().await;
-            let Some(m) = cat.get_mut(name) else {
+            let snapshot: Option<Arc<Manifest>> = {
+                let cat = catalog.read().await;
+                cat.entries.get(name).cloned()
+            };
+            let Some(snap) = snapshot else {
                 continue;
             };
-            match repair_node(gf, rng, m, &live, node, config.repair_d).await {
-                Ok(stats) => events.push(Event::RepairOk {
-                    object: name.clone(),
-                    node,
-                    shards_generated: stats.shards_generated,
-                    layers_repaired: stats.layers_repaired,
-                }),
+            let snap_data_cid = snap.data_cid;
+            let mut mutable: Manifest = (*snap).clone();
+            drop(snap);
+
+            let result = repair_node(gf, rng, &mut mutable, &live, node, config.repair_d).await;
+            match result {
+                Ok(stats) => {
+                    // CAS by data_cid: if the entry was PUT-replaced
+                    // (fresh data_cid) or DELETE'd during our repair,
+                    // discard — the repair operated on stale placement
+                    // and would only regress the new entry.
+                    let mut cat = catalog.write().await;
+                    let should_apply = cat
+                        .entries
+                        .get(name)
+                        .map(|cur| cur.data_cid == snap_data_cid)
+                        .unwrap_or(false);
+                    if should_apply {
+                        cat.insert(name.clone(), mutable);
+                        events.push(Event::RepairOk {
+                            object: name.clone(),
+                            node,
+                            shards_generated: stats.shards_generated,
+                            layers_repaired: stats.layers_repaired,
+                        });
+                    }
+                }
                 Err(e) => events.push(Event::RepairFailed {
                     object: name.clone(),
                     node,

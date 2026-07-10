@@ -169,40 +169,55 @@ impl Directory {
     /// both saves succeed atomically — last-writer-wins by rename
     /// order, which is the same guarantee we advertised before.
     pub fn save_atomic(&self, path: impl AsRef<Path>) -> io::Result<()> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        write_atomic(path, &self.encode())
+    }
+}
 
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
-        }
-        let pid = std::process::id();
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tmp = match path.file_name() {
-            Some(name) => {
-                let mut fname = name.to_os_string();
-                fname.push(format!(".tmp.{pid}.{n}"));
-                path.with_file_name(fname)
-            }
-            None => path.with_extension(format!("tmp.{pid}.{n}")),
-        };
-        fs::write(&tmp, self.encode())?;
-        if let Ok(f) = fs::File::open(&tmp) {
-            let _ = f.sync_all();
-        }
-        // rename should be atomic on the same filesystem. If it
-        // fails we still clean up our tmp so we don't leak files
-        // under concurrent-writer workloads.
-        match fs::rename(&tmp, path) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let _ = fs::remove_file(&tmp);
-                Err(e)
-            }
+/// Write `bytes` atomically to `path` (tmp + rename). Public so
+/// [`Gateway::persist_catalog`] can encode the catalog under a short
+/// read-lock, drop the lock, and run the O(disk) tmp-write + rename
+/// outside — before this the catalog RwLock was held across the
+/// fs::write / fsync / rename, serialising every other reader for
+/// milliseconds. Callers using [`Directory::save_atomic`] still get
+/// the atomic semantics.
+pub fn write_atomic(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
         }
     }
+    let pid = std::process::id();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = match path.file_name() {
+        Some(name) => {
+            let mut fname = name.to_os_string();
+            fname.push(format!(".tmp.{pid}.{n}"));
+            path.with_file_name(fname)
+        }
+        None => path.with_extension(format!("tmp.{pid}.{n}")),
+    };
+    fs::write(&tmp, bytes)?;
+    if let Ok(f) = fs::File::open(&tmp) {
+        let _ = f.sync_all();
+    }
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// no-op impl block that lets `save_atomic`'s trailing `}` close
+/// [`Directory`]. Kept as a no-op so the `write_atomic` free
+/// function above can live right next to `save_atomic` without
+/// needing to jump around the file.
+impl Directory {
 
     /// Load a catalog from a file. Missing file → empty catalog.
     pub fn load_or_empty(path: impl AsRef<Path>) -> io::Result<Self> {

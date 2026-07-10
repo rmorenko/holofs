@@ -68,13 +68,32 @@ fn state() -> &'static Mutex<PoolState> {
     STATE.get_or_init(|| Mutex::new(PoolState::default()))
 }
 
+// Pool tuning is snapshotted at first access via `OnceLock` and never
+// re-read in release builds. Before this every RPC path hit
+// `std::env::var` up to three times (disabled + idle_ttl +
+// per_node_cap) — libc's env lookup takes the global env mutex, which
+// under 50-worker load showed up as measurable contention on
+// `acquire`/`release`. The env knobs are documented as boot-time so
+// freezing them at first use matches the user-facing contract.
+//
+// Under `cfg(test)`, every call re-reads instead — pool tests
+// (`sequential_acquire_reuses_stream`, `disabled_pool_dials_fresh`,
+// …) flip the same env inside the same process, and a cached first
+// value would leak between tests despite the `pool_test_lock` serial
+// guard.
 fn per_node_cap() -> usize {
-    // 32 is the raised default (was 8). On a 4-node multi-process
-    // topology the previous 4 nodes × 8 = 32 total idle connections
-    // ran out immediately under a 50-worker load; every next op
-    // paid a fresh TCP handshake. Raising to 32 per addr caps at
-    // ~128 for a 4-node cluster — still bounded, but no longer
-    // the critical path.
+    #[cfg(test)]
+    {
+        return read_per_node_cap();
+    }
+    #[cfg(not(test))]
+    {
+        static V: OnceLock<usize> = OnceLock::new();
+        *V.get_or_init(read_per_node_cap)
+    }
+}
+
+fn read_per_node_cap() -> usize {
     std::env::var("HOLOFS_POOL_PER_NODE")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -83,6 +102,18 @@ fn per_node_cap() -> usize {
 }
 
 fn idle_ttl() -> Duration {
+    #[cfg(test)]
+    {
+        return read_idle_ttl();
+    }
+    #[cfg(not(test))]
+    {
+        static V: OnceLock<Duration> = OnceLock::new();
+        *V.get_or_init(read_idle_ttl)
+    }
+}
+
+fn read_idle_ttl() -> Duration {
     let secs: u64 = std::env::var("HOLOFS_POOL_IDLE_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -91,7 +122,22 @@ fn idle_ttl() -> Duration {
 }
 
 fn disabled() -> bool {
-    matches!(std::env::var("HOLOFS_POOL_DISABLE").ok().as_deref(), Some("1") | Some("true"))
+    #[cfg(test)]
+    {
+        return read_disabled();
+    }
+    #[cfg(not(test))]
+    {
+        static V: OnceLock<bool> = OnceLock::new();
+        *V.get_or_init(read_disabled)
+    }
+}
+
+fn read_disabled() -> bool {
+    matches!(
+        std::env::var("HOLOFS_POOL_DISABLE").ok().as_deref(),
+        Some("1") | Some("true")
+    )
 }
 
 /// Acquire a connection to `addr`, reusing an idle one if available.
