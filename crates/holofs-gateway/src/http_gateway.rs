@@ -94,8 +94,10 @@ pub const DEFAULT_ENCODE_CONCURRENCY: usize = 8;
 /// from growing without bound under a bursty client that hasn't
 /// migrated to Retry-After polling yet: the whole point of async
 /// ingest is fast-fail on overload, not silent RAM exhaustion.
-/// Default is 4 × `DEFAULT_ENCODE_CONCURRENCY`; override via
-/// `HOLOFS_ENCODE_QUEUE_MAX`.
+/// Default at bootstrap is `8 × encode_cap` (see `bootstrap.rs`)
+/// — this static minimum kicks in only when the encoder cap
+/// itself is tiny (test / in-memory Gateway paths). Override at
+/// runtime via `HOLOFS_ENCODE_QUEUE_MAX`.
 pub const DEFAULT_ENCODE_QUEUE_MAX: usize = 32;
 
 /// Cluster metadata needed to PUT a new object.

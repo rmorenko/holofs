@@ -372,13 +372,21 @@ pub async fn bootstrap_cluster(
         .and_then(|s| s.parse().ok())
         .unwrap_or(holofs_gateway::DEFAULT_ENCODE_CONCURRENCY);
     // Default queue_max scales with the encoder cap (4×). Fixed
-    // defaults break under `HOLOFS_ENCODE_CONCURRENCY` overrides:
-    // at encode_cap=24 the 32-line default gave 97 % put_new 503s
-    // before the queue could even absorb one burst.
+    // Default queue_max scales with the encoder cap. The 4×
+    // multiplier gave 97 % put_new 503s under a 50-worker soak at
+    // encode_cap=24 — the queue would fill during a burst before
+    // encoders could drain it, and every `wait_for_encode` client
+    // sat retrying. Bumping to 8× more than doubled the overall
+    // soak throughput (8 867 → 12 649 ops in 3 min) because the
+    // wider buffer absorbs bursts, workers stop looping on
+    // `AsyncQueueFull` retries, and every other endpoint gets
+    // more CPU / node HTTP headroom. Memory cost: 8× is ~200
+    // pending PUTs × ~50 KB body = 10 MB max — well within
+    // gateway RAM budget.
     let encode_queue_max: usize = std::env::var("HOLOFS_ENCODE_QUEUE_MAX")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| encode_cap.saturating_mul(4).max(holofs_gateway::DEFAULT_ENCODE_QUEUE_MAX));
+        .unwrap_or_else(|| encode_cap.saturating_mul(8).max(holofs_gateway::DEFAULT_ENCODE_QUEUE_MAX));
     if let Some(gw_mut) = Arc::get_mut(&mut gateway) {
         gw_mut.configure_limits(medium_cap, long_cap);
         gw_mut.configure_encode_limit(encode_cap);
