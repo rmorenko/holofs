@@ -20,12 +20,24 @@ pub fn mix_donors(gf: &Gf, donors: &[Shard], need: usize, rng: &mut Rng) -> Vec<
     if donors.is_empty() || need == 0 {
         return Vec::new();
     }
+    // Filter donors that don't match the (K, slen) contract. Before
+    // this check `mix_donors` would use donors[0] as the source of
+    // truth for `slen` and then index `src.coeffs[i]` / `src.payload[j]`
+    // in every donor unchecked — a heterogeneous set (fed by a repair
+    // pass over a partially-migrated cluster) would panic.
     let slen = donors[0].payload.len();
+    let donors: Vec<&Shard> = donors
+        .iter()
+        .filter(|s| s.coeffs.len() == K && s.payload.len() == slen)
+        .collect();
+    if donors.is_empty() {
+        return Vec::new();
+    }
     let mut out = Vec::with_capacity(need);
     for _ in 0..need {
         let mut nc = vec![0u8; K];
         let mut np = vec![0u8; slen];
-        for src in donors {
+        for src in &donors {
             let alpha = rng.byte();
             if alpha == 0 {
                 continue;
@@ -38,7 +50,7 @@ pub fn mix_donors(gf: &Gf, donors: &[Shard], need: usize, rng: &mut Rng) -> Vec<
             }
         }
         if nc.iter().all(|&b| b == 0) {
-            let src = &donors[0];
+            let src = donors[0];
             nc.copy_from_slice(&src.coeffs);
             np.copy_from_slice(&src.payload);
         }

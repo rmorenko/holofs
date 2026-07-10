@@ -98,6 +98,59 @@ pub fn encode_layer_with_k(
     (symbol_len, shards)
 }
 
+/// Non-systematic variant of [`encode_layer_with_k`] — every one of `n`
+/// shards is a fresh random linear combination of all `k` source chunks.
+/// The systematic path (`e_i` shards carrying a raw chunk) is exactly
+/// what turns escrow-style secret sharing from information-theoretic
+/// into "one share reveals 1/K of the plaintext", so the escrow crate
+/// uses this path instead.
+///
+/// Non-zero row guarantee: if the RNG happens to hand back an all-zero
+/// coefficient vector (probability `2^-8k`) we replace it with a
+/// deterministic non-zero pattern — a zero row would silently drop the
+/// share from the recovery set.
+pub fn encode_layer_with_k_random(
+    gf: &Gf,
+    data: &[u8],
+    k: usize,
+    n: usize,
+    rng: &mut Rng,
+) -> (usize, Vec<Shard>) {
+    let symbol_len = data.len().div_ceil(k);
+    let mut padded = data.to_vec();
+    padded.resize(k * symbol_len, 0);
+    let mut shards = Vec::with_capacity(n);
+    for _ in 0..n {
+        let mut coeffs = vec![0u8; k];
+        for c in coeffs.iter_mut() {
+            *c = rng.byte();
+        }
+        // Guarantee at least two non-zero coefficients: a single
+        // non-zero coefficient means the share is a scalar multiple
+        // of one raw chunk and reveals it modulo a public scalar,
+        // defeating the point of dropping the systematic path.
+        if coeffs.iter().filter(|&&b| b != 0).count() < 2 {
+            coeffs[0] ^= 0x80;
+            if k > 1 {
+                coeffs[1] ^= 0x40;
+            }
+        }
+        let mut payload = vec![0u8; symbol_len];
+        for i in 0..k {
+            let ci = coeffs[i];
+            if ci == 0 {
+                continue;
+            }
+            let src = &padded[i * symbol_len..(i + 1) * symbol_len];
+            for j in 0..symbol_len {
+                payload[j] ^= gf.mul(ci, src[j]);
+            }
+        }
+        shards.push(Shard { coeffs, payload });
+    }
+    (symbol_len, shards)
+}
+
 /// Same as `decode_layer` but with an arbitrary `k`. Full Gauss-Jordan;
 /// supports systematic+RLNC.
 pub fn decode_layer_with_k(
@@ -106,12 +159,24 @@ pub fn decode_layer_with_k(
     k: usize,
     symbol_len: usize,
 ) -> Option<Vec<u8>> {
+    // Drop any shard whose length doesn't match the declared
+    // (k, symbol_len). Before this filter, a shard with short
+    // `coeffs` or `payload` (crafted, corrupted, or arriving from
+    // an older schema) would panic on `coeffs[i]` / `payload[j]`
+    // deep in the solver — with attacker-supplied lengths reachable
+    // through `escrow_recover` on the web boundary, that's a DoS
+    // vector.
+    let shards: Vec<&Shard> = shards
+        .iter()
+        .copied()
+        .filter(|s| s.coeffs.len() == k && s.payload.len() == symbol_len)
+        .collect();
     if shards.len() < k {
         return None;
     }
     let mut known: Vec<Option<&[u8]>> = vec![None; k];
     let mut rlnc: Vec<&Shard> = Vec::new();
-    for &s in shards {
+    for &s in &shards {
         let mut idx = None;
         let mut bad = false;
         for (i, &c) in s.coeffs.iter().enumerate() {
@@ -277,9 +342,18 @@ pub fn decode_layer_with_holes(
     shards: &[&Shard],
     symbol_len: usize,
 ) -> Vec<Option<Vec<u8>>> {
+    // Same crash-safety filter as `decode_layer_with_k` — reject
+    // shards whose (coeffs, payload) lengths don't match the (K,
+    // symbol_len) contract. Silent skip is safer than an index
+    // panic when the caller cannot guarantee shard provenance.
+    let shards: Vec<&Shard> = shards
+        .iter()
+        .copied()
+        .filter(|s| s.coeffs.len() == K && s.payload.len() == symbol_len)
+        .collect();
     let mut known: Vec<Option<&[u8]>> = vec![None; K];
     let mut rlnc: Vec<&Shard> = Vec::new();
-    for &s in shards {
+    for &s in &shards {
         match identity_index(&s.coeffs) {
             Some(i) if known[i].is_none() => {
                 known[i] = Some(&s.payload);
@@ -381,13 +455,19 @@ pub fn decode_layer_with_holes(
 /// Decode a layer. Requires ≥ K shards in total. Uses systematic shards as
 /// "free rows", saving Gauss work.
 pub fn decode_layer(gf: &Gf, shards: &[&Shard], symbol_len: usize) -> Option<Vec<u8>> {
+    // Crash-safety filter — see `decode_layer_with_k`.
+    let shards: Vec<&Shard> = shards
+        .iter()
+        .copied()
+        .filter(|s| s.coeffs.len() == K && s.payload.len() == symbol_len)
+        .collect();
     if shards.len() < K {
         return None;
     }
 
     let mut known: Vec<Option<&[u8]>> = vec![None; K];
     let mut rlnc: Vec<&Shard> = Vec::new();
-    for &s in shards {
+    for &s in &shards {
         match identity_index(&s.coeffs) {
             Some(i) if known[i].is_none() => {
                 known[i] = Some(&s.payload);
@@ -734,5 +814,40 @@ mod tests {
         let refs: Vec<&Shard> = shards.iter().skip(K).take(K).collect();
         let decoded = decode_layer(&gf, &refs, sl).unwrap();
         assert_eq!(&decoded[..data.len()], &data[..]);
+    }
+
+    /// B5 regression: a shard whose lengths disagree with the (K,
+    /// symbol_len) contract must be filtered out — the decoder used
+    /// to index straight into `coeffs[i]` / `payload[j]` and panic.
+    #[test]
+    fn decode_layer_rejects_malformed_shard_lengths() {
+        let gf = Gf::new();
+        let mut rng = Rng::new(31337);
+        let data: Vec<u8> = (0..K * 4).map(|i| i as u8).collect();
+        let (sl, mut shards) = encode_layer(&gf, &data, K + 8, &mut rng);
+        // Corrupt one shard's coeffs length (short).
+        shards[3].coeffs.truncate(K - 1);
+        // Corrupt another's payload length (extra byte).
+        shards[5].payload.push(0);
+        let refs: Vec<&Shard> = shards.iter().collect();
+        // With 2 shards dropped we still have K + 6, so decode must
+        // succeed — importantly, without panicking.
+        let decoded = decode_layer(&gf, &refs, sl).expect("decode succeeds with survivors");
+        assert_eq!(&decoded[..data.len()], &data[..]);
+    }
+
+    /// B5 regression, harsher path: enough malformed shards that no
+    /// valid K remain. Decoder must return `None`, not crash.
+    #[test]
+    fn decode_layer_returns_none_when_all_shards_malformed() {
+        let gf = Gf::new();
+        let mut rng = Rng::new(4);
+        let data: Vec<u8> = (0..K * 2).map(|i| i as u8).collect();
+        let (sl, mut shards) = encode_layer(&gf, &data, K, &mut rng);
+        for s in shards.iter_mut() {
+            s.coeffs.pop();
+        }
+        let refs: Vec<&Shard> = shards.iter().collect();
+        assert!(decode_layer(&gf, &refs, sl).is_none());
     }
 }

@@ -120,7 +120,15 @@ impl Whitelist {
         let mut pos = 8usize;
         let n = u32::from_be_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
-        let mut entries = Vec::with_capacity(n);
+        // Cap the pre-allocation to what the remainder of the file can
+        // physically hold — per-entry floor = u16 alen + pubkey + zone.
+        // Guards against a crafted whitelist with n = u32::MAX turning
+        // Vec::with_capacity into an OOM abort before the loop's own
+        // bounds check kicks in.
+        let per_entry_min = 2 + PUBKEY_LEN + 1;
+        let remaining = buf.len().saturating_sub(pos);
+        let cap = n.min(remaining / per_entry_min);
+        let mut entries = Vec::with_capacity(cap);
         for _ in 0..n {
             if pos + 2 > buf.len() {
                 return Err(eof());

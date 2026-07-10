@@ -96,6 +96,22 @@ impl AdminAuth {
 
 /// Middleware fn plugged into a route via
 /// `from_fn(move |req, next| require_admin_token(cfg.clone(), req, next))`.
+/// Constant-time byte-slice equality. Compares the whole range so the
+/// timing signal does not reveal the position of the first mismatched
+/// byte. Length is checked first — that leaks the *expected* token
+/// length, which is publicly known (a config value), so 0 bits of
+/// secret material.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
+}
+
 pub async fn require_admin_token(
     cfg: AdminAuth,
     req: Request<Body>,
@@ -117,7 +133,7 @@ pub async fn require_admin_token(
                 )
                     .into_response();
             }
-            if got == expected {
+            if ct_eq(got.as_bytes(), expected.as_bytes()) {
                 next.run(req).await
             } else {
                 cfg.bad_counter.fetch_add(1, Ordering::Relaxed);

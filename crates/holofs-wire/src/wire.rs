@@ -303,7 +303,7 @@ impl Request {
             OP_LIST_HASHES => Ok(Request::ListHashes),
             OP_PURGE_BY_HASH => {
                 let n = c.u32()? as usize;
-                let mut hashes = Vec::with_capacity(n);
+                let mut hashes = Vec::with_capacity(bounded_cap(n, HASH_MIN_SIZE, c.remaining()));
                 for _ in 0..n {
                     let raw = c.take(32)?;
                     let mut h = [0u8; 32];
@@ -317,7 +317,7 @@ impl Request {
                 let channel = c.u8()?;
                 let layer = c.u8()?;
                 let n = c.u32()? as usize;
-                let mut shards = Vec::with_capacity(n);
+                let mut shards = Vec::with_capacity(bounded_cap(n, SHARD_MIN_SIZE, c.remaining()));
                 for _ in 0..n {
                     shards.push(decode_shard(&mut c)?);
                 }
@@ -332,7 +332,7 @@ impl Request {
             OP_PURGE_BY_HASH_UP_TO => {
                 let max_epoch = c.u64()?;
                 let n = c.u32()? as usize;
-                let mut hashes = Vec::with_capacity(n);
+                let mut hashes = Vec::with_capacity(bounded_cap(n, HASH_MIN_SIZE, c.remaining()));
                 for _ in 0..n {
                     let raw = c.take(32)?;
                     let mut h = [0u8; 32];
@@ -422,7 +422,7 @@ impl Response {
             RSP_ACK => Ok(Response::Ack),
             RSP_SHARDS => {
                 let n = c.u32()? as usize;
-                let mut v = Vec::with_capacity(n);
+                let mut v = Vec::with_capacity(bounded_cap(n, SHARD_MIN_SIZE, c.remaining()));
                 for _ in 0..n {
                     v.push(decode_shard(&mut c)?);
                 }
@@ -448,7 +448,7 @@ impl Response {
             }
             RSP_HASHES => {
                 let n = c.u32()? as usize;
-                let mut hashes = Vec::with_capacity(n);
+                let mut hashes = Vec::with_capacity(bounded_cap(n, HASH_MIN_SIZE, c.remaining()));
                 for _ in 0..n {
                     let raw = c.take(32)?;
                     let mut h = [0u8; 32];
@@ -535,7 +535,31 @@ impl<'a> Cursor<'a> {
         self.pos += n;
         Ok(s)
     }
+    /// Bytes still available past the current cursor position.
+    fn remaining(&self) -> usize {
+        self.buf.len().saturating_sub(self.pos)
+    }
 }
+
+/// Cap a wire-supplied element count `n` to what could physically fit in
+/// the remaining bytes assuming `elem_min_size` per element. Guards
+/// `Vec::with_capacity(n)` from turning a stray `u32::MAX` into a
+/// terabyte reservation (aborting the process before we ever get to
+/// [`Cursor::take`]'s length check). The subsequent per-element decode
+/// still returns `UnexpectedEof` if `n` is dishonest.
+fn bounded_cap(n: usize, elem_min_size: usize, remaining: usize) -> usize {
+    if elem_min_size == 0 {
+        return n;
+    }
+    n.min(remaining / elem_min_size)
+}
+
+/// Min encoded size of one wire `Hash` (= 32-byte SHA-256).
+const HASH_MIN_SIZE: usize = 32;
+/// Min encoded size of one wire `Shard` — `K u16` + `plen u32` header
+/// with empty coeffs/payload. Real shards are much bigger, but this
+/// keeps `bounded_cap` safe for degenerate frames.
+const SHARD_MIN_SIZE: usize = 2 + 4;
 
 #[cfg(test)]
 mod tests {
@@ -783,6 +807,60 @@ mod tests {
         let (a, mut b) = tokio::io::duplex(64);
         drop(a);
         let e = read_frame(&mut b).await.unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    // --- B1 regression: dishonest u32 length must not OOM-abort ---
+    //
+    // Before the bounded_cap guard, a 5-byte OP_PURGE_BY_HASH frame
+    // carrying n = 0xFFFFFFFF would call Vec::with_capacity(4 GiB / 32-
+    // byte hashes = 4 * 10^9 entries), aborting the process before the
+    // per-element take() could refuse the read. The counts below cover
+    // every variant that trusts a wire-supplied length.
+    #[test]
+    fn decode_oversized_purge_by_hash_returns_error() {
+        // OP + u32 count only — no hashes follow.
+        let mut b = vec![OP_PURGE_BY_HASH];
+        b.extend_from_slice(&u32::MAX.to_be_bytes());
+        let e = Request::decode(&b).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn decode_oversized_purge_by_hash_up_to_returns_error() {
+        // OP + u64 max_epoch + u32 count only.
+        let mut b = vec![OP_PURGE_BY_HASH_UP_TO];
+        b.extend_from_slice(&0u64.to_be_bytes());
+        b.extend_from_slice(&u32::MAX.to_be_bytes());
+        let e = Request::decode(&b).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn decode_oversized_put_batch_returns_error() {
+        // OP + u64 object_id + u8 channel + u8 layer + u32 count only.
+        let mut b = vec![OP_PUT_BATCH];
+        b.extend_from_slice(&0u64.to_be_bytes());
+        b.push(0);
+        b.push(0);
+        b.extend_from_slice(&u32::MAX.to_be_bytes());
+        let e = Request::decode(&b).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn decode_oversized_response_shards_returns_error() {
+        let mut b = vec![RSP_SHARDS];
+        b.extend_from_slice(&u32::MAX.to_be_bytes());
+        let e = Response::decode(&b).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn decode_oversized_response_hashes_returns_error() {
+        let mut b = vec![RSP_HASHES];
+        b.extend_from_slice(&u32::MAX.to_be_bytes());
+        let e = Response::decode(&b).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
     }
 }

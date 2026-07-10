@@ -81,11 +81,14 @@ impl Gf {
     ///
     /// # Panics
     ///
-    /// Will read `log[0]` and return a garbage value if `a == 0`. Callers must
-    /// not pass zero (the field has no inverse for 0).
+    /// Panics in debug builds if `a == 0` — the field has no inverse
+    /// for zero. Release builds silently return a garbage value (the
+    /// pre-existing behaviour) rather than paying for the check on
+    /// the hot RLNC decode loop.
     #[inline]
     #[must_use]
     pub fn inv(&self, a: u8) -> u8 {
+        debug_assert!(a != 0, "Gf::inv(0) is undefined — caller must guard");
         self.exp[255 - self.log[a as usize] as usize]
     }
 }

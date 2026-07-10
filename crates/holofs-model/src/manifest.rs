@@ -470,14 +470,16 @@ impl Manifest {
         let mut layer_positions = Vec::with_capacity(nlayers as usize);
         for _ in 0..nlayers {
             let plen = c.u32()? as usize;
-            let mut pos = Vec::with_capacity(plen);
+            let mut pos = Vec::with_capacity(bounded_cap(plen, 4, c.remaining()));
             for _ in 0..plen {
                 pos.push(c.u32()?);
             }
             layer_positions.push(pos);
         }
         let nn = c.u32()? as usize;
-        let mut nodes = Vec::with_capacity(nn);
+        // Minimum per-node encoding = u16 length prefix. Real addrs are
+        // longer, but the floor is what makes bounded_cap safe.
+        let mut nodes = Vec::with_capacity(bounded_cap(nn, 2, c.remaining()));
         for _ in 0..nn {
             let nlen = c.u16()? as usize;
             let bytes = c.take(nlen)?.to_vec();
@@ -496,7 +498,7 @@ impl Manifest {
         for cc in 0..channels as usize {
             for ll in 0..nlayers as usize {
                 let count = c.u32()? as usize;
-                let mut v = Vec::with_capacity(count);
+                let mut v = Vec::with_capacity(bounded_cap(count, 32, c.remaining()));
                 for _ in 0..count {
                     let mut h = [0u8; 32];
                     h.copy_from_slice(c.take(32)?);
@@ -524,13 +526,13 @@ impl Manifest {
             io::Error::new(io::ErrorKind::InvalidData, format!("content_type: {e}"))
         })?;
         let cl_n = c.u32()? as usize;
-        let mut chunk_lens = Vec::with_capacity(cl_n);
+        let mut chunk_lens = Vec::with_capacity(bounded_cap(cl_n, 4, c.remaining()));
         for _ in 0..cl_n {
             chunk_lens.push(c.u32()?);
         }
         let audio_sample_rate = c.u32()?;
         let mh_n = c.u32()? as usize;
-        let mut text_minhash = Vec::with_capacity(mh_n);
+        let mut text_minhash = Vec::with_capacity(bounded_cap(mh_n, 4, c.remaining()));
         for _ in 0..mh_n {
             text_minhash.push(c.u32()?);
         }
@@ -642,6 +644,21 @@ impl<'a> Cursor<'a> {
         self.pos += n;
         Ok(s)
     }
+    fn remaining(&self) -> usize {
+        self.buf.len().saturating_sub(self.pos)
+    }
+}
+
+/// Cap a manifest-supplied element count `n` to what could physically
+/// fit in the remaining bytes assuming `elem_min_size` per element.
+/// Mirrors [`holofs_wire::bounded_cap`] — same rationale (a stray
+/// `u32::MAX` in a truncated / crafted manifest must not turn
+/// `Vec::with_capacity` into an OOM abort).
+fn bounded_cap(n: usize, elem_min_size: usize, remaining: usize) -> usize {
+    if elem_min_size == 0 {
+        return n;
+    }
+    n.min(remaining / elem_min_size)
 }
 
 #[cfg(test)]
@@ -852,4 +869,5 @@ mod tests {
         assert_eq!(back.created_at_unix, 1_700_000_123);
         assert_eq!(back.encoding, ObjectEncoding::Rlnc);
     }
+
 }

@@ -2,8 +2,9 @@
 //!
 //! The user uploads a file (private key, seed phrase, important document)
 //! and K/N parameters (e.g. 3 of 5). The system encodes the file as `n`
-//! shards via [`holofs_core::rlnc::encode_layer_with_k`] and **packages each
-//! shard as a standalone `.holoshare` file** for distribution.
+//! random linear combinations of K plaintext chunks via
+//! [`holofs_core::rlnc::encode_layer_with_k_random`] and **packages each
+//! share as a standalone `.holoshare` file** for distribution.
 //!
 //! Recovery: gather any K `.holoshare` files, hand them to the gateway, and
 //! receive the original file with the correct `Content-Type`.
@@ -21,9 +22,11 @@
 //!
 //! ## Security
 //!
-//! - K-1 shards **leak no information** about the contents (information-
-//!   theoretic security, like Shamir). This is math, not trust.
-//! - Shards contain only linear projections over GF(256) — no partial bit
+//! - K-1 shares **leak no information** about the contents (information-
+//!   theoretic security, in the same class as Shamir). This holds because
+//!   every share is a fresh random linear combination over GF(256) — none
+//!   is a systematic `e_i` share that would raw-copy a plaintext chunk.
+//! - Shares contain only linear projections over GF(256) — no partial bit
 //!   leakage even under information-theoretic analysis.
 //! - Files may be stored with untrusted parties — cloud, IM, email — safely.
 //!
@@ -48,7 +51,7 @@
 
 use holofs_core::gf::Gf;
 use holofs_core::hash::Sha256;
-use holofs_core::rlnc::{decode_layer_with_k, encode_layer_with_k, Shard};
+use holofs_core::rlnc::{decode_layer_with_k, encode_layer_with_k_random, Shard};
 use holofs_core::rng::Rng;
 
 pub const SHARE_MAGIC: &[u8; 9] = b"HOLOSHAR1";
@@ -189,7 +192,7 @@ pub fn split_into_shares(data: &[u8], params: &EscrowParams) -> Vec<ShareFile> {
     let seed = u64::from_be_bytes(cid[16..24].try_into().unwrap());
     let mut rng = Rng::new(seed);
 
-    let (_sl, shards) = encode_layer_with_k(&gf, data, params.k, params.n, &mut rng);
+    let (_sl, shards) = encode_layer_with_k_random(&gf, data, params.k, params.n, &mut rng);
     shards
         .into_iter()
         .enumerate()
@@ -219,6 +222,16 @@ pub fn recover_from_shares(shares: &[ShareFile]) -> Result<(Vec<u8>, String, Str
     }
     let first = &shares[0];
     let k = first.total_k as usize;
+    let n = first.total_n as usize;
+    // Header sanity: bounds match the split path (`escrow_split`),
+    // so a crafted `.holoshare` cannot coax the RLNC decoder into
+    // a state its internal shape-check filter would still accept.
+    if k == 0 || k > n || n > 64 {
+        return Err(format!(
+            "bad header: k={k}, n={n} (require 1 <= k <= n <= 64)"
+        ));
+    }
+    let sym_len = first.payload.len();
     for s in shares {
         if s.escrow_id != first.escrow_id {
             return Err(format!(
@@ -229,6 +242,14 @@ pub fn recover_from_shares(shares: &[ShareFile]) -> Result<(Vec<u8>, String, Str
         }
         if s.total_k != first.total_k || s.total_n != first.total_n {
             return Err("K/N disagree across shares".into());
+        }
+        if s.coeffs.len() != k || s.payload.len() != sym_len {
+            return Err(format!(
+                "share {} has malformed lengths: coeffs={}, payload={} (expected {k}/{sym_len})",
+                s.shard_idx,
+                s.coeffs.len(),
+                s.payload.len()
+            ));
         }
     }
     if shares.len() < k {
@@ -248,7 +269,6 @@ pub fn recover_from_shares(shares: &[ShareFile]) -> Result<(Vec<u8>, String, Str
             uniq.len()
         ));
     }
-    let sym_len = first.payload.len();
     let gf = Gf::new();
     let shard_objs: Vec<Shard> = uniq
         .iter()
@@ -309,6 +329,47 @@ mod tests {
     fn escrow_4_of_7_larger() {
         let data: Vec<u8> = (0..2048).map(|i| (i * 31) as u8).collect();
         roundtrip(4, 7, &data);
+    }
+
+    /// D1 regression: escrow shares must NOT be systematic. Before
+    /// D1 the first `min(K, N)` shares were `e_i` vectors carrying a
+    /// raw plaintext chunk — a single share revealed 1/K of the
+    /// secret. With `encode_layer_with_k_random` every share is a
+    /// random linear combination and no unit vector is emitted.
+    #[test]
+    fn escrow_shares_have_no_systematic_rows() {
+        let data: Vec<u8> = (0..1024).map(|i| (i * 7) as u8).collect();
+        for (k, n) in [(3usize, 5usize), (4, 7), (5, 9)] {
+            let params = EscrowParams {
+                k,
+                n,
+                content_type: "application/octet-stream".into(),
+                filename: "secret.bin".into(),
+            };
+            let shares = split_into_shares(&data, &params);
+            assert_eq!(shares.len(), n);
+            for s in &shares {
+                let nonzero = s.coeffs.iter().filter(|&&b| b != 0).count();
+                assert!(
+                    nonzero >= 2,
+                    "share {} has only {nonzero} non-zero coefficients — leaks a chunk (k={k}, n={n})",
+                    s.shard_idx
+                );
+                // No coefficient vector may be a unit vector `e_i`
+                // (single 1, rest 0) — that would raw-copy chunk i.
+                let is_unit = s
+                    .coeffs
+                    .iter()
+                    .filter(|&&b| b != 0)
+                    .all(|&b| b == 1)
+                    && s.coeffs.iter().filter(|&&b| b == 1).count() == 1;
+                assert!(
+                    !is_unit,
+                    "share {} is a systematic e_i vector (k={k}, n={n})",
+                    s.shard_idx
+                );
+            }
+        }
     }
 
     #[test]

@@ -434,10 +434,16 @@ key-escrow use cases this is acceptable.
 
 ### holofs escrow
 
-`holofs-analytics::escrow` builds on `holofs-core::rlnc::encode_layer_with_k`
-with user-chosen $K, N$. Shards are serialised as `.holoshare` files
-distributable to humans / devices. The escrow workflow is *pure-client*:
-nothing is stored on the cluster.
+`holofs-analytics::escrow` builds on
+`holofs-core::rlnc::encode_layer_with_k_random` with user-chosen $K, N$.
+Every one of the $N$ shares is a fresh random linear combination of the
+$K$ plaintext chunks — the systematic path from the general RLNC encoder
+(which would emit $\min(K, N)$ shares that raw-copy a plaintext chunk) is
+deliberately skipped for escrow. Without any systematic share the
+information-theoretic bound above holds: no proper subset of size $< K$
+distinguishes any two plaintexts. Shares are serialised as `.holoshare`
+files distributable to humans / devices. The escrow workflow is
+*pure-client*: nothing is stored on the cluster.
 
 **References.**
 

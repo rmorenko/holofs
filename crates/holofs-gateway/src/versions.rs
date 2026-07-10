@@ -67,6 +67,59 @@ impl Gateway {
         Self::version_dir_for(root, name).join(format!("v{ts_ms}_{cid_short}.bin"))
     }
 
+    /// Belt-and-braces path guard for the version routes. After
+    /// [`Self::validate_version_id`] the id can no longer contain a
+    /// `..` or `/`, but if the format ever grows we want the property
+    /// checked at the filesystem layer too: the joined path must live
+    /// under the per-name version dir.
+    fn assert_inside(
+        dir: &std::path::Path,
+        path: &std::path::Path,
+    ) -> Result<(), GatewayError> {
+        // Canonical form only exists once the dir has been created,
+        // so fall back to lexical containment when either canonical
+        // resolution fails (e.g. dir not yet materialised).
+        let (canon_dir, canon_path) = match (dir.canonicalize(), path.canonicalize()) {
+            (Ok(d), Ok(p)) => (d, p),
+            _ => (dir.to_path_buf(), path.to_path_buf()),
+        };
+        if canon_path.starts_with(&canon_dir) {
+            Ok(())
+        } else {
+            Err(GatewayError::BadRequest(
+                "version id resolves outside versions root".into(),
+            ))
+        }
+    }
+
+    /// Validate a version id passed on a mutating unauthenticated route.
+    /// The on-disk format is `v<ts_ms>_<cid8>.bin` (`version_file_for`),
+    /// so a legit id is `^v\d+_[0-9a-f]{8}$`. Anything else (`../…`,
+    /// `%2e%2e`, absolute paths) is rejected — the router treats
+    /// `restore_version` / `delete_version` as unauthenticated medium
+    /// routes, so passing raw `id` straight into `dir.join(...)` would
+    /// let anyone read/delete arbitrary `*.bin` files outside the
+    /// versions root.
+    fn validate_version_id(id: &str) -> Result<(), GatewayError> {
+        let ok = id
+            .strip_prefix('v')
+            .and_then(|r| r.split_once('_'))
+            .map(|(ts, cid)| {
+                !ts.is_empty()
+                    && ts.bytes().all(|b| b.is_ascii_digit())
+                    && cid.len() == 8
+                    && cid.bytes().all(|b| b.is_ascii_hexdigit())
+            })
+            .unwrap_or(false);
+        if ok {
+            Ok(())
+        } else {
+            Err(GatewayError::BadRequest(format!(
+                "bad version id: {id:?} (expected v<ts_ms>_<cid8>)"
+            )))
+        }
+    }
+
     /// Archive a manifest to the versions side store. Called from
     /// `ingest_bytes` BEFORE the catalog mutation and the shard purge
     /// (which we then skip for the prior shards). Cheap — just one
@@ -174,6 +227,7 @@ impl Gateway {
         // GC snapshot only if THEIR objects were dropped from the
         // catalog + archive before the snapshot, which is exactly
         // the definition of orphan.
+        Self::validate_version_id(id)?;
         let s = self.versions.lock().await;
         let Some(root) = s.root.clone() else {
             return Err(GatewayError::BadRequest(
@@ -184,6 +238,7 @@ impl Gateway {
         // Locate the version file by id.
         let dir = Self::version_dir_for(&root, name);
         let path = dir.join(format!("{id}.bin"));
+        Self::assert_inside(&dir, &path)?;
         if !path.exists() {
             return Err(GatewayError::NotFound);
         }
@@ -244,6 +299,7 @@ impl Gateway {
         name: &str,
         id: &str,
     ) -> Result<DeleteVersionResult, GatewayError> {
+        Self::validate_version_id(id)?;
         let s = self.versions.lock().await;
         let Some(root) = s.root.clone() else {
             return Err(GatewayError::BadRequest(
@@ -253,6 +309,7 @@ impl Gateway {
         drop(s);
         let dir = Self::version_dir_for(&root, name);
         let path = dir.join(format!("{id}.bin"));
+        Self::assert_inside(&dir, &path)?;
         if !path.exists() {
             return Err(GatewayError::NotFound);
         }
@@ -367,5 +424,41 @@ pub struct DeleteVersionResult {
     pub name: String,
     pub id: String,
     pub shards_owned: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_version_id_accepts_canonical() {
+        assert!(Gateway::validate_version_id("v1712345678000_deadbeef").is_ok());
+        assert!(Gateway::validate_version_id("v0_00000000").is_ok());
+    }
+
+    #[test]
+    fn validate_version_id_rejects_path_traversal() {
+        // The exact strings a malicious client would send.
+        for bad in [
+            "../../catalog",
+            "..%2F..%2Fcatalog",
+            "v../abcdef01",
+            "v1234_../defghij",
+            "v1234_/passwd",
+            "vabc_deadbeef",       // ts_ms must be digits
+            "v1712345678000_ZZZZZZZZ", // cid8 must be hex
+            "v1712345678000_dead",  // cid8 must be exactly 8 hex
+            "v1712345678000_deadbeef1", // cid8 too long
+            "",
+            "v",
+            "v1712345678000",  // no _cid
+            "v_deadbeef",       // no ts
+        ] {
+            assert!(
+                Gateway::validate_version_id(bad).is_err(),
+                "expected reject for {bad:?}"
+            );
+        }
+    }
 }
 
