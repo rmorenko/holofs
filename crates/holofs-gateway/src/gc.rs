@@ -103,6 +103,13 @@ impl Gateway {
 
         // 1. Snapshot the live catalog hashes.
         //
+        // Snapshot Arc<Manifest> for every decodable entry under a
+        // short read-lock, then release the lock before the O(shards)
+        // hash-set fill. Under a busy write workload the previous
+        // "hold read-lock through the whole walk" pattern parked
+        // every PUT/mkdir for the duration of GC (bottleneck #7 in
+        // the review's §3a).
+        //
         // alongside the shard-hash set we also build the
         // set of live `data_cid`s — used at the end of the pass to
         // tombstone embeddings whose owning object no longer exists
@@ -110,19 +117,21 @@ impl Gateway {
         let mut live: HashSet<[u8; 32]> = HashSet::new();
         let mut live_cids: HashSet<[u8; 32]> = HashSet::new();
         let mut manifests_scanned: u64 = 0;
-        {
+        let catalog_snapshot: Vec<std::sync::Arc<Manifest>> = {
             let cat = self.catalog.read().await;
-            for (_, m) in cat.entries.iter() {
-                if m.kind == ObjectKind::Directory {
-                    continue;
-                }
-                manifests_scanned += 1;
-                live_cids.insert(m.data_cid);
-                for chan in &m.shard_hashes {
-                    for per_l in chan {
-                        for h in per_l {
-                            live.insert(*h);
-                        }
+            cat.entries
+                .iter()
+                .filter(|(_, m)| m.kind != ObjectKind::Directory)
+                .map(|(_, m)| std::sync::Arc::clone(m))
+                .collect()
+        };
+        for m in &catalog_snapshot {
+            manifests_scanned += 1;
+            live_cids.insert(m.data_cid);
+            for chan in &m.shard_hashes {
+                for per_l in chan {
+                    for h in per_l {
+                        live.insert(*h);
                     }
                 }
             }

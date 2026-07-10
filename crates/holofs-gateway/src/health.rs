@@ -150,18 +150,22 @@ impl Gateway {
         self.metrics.scrub_runs_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Snapshot live + catalog. We only need names of decodable
-        // (non-directory) objects.
+        // Snapshot Arc<Manifest> for every decodable entry under a
+        // short read-lock. `Arc::clone` is cheap; releasing the lock
+        // before the long walk (list_node_hashes RPCs + the O(shards)
+        // per-object scan below) lets writers proceed instead of
+        // waiting the whole tick out. Bottleneck #7 in the review's
+        // §3a.
         let live = self.effective_live().await;
-        let names: Vec<String> = {
+        let snapshot: Vec<(String, std::sync::Arc<holofs_model::manifest::Manifest>)> = {
             let cat = self.catalog.read().await;
             cat.entries
                 .iter()
                 .filter(|(_, m)| m.kind != ObjectKind::Directory && !m.nodes.is_empty())
-                .map(|(n, _)| n.clone())
+                .map(|(n, m)| (n.clone(), std::sync::Arc::clone(m)))
                 .collect()
         };
-        if names.is_empty() || live.is_empty() {
+        if snapshot.is_empty() || live.is_empty() {
             return ScrubReport::default();
         }
 
@@ -182,40 +186,37 @@ impl Gateway {
             }
         }
 
-        // Walk catalog and identify which objects need repair.
+        // Walk the snapshot without holding the catalog lock. Any
+        // objects PUT-replaced or DELETE'd during the walk are
+        // handled correctly by `repair_object_inplace`'s own catalog
+        // re-lookup — see `is_object_gone` there.
         let mut to_repair: Vec<String> = Vec::new();
-        {
-            let cat = self.catalog.read().await;
-            'outer: for name in &names {
-                let Some(manifest) = cat.entries.get(name) else {
-                    continue;
-                };
-                for c in 0..manifest.channels {
-                    for l in 0..manifest.nlayers {
-                        let n = manifest.n_per_layer[l as usize];
-                        for idx in 0..n {
-                            let Ok(node) = manifest.place_shard(c, l, idx, &live) else {
-                                continue;
-                            };
-                            let hash = match manifest
-                                .shard_hashes
-                                .get(c as usize)
-                                .and_then(|chan| chan.get(l as usize))
-                                .and_then(|per_l| per_l.get(idx as usize))
-                            {
-                                Some(h) => *h,
-                                None => continue,
-                            };
-                            // Skip nodes we couldn't query this
-                            // tick — re-checking next tick is
-                            // cheaper than guessing.
-                            let Some(held) = held_by_node.get(&node) else {
-                                continue;
-                            };
-                            if !held.contains(&hash) {
-                                to_repair.push(name.clone());
-                                continue 'outer;
-                            }
+        'outer: for (name, manifest) in &snapshot {
+            for c in 0..manifest.channels {
+                for l in 0..manifest.nlayers {
+                    let n = manifest.n_per_layer[l as usize];
+                    for idx in 0..n {
+                        let Ok(node) = manifest.place_shard(c, l, idx, &live) else {
+                            continue;
+                        };
+                        let hash = match manifest
+                            .shard_hashes
+                            .get(c as usize)
+                            .and_then(|chan| chan.get(l as usize))
+                            .and_then(|per_l| per_l.get(idx as usize))
+                        {
+                            Some(h) => *h,
+                            None => continue,
+                        };
+                        // Skip nodes we couldn't query this
+                        // tick — re-checking next tick is
+                        // cheaper than guessing.
+                        let Some(held) = held_by_node.get(&node) else {
+                            continue;
+                        };
+                        if !held.contains(&hash) {
+                            to_repair.push(name.clone());
+                            continue 'outer;
                         }
                     }
                 }
@@ -243,7 +244,7 @@ impl Gateway {
             }
         }
         ScrubReport {
-            objects_scanned: names.len() as u64,
+            objects_scanned: snapshot.len() as u64,
             objects_repaired: repaired_ok,
             objects_repair_failed: repaired_failed,
         }
