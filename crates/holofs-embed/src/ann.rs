@@ -317,4 +317,118 @@ mod tests {
         assert_eq!(hits[0].band, LayerBand::Coarse);
         assert!((hits[0].score - 1.0).abs() < 1e-4);
     }
+
+    /// v2 P3.2: measured recall@k of the HNSW path against a
+    /// brute-force ground truth. Prior tests only verified that
+    /// `search_hnsw` picks the exact-match record; recall was
+    /// never quantified, so a regression that quietly degraded
+    /// HNSW quality (bad `Builder` params, wrong distance metric,
+    /// coefficient sign flip, etc.) would slip through as long as
+    /// the top-1 hit stayed correct.
+    ///
+    /// Setup: 500 random unit-length 512-dim vectors in the Mid
+    /// band (well above `HNSW_MIN_BAND_SIZE=200`, so the HNSW
+    /// branch is taken), 20 random query vectors, k = 10. For each
+    /// query compute the brute-force top-k and the HNSW top-k;
+    /// `recall = |brute ∩ hnsw| / k`.
+    ///
+    /// Threshold: mean recall ≥ 0.75. With EF-tuned defaults and
+    /// a small dataset like this we typically see > 0.9 in
+    /// practice; the 0.75 floor is a comfortable regression
+    /// backstop that will still catch a real HNSW quality drop.
+    #[test]
+    fn hnsw_recall_at_k_matches_brute_force() {
+        // Inline deterministic xorshift64* — holofs-embed is
+        // dependency-thin on the workspace side so we don't pull
+        // in `holofs-core::rng` here.
+        struct Rng(u64);
+        impl Rng {
+            fn new(seed: u64) -> Self {
+                let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                Rng((z ^ (z >> 31)).max(1))
+            }
+            fn next(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+        }
+
+        let n_records = 500usize;
+        let n_queries = 20usize;
+        let k = 10usize;
+
+        // Deterministic per-record pseudo-random unit vector.
+        fn random_vec(rng: &mut Rng) -> Vec<f32> {
+            let mut v: Vec<f32> = (0..EMBED_DIM)
+                .map(|_| (rng.next() as i32 as f32) / (i32::MAX as f32))
+                .collect();
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                for x in v.iter_mut() {
+                    *x /= norm;
+                }
+            }
+            v
+        }
+
+        let mut rng = Rng::new(0xC0FFEE);
+        let recs: Vec<EmbedRecord> = (0..n_records)
+            .map(|i| EmbedRecord {
+                data_cid: [0u8; 32],
+                band: LayerBand::Mid,
+                name: format!("rec_{i:04}"),
+                vec: random_vec(&mut rng),
+            })
+            .collect();
+        let idx = HnswIndex::build_from(recs.clone());
+        assert_eq!(
+            idx.hnsw_band_count(),
+            1,
+            "test setup must exercise the HNSW code path"
+        );
+
+        let mut recall_sum = 0f32;
+        for _q in 0..n_queries {
+            let query = random_vec(&mut rng);
+            let hnsw_hits = idx.search(LayerBand::Mid, &query, k);
+            assert_eq!(hnsw_hits.len(), k, "HNSW must return exactly k hits");
+
+            // Brute force top-k by cosine similarity — the ground
+            // truth we grade HNSW against.
+            let mut all_scored: Vec<(f32, &str)> = recs
+                .iter()
+                .map(|r| {
+                    let dot: f32 = r.vec.iter().zip(query.iter()).map(|(a, b)| a * b).sum();
+                    (dot, r.name.as_str())
+                })
+                .collect();
+            all_scored
+                .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            let brute_names: std::collections::HashSet<String> = all_scored
+                .iter()
+                .take(k)
+                .map(|(_, n)| (*n).to_string())
+                .collect();
+
+            let hnsw_names: std::collections::HashSet<String> =
+                hnsw_hits.iter().map(|h| h.name.clone()).collect();
+            let intersect = brute_names.intersection(&hnsw_names).count();
+            recall_sum += intersect as f32 / k as f32;
+        }
+        let mean_recall = recall_sum / n_queries as f32;
+        eprintln!(
+            "HNSW recall@{k} (mean over {n_queries} queries, {n_records} vectors): {mean_recall:.3}"
+        );
+        assert!(
+            mean_recall >= 0.75,
+            "HNSW recall@{k} = {mean_recall:.3} < 0.75 floor \
+             — index quality regressed"
+        );
+    }
 }

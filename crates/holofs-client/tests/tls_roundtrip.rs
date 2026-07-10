@@ -130,3 +130,88 @@ async fn set_tls_config_is_idempotent_with_same_arc() {
     // change observable state.
     set_tls_config(Some(Arc::clone(&cfg)));
 }
+
+/// v2 P3.3: wrong-CA handshake rejection.
+///
+/// The positive `tls_connect_then_echo_roundtrips_a_frame` proves a
+/// happy-path handshake works; nothing pinned the *rejection*
+/// behaviour. A regression that quietly disabled certificate
+/// verification (root-store misconfig, wildcard verifier) would
+/// have shipped without CI noticing. Here we build a second,
+/// unrelated self-signed CA and hand its client config to the
+/// low-level rustls handshake against the *original* server. The
+/// handshake must fail.
+///
+/// Uses `TlsConnector::from(config)` directly instead of the crate's
+/// `connect()` helper because `set_tls_config` is a
+/// per-process `OnceLock` — reusing the connector API keeps this
+/// test independent of whichever positive-path config landed in the
+/// singleton first.
+#[tokio::test]
+async fn tls_connect_rejects_wrong_ca() {
+    use tokio_rustls::TlsConnector;
+
+    ensure_crypto_provider();
+    let server_mat = shared_material();
+    let server_addr = spawn_tls_echo_server(server_mat).await;
+
+    // Second, unrelated CA. A client that only trusts this CA must
+    // NOT accept a leaf signed by `server_mat`'s CA.
+    let (attacker_mat, _signer) =
+        TlsMaterial::self_signed("holofs-attacker", &["127.0.0.1".into()])
+            .expect("second self-signed material");
+    let bad_client_cfg = attacker_mat
+        .client_config(false)
+        .expect("attacker client_config");
+
+    let tcp = tokio::net::TcpStream::connect(&server_addr)
+        .await
+        .expect("tcp connect");
+    let connector = TlsConnector::from(bad_client_cfg);
+    let sni = rustls::pki_types::ServerName::try_from("127.0.0.1")
+        .expect("SNI parse");
+    let res = tokio::time::timeout(
+        Duration::from_secs(5),
+        connector.connect(sni, tcp),
+    )
+    .await
+    .expect("handshake timeout");
+    assert!(
+        res.is_err(),
+        "TLS handshake with an unrelated-CA client config must fail"
+    );
+}
+
+/// v2 P3.3: a plaintext write into a TLS-listening socket must not
+/// yield a legitimate framed response. The server's TLS acceptor
+/// sees the plain bytes as garbage handshake input and either
+/// aborts the connection or leaves it hung; either way a full
+/// `read_frame` must NOT come back as a legitimate echo of the
+/// plaintext payload.
+#[tokio::test]
+async fn plain_client_gets_no_frame_from_tls_server() {
+    ensure_crypto_provider();
+    let mat = shared_material();
+    let addr = spawn_tls_echo_server(mat).await;
+
+    // Raw TCP — no TLS, no `set_tls_config`, no `connect()`.
+    let mut raw = tokio::net::TcpStream::connect(&addr)
+        .await
+        .expect("tcp connect");
+    let plaintext = b"HELLO plaintext should not roundtrip";
+    // Write a plausible frame prefix + body directly.
+    let _ = write_frame(&mut raw, plaintext).await;
+    // Reading a frame back must not succeed within a short window:
+    // the TLS server has no way to interpret plaintext as a valid
+    // handshake, so nothing valid will come back.
+    let res =
+        tokio::time::timeout(Duration::from_millis(500), read_frame(&mut raw)).await;
+    match res {
+        Err(_) => {} // timeout — no legitimate frame arrived, expected
+        Ok(Err(_)) => {} // IO error / EOF — also expected
+        Ok(Ok(bytes)) => panic!(
+            "plaintext write to TLS server returned a valid frame ({} bytes)",
+            bytes.len()
+        ),
+    }
+}
