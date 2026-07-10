@@ -271,6 +271,20 @@ impl WalWriter {
         Ok(())
     }
 
+    /// Split-phase companion to [`Self::sync`]: flush the buffered
+    /// writer's memory chunk down to the kernel *now*, but return
+    /// a cheap `File` clone so the caller can move the fsync off
+    /// the tokio worker via `spawn_blocking`. `sync_all` is the
+    /// only blocking bit — a kernel fsync stalls the whole thread
+    /// for ~5-30 ms on SSD, so anything running on the current
+    /// worker (unrelated request handlers, `Notify::notified`
+    /// waiters) is stuck for that window. Moving the fsync to the
+    /// blocking pool lets other tokio tasks keep running.
+    pub fn flush_and_take_file(&mut self) -> io::Result<std::fs::File> {
+        self.active.flush()?;
+        self.active.get_ref().try_clone()
+    }
+
     /// Byte offset of the next append relative to the segment
     /// start. Exposed for the rotation heuristic in
     /// [`Store`](crate::node_service::Store).

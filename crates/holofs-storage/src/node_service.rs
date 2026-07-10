@@ -789,8 +789,65 @@ async fn spawn_node_with_identity(
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
+                // Phase 1 (sync, under Store lock): snapshot the seq
+                // we'll flush, push the BufWriter's memory chunk to
+                // the kernel, hand out a `File` clone for the fsync.
+                use std::sync::atomic::Ordering;
+                let phase1: Option<(u64, bool, std::fs::File)> = {
+                    let mut s = store_for_flusher.lock().await;
+                    if s.wal.is_none() {
+                        None
+                    } else {
+                        let target = s.wal_next_seq.load(Ordering::Acquire);
+                        let already = s.wal_synced_seq.load(Ordering::Acquire);
+                        if target == already {
+                            None
+                        } else {
+                            let sync_on = s.sync_on_write;
+                            let file_res = s.wal.as_mut().unwrap().flush_and_take_file();
+                            match file_res {
+                                Ok(f) => Some((target, sync_on, f)),
+                                Err(e) => {
+                                    eprintln!(
+                                        "Store::flush_and_publish: flush_and_take_file failed: {e}"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                    }
+                };
+                let Some((target, sync_on, file)) = phase1 else {
+                    continue;
+                };
+                // Phase 2 (blocking, on the blocking pool): the
+                // actual kernel fsync. Under 50-worker load a
+                // 5-30 ms fsync used to stall the flusher's
+                // tokio worker; other tasks work-stole away, but
+                // any `notify_waiters` follower spinning on the
+                // same worker was frozen. Splitting the phase
+                // gets the worker back for that stall window.
+                if sync_on {
+                    match tokio::task::spawn_blocking(move || file.sync_all()).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            eprintln!("Store::flush_and_publish: WAL fsync failed: {e}");
+                            continue;
+                        }
+                        Err(join) => {
+                            eprintln!(
+                                "Store::flush_and_publish: fsync task panicked: {join}"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                // Phase 3 (sync, under Store lock): publish the
+                // covered seq and wake waiters.
                 let mut s = store_for_flusher.lock().await;
-                s.flush_and_publish();
+                s.wal_synced_seq.store(target, Ordering::Release);
+                s.wal_notify.notify_waiters();
+                s.maybe_rotate_wal();
             }
         });
     }
