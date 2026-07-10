@@ -26,43 +26,23 @@
 //! Jaccard reports it.
 
 /// Shingle (n-gram) size in bytes. 5 bytes is the standard choice for text.
-pub const SHINGLE_SIZE: usize = 5;
+///
+/// Re-exports the canonical constant from `holofs-codec::text_codec`
+/// so gateway/similarity callers can continue to import from
+/// `holofs_analytics::shingle::SHINGLE_SIZE` — the actual definition
+/// lives in codec now (see S4-2 of the review: killing the
+/// `holofs-client → holofs-analytics` back-edge).
+pub const SHINGLE_SIZE: usize = holofs_codec::text_codec::MINHASH_SHINGLE_SIZE;
 
 /// MinHash fingerprint size in u32 values. 64 → ~12% Jaccard estimation error.
-pub const MINHASH_K: usize = 64;
+pub const MINHASH_K: usize = holofs_codec::text_codec::MINHASH_K;
 
-/// FNV-1a (32-bit) hash function. Fast, dependency-free, uniform enough for
-/// MinHash. No cryptographic strength needed — only the avalanche effect.
-fn fnv1a(bytes: &[u8]) -> u32 {
-    let mut h = 0x811c9dc5u32;
-    for &b in bytes {
-        h ^= b as u32;
-        h = h.wrapping_mul(0x01000193);
-    }
-    h
-}
-
-/// Compute a text's MinHash fingerprint: bottom-K minimum hash values of
-/// shingles. If the text is shorter than `SHINGLE_SIZE`, treat the whole text
-/// as a single shingle. Result length = `min(MINHASH_K, unique_shingle_count)`.
+/// Compute a text's MinHash fingerprint. Thin re-export of
+/// [`holofs_codec::text_codec::compute_minhash`] — kept here so
+/// existing callers (`gateway/fingerprint`, `gateway/similarity`)
+/// don't need import updates.
 pub fn compute_minhash(text: &str) -> Vec<u32> {
-    let bytes = text.as_bytes();
-    if bytes.is_empty() {
-        return Vec::new();
-    }
-    let mut hashes: Vec<u32> = if bytes.len() < SHINGLE_SIZE {
-        vec![fnv1a(bytes)]
-    } else {
-        let mut acc = Vec::with_capacity(bytes.len() - SHINGLE_SIZE + 1);
-        for i in 0..=bytes.len() - SHINGLE_SIZE {
-            acc.push(fnv1a(&bytes[i..i + SHINGLE_SIZE]));
-        }
-        acc
-    };
-    hashes.sort_unstable();
-    hashes.dedup();
-    hashes.truncate(MINHASH_K);
-    hashes
+    holofs_codec::text_codec::compute_minhash(text)
 }
 
 /// Estimate Jaccard similarity via bottom-K MinHash.

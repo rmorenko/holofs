@@ -22,19 +22,20 @@ Strict topological order — never let arrows point upward.
 
 ```mermaid
 graph BT
-    core["holofs-core<br/>GF, DWT, RLNC, SHA-256, Merkle"]
+    core["holofs-core<br/>GF, DWT, RLNC, SHA-256, Merkle, time"]
     wire["holofs-wire<br/>tokio framing + Request/Response"]
     model["holofs-model<br/>Manifest, Directory, Placement, NoLiveNodes"]
-    codec["holofs-codec<br/>image/audio/text/opaque"]
+    codec["holofs-codec<br/>image/audio/text/opaque + MinHash"]
     storage["holofs-storage<br/>Store, Identity, Whitelist, TLS"]
     client["holofs-client<br/>PUT/GET/REPAIR/AUDIT + pool + timeouts"]
     cluster["holofs-cluster<br/>health, monitor, audit, repair, reputation"]
     embed["holofs-embed<br/>CLIP-multilingual + HNSW ANN"]
-    analytics["holofs-analytics<br/>fingerprint, MinHash, escrow"]
+    analytics["holofs-analytics<br/>fingerprint, escrow, MinHash re-export"]
     gateway["holofs-gateway<br/>catalog, decode, auto-repair, scrub<br/>(18-module fan-out)"]
     mcp["holofs-mcp<br/>Streamable-HTTP MCP server"]
     web["holofs-web<br/>axum + Leptos 0.7 SSR + WASM hydrate<br/>(21-module fan-out)"]
     cli["holofs-cli<br/>holofs-admin, -bench, -inspect, ..."]
+    testutils["holofs-testutils<br/>test-only helpers (dev-dep)"]
     e2e["holofs-e2e<br/>thirtyfour + chromedriver test harness"]
 
     core --> wire
@@ -52,25 +53,53 @@ graph BT
     wire --> cluster
     storage --> cluster
     client --> cluster
-    core --> embed
-    model --> embed
+    testutils --> cluster
     core --> analytics
     model --> analytics
+    codec --> analytics
     core --> gateway
     model --> gateway
-    wire --> gateway
     codec --> gateway
-    storage --> gateway
     client --> gateway
     cluster --> gateway
     embed --> gateway
     analytics --> gateway
+    core --> mcp
+    model --> mcp
+    cluster --> mcp
     gateway --> mcp
+    core --> web
+    model --> web
+    codec --> web
+    client --> web
+    cluster --> web
+    storage --> web
     gateway --> web
-    web --> mcp
+    analytics --> web
+    mcp --> web
+    core --> cli
+    model --> cli
+    wire --> cli
+    codec --> cli
+    storage --> cli
+    client --> cli
+    cluster --> cli
+    analytics --> cli
     gateway --> cli
-    web --> e2e
 ```
+
+**Corrections from prior drafts:** earlier revisions listed three
+edges the code doesn't have — `core → embed` (embed is a
+dependency-free crate that only re-exports its `LayerBand` enum),
+`wire → gateway` (gateway pulls its wire-facing bits through
+`client`, not `wire` directly), and `web → mcp` (mcp is a
+downstream consumer of `web`, not the other way around). The graph
+above is regenerated from `crates/*/Cargo.toml`. The `codec →
+analytics` edge is new post-S4-2 — `compute_minhash` moved from
+`analytics::shingle` into `codec::text_codec` so `client → analytics`
+could be dropped; analytics still re-exports the function for
+existing gateway callers. `holofs-testutils` is a dev-dep-only
+crate used by `holofs-cluster` and `holofs-client` tests.
 
 **Rule of thumb.** A pull request that adds an upward edge in this graph
 needs a separate discussion — it almost always means a type or function is
@@ -340,6 +369,10 @@ Filename is `hex(sha256(shard))` split as `<2 hex chars>/<remaining 62>.shard`
 
 ### Write atomicity
 
+Two-layer scheme: a per-node WAL groups shard appends into 5-ms
+`fsync` batches, and each committed shard is materialised as its own
+`.shard` file via tmp+rename.
+
 ```
 write to <name>.shard.tmp
 fsync
@@ -347,6 +380,36 @@ rename <name>.shard.tmp → <name>.shard
 ```
 
 A crash leaves either nothing or a complete shard — never a torn file.
+
+### WAL + group-commit
+
+Every `Store::put_appended` (called from the node service's
+`Request::Put` / `Request::PutBatch` handler) writes a length-prefixed
+record with a sha256 digest into an append-only WAL segment
+(`wal-<N>.log`, magic `HOLOFSW1`). A background flusher wakes up every
+`HOLOFS_NODE_FLUSH_INTERVAL_MS` (default 5 ms, silently clamped to ≥ 1
+ms after the B3 fix), flushes the `BufWriter`, drops the store lock,
+and calls `fsync` on the underlying file via `spawn_blocking`. When
+the fsync returns, `wal_synced_seq` is bumped and every waiter for a
+sequence ≤ that value is notified. Under a 24-encoder burst this
+turns 24 × 12 ≈ 288 concurrent per-shard fsyncs into ~200 batched
+fsyncs/s with each batch amortising N pending appends. The handler
+does not return `Ack` until its assigned WAL seq lands on disk, so
+the durability boundary is unchanged from the pre-WAL era.
+
+### At-rest encryption (AES-256-GCM)
+
+When `HOLOFS_NODE_STORAGE_KEY` is set (64 hex chars = 32 bytes) the
+node service switches the shard file magic from `HOLOFSS1` to
+`HOLOFSS2` and seals the `coeffs || payload` blob with AES-256-GCM.
+The 12-byte nonce is stored inline right after the AAD header; the
+key is HKDF-SHA256 derived from the raw storage key (`salt =
+"holofs-shard-salt-v1"`, `info = "holofs-shard-key-v1"`) so a leaked
+key rotation is a matter of decrypt-with-old, re-encrypt-with-new.
+Shard hashes are computed on the *plaintext* payload, so hash
+inventory and content addressing are unaffected — a node that swaps
+keys mid-stream still reports the same hash list. See
+`crates/holofs-storage/src/crypto.rs` for the wire format.
 
 ### Index recovery
 

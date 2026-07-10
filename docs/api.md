@@ -59,6 +59,7 @@ was viewing.
 | `DELETE` | `/api/rmdir/<path>`        | Remove empty directory. 409 if it has children.             | — (JSON response)            |
 | `POST`   | `/api/rmdir`               | Form-friendly rmdir; redirects on success                   | `path=…`                     |
 | `POST`   | `/api/mv`                  | Rename / move; directories carry every descendant along     | `from=…&to=…`                |
+| `POST`   | `/api/rm`                  | Form-friendly file DELETE. Redirects to the parent view on success. Distinct from `/api/rmdir` (that one refuses non-empty and only handles directories). | `path=…`                     |
 | `POST`   | `/api/list_dir`            | Leptos server fn: immediate children of `prefix` (JSON-RPC) | `{"prefix":"…"}`             |
 
 Status-code mapping for the dir ops:
@@ -238,8 +239,8 @@ gateway (no `--enable-embed`) → 503 + hint about the missing flag.
 |--------|-------------------------------|-------------|
 | `GET`  | `/holo/<name>`                | Progressive reveal: layer-by-layer page that streams a new image for every DWT layer L0 → L_max |
 | `GET`  | `/preview/stream/<name>`      | `multipart/x-mixed-replace` body; each part is the same object decoded one extra layer deep |
-| `GET`  | `/api/spotlight.png?a=…&x=…&y=…&w=…&h=…` | Holographic spotlight: sharp inside the ROI, smooth outside. Both pixel coords (`x_px`/`y_px`/…) and normalised (`x`/`y`/…) accepted |
-| `GET`  | `/spotlight?a=…`              | SSR page with ROI picker |
+| `GET`  | `/api/spotlight.png?name=…&x=…&y=…&w=…&h=…&mode=…` | Holographic spotlight: sharp inside the ROI, smooth outside. `name=` is the catalog path (`a=` from earlier drafts of this doc is wrong). Coords are normalised floats in `[0, 1]`; the pixel-coord variant (`x_px`/`y_px`/…) is no longer accepted. |
+| `GET`  | `/spotlight?name=…`           | SSR page with ROI picker |
 
 ### Garbage collection + uploads
 
@@ -401,13 +402,14 @@ sequenceDiagram
 All multi-byte integers are **big-endian** unless noted. Files are
 identified by an 8-byte magic at offset 0.
 
-### 3.1. Manifest (`HOLOFSM9`, legacy `HOLOFSM6/M7/M8` accepted on read)
+### 3.1. Manifest (`HOLOFSMA`, legacy `HOLOFSM6/M7/M8/M9` accepted on read)
 
-The manifest carries an `ObjectKind` discriminant (`4 = Directory`) and
-a trailing `encoding` selector (`0 = Rlnc`, `1 = Replicated`). Old
-`HOLOFSM6/M7/M8` files decode cleanly under the new code — missing
+The manifest carries an `ObjectKind` discriminant (`4 = Directory`)
+and a trailing `encoding` selector (`0 = Rlnc`, `1 = Replicated`) plus
+a `state` selector (`0 = Ready`, `1 = Encoding`, `2 = Failed`). Old
+`HOLOFSM6/M7/M8/M9` files decode cleanly under the new code — missing
 fields fall back to the historical defaults (`encoding = Rlnc`,
-`created_at_unix = 0`).
+`state = Ready`, `created_at_unix = 0`).
 
 Directory markers have every numeric field zeroed and every `Vec` field
 empty; their sole carrier is `object_id` (SHA-256-derived from the path,
@@ -417,7 +419,8 @@ domain tag `holofs-dir-v1\0`) and a fixed `content_type` of
 A serialised `Manifest` describing one object's encoding.
 
 ```
-magic           8  bytes = "HOLOFSM7" (legacy "HOLOFSM6" also accepted)
+magic           8  bytes = "HOLOFSMA"
+                          (legacy "HOLOFSM6/M7/M8/M9" also accepted)
 object_id       8  bytes BE
 k               2  bytes BE
 nlayers         1  byte
@@ -448,7 +451,7 @@ shard_hashes    channels × nlayers × variable:
                     hashes: count × 32 bytes
 
 kind            1  byte (0=Image, 1=Text, 2=Audio, 3=Opaque, 4=Directory)
-content_type    1 byte length + length bytes UTF-8
+content_type    u16 BE length + length bytes UTF-8
 
 chunk_lens      u32 BE count + count × u32 BE
                 (for text: per-chunk lengths; for opaque: real file length;
@@ -458,6 +461,14 @@ audio_sample_rate  u32 BE  (0 for non-audio)
 
 text_minhash    u32 BE count + count × u32 BE
                 (for text: bottom-K MinHash; empty otherwise)
+
+created_at_unix    u64 BE  (seconds since UNIX epoch)
+
+encoding        1  byte (0=Rlnc, 1=Replicated)
+state           1  byte (0=Ready, 1=Encoding, 2=Failed)
+                (async ingest: 202-accepted PUTs are staged with
+                 `state=Encoding`; the background worker flips to
+                 `Ready` on success, `Failed` on encode/persist error.)
 ```
 
 ### 3.2. Directory (catalog, `HOLOFSD1`)

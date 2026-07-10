@@ -66,11 +66,7 @@ pub type WriteEpoch = u64;
 /// (gateway GC pass, tests) can snapshot the boundary without going
 /// through a Store instance.
 pub fn now_epoch() -> WriteEpoch {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    holofs_core::time::now_unix_ms()
 }
 
 const SHARD_MAGIC_V1: &[u8; 8] = b"HOLOFSS1";

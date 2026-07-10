@@ -278,12 +278,16 @@ Top-level: `Cargo.toml` (workspace), `Cargo.lock`, `Dockerfile`,
 ## Tests
 
 ```sh
-cargo test --workspace --exclude holofs-e2e         # 360 workspace tests
-cargo test -p holofs-web --features ssr --lib       # 70 SSR-only lib tests
-cargo test -p holofs-e2e -- --test-threads=1        # 109 e2e tests (needs chromedriver)
+cargo test --workspace --exclude holofs-e2e         # workspace tests (~380)
+cargo test -p holofs-web --features ssr --lib       # SSR-only lib tests (~70)
+cargo test -p holofs-e2e -- --test-threads=1        # e2e tests (~126, needs chromedriver)
 cargo deny check                                    # advisories + licenses + bans + sources
 cargo clippy --workspace                            # workspace lints (pedantic-leaning)
 ```
+
+The counts drift as suites grow; the exact number `cargo test`
+prints on its "test result: ok. N passed" summary lines is the
+source of truth.
 
 The e2e suite spawns a fresh `holofs-web` gateway against a `TempDir`
 storage for every scenario; running them serial (`--test-threads=1`)

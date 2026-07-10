@@ -346,52 +346,7 @@ impl Gateway {
         live: Arc<LiveNodes>,
         cluster: Arc<ClusterInfo>,
     ) -> Arc<Self> {
-        let n = cluster.node_addrs.len();
-        Arc::new(Self {
-            catalog,
-            catalog_path: None,
-            embed: Arc::new(Mutex::new(EmbedState::default())),
-            versions: Arc::new(Mutex::new(VersionsState::default())),
-            gc_barrier: Arc::new(RwLock::new(())),
-            gf,
-            live,
-            admin_kills: Arc::new(Mutex::new(vec![false; n])),
-            cluster,
-            cache: Mutex::new(HashMap::new()),
-            shard_cache: Mutex::new(HashMap::new()),
-            escrow_cache: Mutex::new(HashMap::new()),
-            fingerprint_cache: Mutex::new(HashMap::new()),
-            auto_repair_cooldown: Mutex::new(HashMap::new()),
-            auto_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            auto_repair_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            scrub_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            scrub_runs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            catalog_persist_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            medium_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MEDIUM_CONCURRENCY)),
-            long_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_LONG_CONCURRENCY)),
-            medium_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            long_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            timeout_short_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            timeout_medium_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            timeout_long_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            task_restarts_monitor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            task_restarts_auditor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            task_restarts_scrub: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            admin_auth_missing_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            admin_auth_bad_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            admin_auth_disabled_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            rate_limit_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            objects_encoding: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            encode_completed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            encode_failed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            encode_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_ENCODE_CONCURRENCY)),
-            encode_queue_max: DEFAULT_ENCODE_QUEUE_MAX,
-            persist_dirty_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            persist_flushed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            persist_flush_mutex: Arc::new(tokio::sync::Mutex::new(())),
-            persist_coalesced_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            stats_cache: Arc::new(tokio::sync::Mutex::new(None)),
-        })
+        Self::build(gf, catalog, live, cluster, None)
     }
 
     /// Same as [`Self::new`] but with a catalog file path: every PUT/DELETE
@@ -403,10 +358,28 @@ impl Gateway {
         cluster: Arc<ClusterInfo>,
         catalog_path: std::path::PathBuf,
     ) -> Arc<Self> {
+        Self::build(gf, catalog, live, cluster, Some(catalog_path))
+    }
+
+    /// Single-source-of-truth constructor. Both `new` and
+    /// `new_persistent` used to inline ~50 lines of identical field
+    /// initialisation and drift apart by a field or two each stage,
+    /// which is exactly the review's Gateway god-object complaint.
+    /// Keeping the field layout in one place gives us that back
+    /// without breaking either public constructor.
+    fn build(
+        gf: Arc<Gf>,
+        catalog: Arc<RwLock<Directory>>,
+        live: Arc<LiveNodes>,
+        cluster: Arc<ClusterInfo>,
+        catalog_path: Option<std::path::PathBuf>,
+    ) -> Arc<Self> {
+        use std::sync::atomic::AtomicU64;
         let n = cluster.node_addrs.len();
+        let atomic_u64 = || Arc::new(AtomicU64::new(0));
         Arc::new(Self {
             catalog,
-            catalog_path: Some(catalog_path),
+            catalog_path,
             embed: Arc::new(Mutex::new(EmbedState::default())),
             versions: Arc::new(Mutex::new(VersionsState::default())),
             gc_barrier: Arc::new(RwLock::new(())),
@@ -419,34 +392,34 @@ impl Gateway {
             escrow_cache: Mutex::new(HashMap::new()),
             fingerprint_cache: Mutex::new(HashMap::new()),
             auto_repair_cooldown: Mutex::new(HashMap::new()),
-            auto_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            auto_repair_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            scrub_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            scrub_runs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            catalog_persist_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            auto_repairs_total: atomic_u64(),
+            auto_repair_failures_total: atomic_u64(),
+            scrub_repairs_total: atomic_u64(),
+            scrub_runs_total: atomic_u64(),
+            catalog_persist_failures_total: atomic_u64(),
             medium_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MEDIUM_CONCURRENCY)),
             long_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_LONG_CONCURRENCY)),
-            medium_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            long_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            timeout_short_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            timeout_medium_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            timeout_long_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            task_restarts_monitor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            task_restarts_auditor: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            task_restarts_scrub: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            admin_auth_missing_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            admin_auth_bad_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            admin_auth_disabled_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            rate_limit_rejected_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            objects_encoding: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            encode_completed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            encode_failed_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            medium_rejected_total: atomic_u64(),
+            long_rejected_total: atomic_u64(),
+            timeout_short_total: atomic_u64(),
+            timeout_medium_total: atomic_u64(),
+            timeout_long_total: atomic_u64(),
+            task_restarts_monitor: atomic_u64(),
+            task_restarts_auditor: atomic_u64(),
+            task_restarts_scrub: atomic_u64(),
+            admin_auth_missing_total: atomic_u64(),
+            admin_auth_bad_total: atomic_u64(),
+            admin_auth_disabled_total: atomic_u64(),
+            rate_limit_rejected_total: atomic_u64(),
+            objects_encoding: atomic_u64(),
+            encode_completed_total: atomic_u64(),
+            encode_failed_total: atomic_u64(),
             encode_permits: Arc::new(tokio::sync::Semaphore::new(DEFAULT_ENCODE_CONCURRENCY)),
             encode_queue_max: DEFAULT_ENCODE_QUEUE_MAX,
-            persist_dirty_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            persist_flushed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            persist_dirty_epoch: atomic_u64(),
+            persist_flushed_epoch: atomic_u64(),
             persist_flush_mutex: Arc::new(tokio::sync::Mutex::new(())),
-            persist_coalesced_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            persist_coalesced_total: atomic_u64(),
             stats_cache: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }

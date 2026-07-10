@@ -14,7 +14,6 @@ holofs-wire.workspace = true
 holofs-storage.workspace = true
 tokio.workspace = true
 holofs-codec.workspace = true
-holofs-analytics.workspace = true
 futures-util = { workspace = true, features = [ "alloc" ] }
 # wire-protocol TLS scaffold (client side).
 rustls = { workspace = true }

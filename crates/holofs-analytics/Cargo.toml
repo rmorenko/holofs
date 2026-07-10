@@ -10,6 +10,7 @@ description = "Holofs analytics: perceptual fingerprint, MinHash, chunk diff, Sh
 [dependencies]
 holofs-core.workspace = true
 holofs-model.workspace = true
+holofs-codec.workspace = true
 
 [lints]
 workspace = true

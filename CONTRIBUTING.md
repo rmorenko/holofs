@@ -10,8 +10,8 @@ holographic-degradation property?".
 git clone https://github.com/holofs/holofs
 cd holofs
 cargo build --workspace --release
-cargo test --workspace --exclude holofs-e2e            # 329 unit + integration tests
-cargo test -p holofs-web --features ssr --lib          # 56 SSR-only lib tests
+cargo test --workspace --exclude holofs-e2e            # workspace tests (~380)
+cargo test -p holofs-web --features ssr --lib          # SSR-only lib tests (~70)
 cargo leptos build --release                           # builds SSR binary + WASM bundle
 ./target/release/holofs-web                            # http://127.0.0.1:8787/
 ```
@@ -160,11 +160,12 @@ the "rule of thumb" for extending each concern.
 
 - [ ] `cargo fmt --all --check` passes
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes
-- [ ] `cargo test --workspace --exclude holofs-e2e` passes (329 tests)
-- [ ] `cargo test -p holofs-web --features ssr --lib` passes (56 SSR tests)
-       when the change touches middleware / bootstrap in holofs-web
+- [ ] `cargo test --workspace --exclude holofs-e2e` passes
+- [ ] `cargo test -p holofs-web --features ssr --lib` passes when the
+       change touches middleware / bootstrap in holofs-web
 - [ ] `cargo test -p holofs-e2e -- --test-threads=1` passes when the
-       change touches HTTP / UI surfaces (106 tests + 10 `#[ignore]`'d)
+       change touches HTTP / UI surfaces (a subset is `#[ignore]`'d
+       for reasons documented in `crates/holofs-e2e/README.md`)
 - [ ] `cargo doc --no-deps --workspace` builds with no warnings
 - [ ] Public items have rustdoc
 - [ ] CHANGELOG.md updated under `[Unreleased]`

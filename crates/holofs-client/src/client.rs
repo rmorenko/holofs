@@ -1022,7 +1022,7 @@ pub async fn put_text_object(
     manifest.sym_len = vec![split.sym_len as u32];
 
     // MinHash for fuzzy similar-text search.
-    manifest.text_minhash = holofs_analytics::shingle::compute_minhash(text);
+    manifest.text_minhash = holofs_codec::text_codec::compute_minhash(text);
 
     // CID = SHA-256 of raw text + metadata (kind=Text, content_type).
     let cid = {

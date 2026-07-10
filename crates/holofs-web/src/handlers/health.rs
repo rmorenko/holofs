@@ -382,10 +382,7 @@ pub async fn health_events(
                 n_live: data.n_live,
                 n_total: data.n_total,
                 objects: data.objects.len(),
-                ts_ms: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0),
+                ts_ms: holofs_core::time::now_unix_ms(),
             };
             let event = Event::default()
                 .json_data(&snap)

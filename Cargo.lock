@@ -1760,6 +1760,7 @@ dependencies = [
 name = "holofs-analytics"
 version = "1.0.0"
 dependencies = [
+ "holofs-codec",
  "holofs-core",
  "holofs-model",
 ]
@@ -1796,7 +1797,6 @@ name = "holofs-client"
 version = "1.0.0"
 dependencies = [
  "futures-util",
- "holofs-analytics",
  "holofs-codec",
  "holofs-core",
  "holofs-model",

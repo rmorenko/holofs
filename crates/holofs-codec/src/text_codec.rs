@@ -164,3 +164,49 @@ mod tests {
         assert_eq!(total as usize, text.len());
     }
 }
+
+// === bottom-K MinHash for text similarity (moved here from
+// holofs-analytics::shingle so `holofs-client::put_text_object` no
+// longer needs to depend on `holofs-analytics` — see S4-2 of the
+// review; that dependency was the only backward edge in an
+// otherwise clean crate DAG). Analytics still re-exports these so
+// existing gateway callers keep working with unchanged imports.
+
+/// Shingle (n-gram) size in bytes. 5 bytes is the standard choice for text.
+pub const MINHASH_SHINGLE_SIZE: usize = 5;
+
+/// MinHash fingerprint size in u32 values. 64 → ~12 % Jaccard estimation error.
+pub const MINHASH_K: usize = 64;
+
+fn fnv1a(bytes: &[u8]) -> u32 {
+    let mut h = 0x811c9dc5u32;
+    for &b in bytes {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x01000193);
+    }
+    h
+}
+
+/// Compute a text's MinHash fingerprint: bottom-K minimum hash values of
+/// shingles. If the text is shorter than `MINHASH_SHINGLE_SIZE`, treat the
+/// whole text as a single shingle. Result length =
+/// `min(MINHASH_K, unique_shingle_count)`.
+pub fn compute_minhash(text: &str) -> Vec<u32> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let mut hashes: Vec<u32> = if bytes.len() < MINHASH_SHINGLE_SIZE {
+        vec![fnv1a(bytes)]
+    } else {
+        let mut acc = Vec::with_capacity(bytes.len() - MINHASH_SHINGLE_SIZE + 1);
+        for i in 0..=bytes.len() - MINHASH_SHINGLE_SIZE {
+            acc.push(fnv1a(&bytes[i..i + MINHASH_SHINGLE_SIZE]));
+        }
+        acc
+    };
+    hashes.sort_unstable();
+    hashes.dedup();
+    hashes.truncate(MINHASH_K);
+    hashes
+}

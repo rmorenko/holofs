@@ -502,6 +502,13 @@ counters.
 | `holofs_backpressure_permits_available`      | gauge   | `bucket` (medium/long)       | Permits still free. Constantly at 0 = under-provisioned bucket; constantly at max = idle. |
 | `holofs_supervised_task_restarts_total`      | counter | `task` (monitor/auditor/scrub) | Supervised loop panics + unexpected exits. Any non-zero flags a repeated crash the operator should investigate. |
 | `holofs_admin_auth_failures_total`           | counter | `outcome` (missing/bad/disabled) | Admin bearer-token rejections split by reason. `disabled` = surface refused because neither `HOLOFS_ADMIN_TOKEN` nor `HOLOFS_ADMIN_UNAUTHENTICATED` is set. |
+| `holofs_rate_limit_rejected_total`           | counter | —                            | Per-IP token-bucket rejections (429). Zero when `HOLOFS_RATE_LIMIT_RPS_PER_IP=0`. |
+| `holofs_objects_encoding`                    | gauge   | —                            | Objects currently in the `state=Encoding` async-ingest queue. Sustained at `HOLOFS_ENCODE_QUEUE_MAX` = downstream can't keep up. |
+| `holofs_encode_completed_total`              | counter | —                            | Async-ingest background encodes that finished successfully. |
+| `holofs_encode_failed_total`                 | counter | —                            | Async-ingest background encodes that failed (encode error, cluster degraded, catalog persist error). Manifest flips to `state=Failed`. |
+| `holofs_put_cpu_nanoseconds_sum`             | counter | —                            | Sum of CPU-phase (RLNC + DWT + hash) ns inside `put_object`. Divide by `holofs_put_count_total` for the average. |
+| `holofs_put_fanout_nanoseconds_sum`          | counter | —                            | Sum of fanout (network) ns inside `put_object`. Same denominator. Compare against `cpu` to see whether writes are CPU- or network-bound. |
+| `holofs_put_count_total`                     | counter | —                            | `put_object` completions — denominator for the two `*_nanoseconds_sum` averages. |
 
 A healthy cluster keeps the self-healing counters at zero or
 near-zero; sustained non-zero rate on `auto_repair_failures_total`
@@ -523,33 +530,61 @@ and per-object reputation (currently logged via `tracing` only).
 groups:
 - name: holofs
   rules:
+  # Cluster-wide liveness. Alerts when the number of live nodes drops
+  # below the total. `holofs_node_up` from earlier drafts does not
+  # exist — per-node liveness is exposed as `holofs_node_admin_killed`
+  # (1 = admin-disabled), so the derived alert is `(nodes_total -
+  # nodes_live) > 0`.
   - alert: HolofsNodeDown
-    expr: holofs_node_up == 0
+    expr: (holofs_nodes_total - holofs_nodes_live) > 0
     for: 5m
     annotations:
-      summary: "holofs node {{ $labels.node }} is down"
+      summary: "one or more holofs nodes are down"
 
   - alert: HolofsZoneDegraded
-    expr: count by (zone) (holofs_node_up == 0) >= 2
+    # A zone with ≥ 2 disabled nodes is where redundancy actually
+    # starts to bite. Zones surface on `holofs_node_admin_killed`.
+    expr: count by (zone) (holofs_node_admin_killed == 1) >= 2
     for: 10m
     annotations:
       summary: "zone {{ $labels.zone }} has ≥2 dead nodes (margin loss)"
 
-  - alert: HolofsDiskFillingFast
-    expr: predict_linear(holofs_bytes_stored_total[1h], 24*3600) > node_filesystem_size_bytes
+  - alert: HolofsCatalogGrowingFast
+    # Catalog byte size projection. The old rule pointed at a
+    # nonexistent `holofs_bytes_stored_total`; the real cluster-wide
+    # counter is `holofs_bytes_total` (gauge, sum of manifest
+    # `n × (K + sym_len)` across every entry).
+    expr: predict_linear(holofs_bytes_total[1h], 24*3600) > 1e12
     for: 30m
     annotations:
-      summary: "node {{ $labels.node }} will fill within 24h"
+      summary: "catalog projected to exceed 1 TB within 24h"
 
-  - alert: HolofsRepairFailing
-    expr: rate(holofs_repair_jobs_total{result="failed"}[15m]) > 0.1
+  - alert: HolofsAutoRepairFailing
+    # No `holofs_repair_jobs_total` metric exists. Use the real
+    # counters that split repair outcomes: the *user-visible* GET
+    # path failure rate is auto_repair_failures_total /
+    # auto_repairs_total.
+    expr: rate(holofs_auto_repair_failures_total[15m]) > 0.1
     for: 30m
-
-  - alert: HolofsLowReputation
-    expr: holofs_node_reputation < 0.5
-    for: 1h
     annotations:
-      summary: "node {{ $labels.node }} reputation collapsed (audit mismatches)"
+      summary: "auto-repair pass is failing on the read path"
+      description: |
+        Every increment = one GET where the object was decodable
+        neither before nor after `repair_object_inplace`. Sustained
+        non-zero rate indicates real data loss beyond the K threshold.
+
+  - alert: HolofsScrubStuck
+    # `holofs_scrub_runs_total` bumps once per background scrub tick
+    # (default 10 min). Sustained flat = the supervised scrub loop
+    # died — cross-check with holofs_supervised_task_restarts_total.
+    expr: rate(holofs_scrub_runs_total[30m]) == 0
+    for: 30m
+    annotations:
+      summary: "background scrub tick has not fired in 30m"
+
+  # Reputation (per-node audit mismatches) is not exported as a
+  # Prometheus metric in this build — it lives in `tracing` logs
+  # only. Track through Loki / journal instead of an alert.
 
   # N-series reliability alerts.
 

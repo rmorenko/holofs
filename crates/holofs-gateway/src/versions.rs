@@ -133,10 +133,7 @@ impl Gateway {
         let dir = Self::version_dir_for(&root, name);
         std::fs::create_dir_all(&dir)
             .map_err(|e| GatewayError::BadRequest(format!("versions mkdir: {e}")))?;
-        let ts_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let ts_ms = holofs_core::time::now_unix_ms();
         let path = Self::version_file_for(&root, name, ts_ms, &manifest.data_cid);
         let bytes = manifest.encode();
         std::fs::write(&path, &bytes)

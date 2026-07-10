@@ -8,13 +8,12 @@
 use holofs_codec::image_io::to_rgb;
 use holofs_core::hash::sha256;
 
-/// Current time in seconds since Unix epoch. Falls back to 0 if the
-/// system clock is set before 1970 (which should be impossible).
+/// Current time in seconds since Unix epoch. Thin re-export of
+/// [`holofs_core::time::now_unix`] — kept for `pub(crate)` visibility
+/// so `use crate::util::now_unix` continues to work across the
+/// gateway modules unchanged.
 pub(crate) fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    holofs_core::time::now_unix()
 }
 
 /// Stable, path-derived id for directory markers. We hash with a

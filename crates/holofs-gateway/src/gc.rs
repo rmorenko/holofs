@@ -99,10 +99,7 @@ impl Gateway {
         // read (catalog, node held lists) may race concurrent PUTs;
         // those PUTs land with epoch > snapshot and are protected
         // by the node-side `PurgeByHashUpTo` gate below.
-        let snapshot_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let snapshot_epoch = holofs_core::time::now_unix_ms();
 
         // 1. Snapshot the live catalog hashes.
         //

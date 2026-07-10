@@ -34,6 +34,7 @@ pub mod merkle;
 pub mod repair;
 pub mod rlnc;
 pub mod rng;
+pub mod time;
 pub mod transform;
 
 /// Default frame width (pixels) when `HOLOFS_W` env var is not set.

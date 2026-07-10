@@ -680,10 +680,7 @@ async fn put_named(
         chunk_lens: vec![],
         audio_sample_rate: 0,
         text_minhash: vec![],
-        created_at_unix: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+        created_at_unix: holofs_core::time::now_unix(),
         encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
             state: holofs_model::manifest::ManifestState::Ready,
         };
