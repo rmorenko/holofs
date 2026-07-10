@@ -223,6 +223,12 @@ pub fn shard_overlap_per_layer(a: &Manifest, b: &Manifest) -> Vec<u32> {
 /// How many shard hashes overlap between two manifests. Returns
 /// (common, total_a, total_b). For identical objects (same CID, deterministic
 /// PUT) common = total_a = total_b.
+///
+/// v2 P1.7: `total_a` is `set_a.len()` (unique count), so `total_b` and
+/// `common` must also be counted post-dedup on `b`'s side. Prior code
+/// counted `total_b` and `common` with per-shard multiplicity, making
+/// the ratio `common / total_a` misleading (numerator/denominator on
+/// different scales) whenever a manifest contained duplicate hashes.
 pub fn shard_overlap(a: &Manifest, b: &Manifest) -> (usize, usize, usize) {
     use std::collections::HashSet;
     let mut set_a: HashSet<Hash> = HashSet::new();
@@ -233,20 +239,16 @@ pub fn shard_overlap(a: &Manifest, b: &Manifest) -> (usize, usize, usize) {
             }
         }
     }
-    let total_a = set_a.len();
-    let mut total_b = 0usize;
-    let mut common = 0usize;
+    let mut set_b: HashSet<Hash> = HashSet::new();
     for per_c in &b.shard_hashes {
         for per_l in per_c {
             for h in per_l {
-                total_b += 1;
-                if set_a.contains(h) {
-                    common += 1;
-                }
+                set_b.insert(*h);
             }
         }
     }
-    (common, total_a, total_b)
+    let common = set_a.intersection(&set_b).count();
+    (common, set_a.len(), set_b.len())
 }
 
 // === Per-chunk diff ============================================

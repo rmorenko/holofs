@@ -88,6 +88,18 @@ async fn main() {
         );
     }
 
+    // Freeze the typed `RuntimeConfig` snapshot NOW — after
+    // `apply_to_env` populated env vars from the TOML file, and after
+    // clap parsed the CLI (which may itself have set env variants via
+    // `#[arg(env = "…")]` under the hood). Every subsequent
+    // `RuntimeConfig::get()` inside `bootstrap_cluster`, admin_auth,
+    // rate_limit, handlers/objects, etc. reads from this frozen
+    // snapshot. Without this eager init the first `get()` panics
+    // because `cli.bootstrap_config()` bypasses the module's own
+    // `BootstrapConfig::from_env` (which is the alternate init
+    // point).
+    let _ = holofs_web::runtime_config::RuntimeConfig::init();
+
     info!(
         version = env!("CARGO_PKG_VERSION"),
         addr = %cli.addr,

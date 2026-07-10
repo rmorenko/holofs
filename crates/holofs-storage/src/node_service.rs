@@ -387,7 +387,24 @@ impl Store {
             .map(|(s, _)| s.clone())
     }
 
-    pub fn purge(&mut self, object_id: u64) -> usize {
+    /// Delete every shard of `object_id`. WAL-first: writes the delete
+    /// record to the WAL and fsyncs *before* mutating the in-memory
+    /// index. If the WAL write fails we return `Err` without touching
+    /// RAM state — the handler up in `node_service` surfaces this as
+    /// `Response::Error`. Prior to this the write order was inverted
+    /// (RAM → WAL): a WAL failure logged and dropped, but the client
+    /// had already been told `Ack`; on restart the WAL replay would
+    /// "resurrect" the object that the client believed deleted. See
+    /// review v2 §Purge/WAL-Ack.
+    pub fn purge(&mut self, object_id: u64) -> io::Result<usize> {
+        // Persist the intent first. On a WAL-configured store, this is
+        // the boundary at which the delete becomes durable.
+        if let Some(wal) = &mut self.wal {
+            wal.append_purge(object_id)?;
+            wal.sync(self.sync_on_write)?;
+            self.maybe_rotate_wal();
+        }
+        // Now safe to mutate.
         let mut removed_hashes: Vec<Hash> = Vec::new();
         self.shards.retain(|(o, _, _), bucket| {
             if *o != object_id {
@@ -397,23 +414,15 @@ impl Store {
             false
         });
         // Legacy per-shard files (rolling upgrade): still remove
-        // them so a downgraded reader can't resurrect them.
+        // them so a downgraded reader can't resurrect them. Failures
+        // here are best-effort — next GC pass cleans up.
         if let Some(dir) = &self.dir {
             for h in &removed_hashes {
                 let path = shard_path(dir, h);
                 let _ = fs::remove_file(&path);
             }
         }
-        if let Some(wal) = &mut self.wal {
-            if let Err(e) = wal.append_purge(object_id) {
-                eprintln!("Store::purge: WAL append failed: {e}");
-            } else if let Err(e) = wal.sync(self.sync_on_write) {
-                eprintln!("Store::purge: WAL sync failed: {e}");
-            } else {
-                self.maybe_rotate_wal();
-            }
-        }
-        removed_hashes.len()
+        Ok(removed_hashes.len())
     }
 
     pub fn total(&self) -> usize {
@@ -436,7 +445,10 @@ impl Store {
     /// Kept for tests and non-GC internal callers; production GC
     /// uses [`Self::purge_by_hashes_up_to`] with the pass's snapshot
     /// epoch so concurrent PUTs are safe.
-    pub fn purge_by_hashes(&mut self, targets: &std::collections::HashSet<Hash>) -> usize {
+    pub fn purge_by_hashes(
+        &mut self,
+        targets: &std::collections::HashSet<Hash>,
+    ) -> io::Result<usize> {
         self.purge_by_hashes_up_to(targets, WriteEpoch::MAX)
     }
 
@@ -449,14 +461,38 @@ impl Store {
         &mut self,
         targets: &std::collections::HashSet<Hash>,
         max_epoch: WriteEpoch,
-    ) -> usize {
-        let mut removed = 0usize;
+    ) -> io::Result<usize> {
+        // Compute the removal set FIRST without mutating so we can
+        // persist the exact list to the WAL and only commit it to
+        // RAM after fsync. Same durability boundary as `purge` —
+        // see the docstring there. Prior code mutated RAM, then
+        // wrote WAL, then logged-and-dropped any WAL error, letting
+        // the deletion get rolled back on restart while the caller
+        // had already been Ack'd.
         let mut removed_hashes: Vec<Hash> = Vec::new();
-        self.shards.retain(|_, bucket| {
-            bucket.retain(|h, (_, epoch)| {
+        for (_, bucket) in self.shards.iter() {
+            for (h, (_, epoch)) in bucket.iter() {
                 if targets.contains(h) && *epoch <= max_epoch {
-                    removed += 1;
                     removed_hashes.push(*h);
+                }
+            }
+        }
+        if removed_hashes.is_empty() {
+            return Ok(0);
+        }
+        if let Some(wal) = &mut self.wal {
+            wal.append_purge_hashes(&removed_hashes)?;
+            wal.sync(self.sync_on_write)?;
+            self.maybe_rotate_wal();
+        }
+        // Now safe to mutate.
+        let doomed: std::collections::HashSet<Hash> =
+            removed_hashes.iter().copied().collect();
+        let mut removed = 0usize;
+        self.shards.retain(|_, bucket| {
+            bucket.retain(|h, _| {
+                if doomed.contains(h) {
+                    removed += 1;
                     false
                 } else {
                     true
@@ -470,18 +506,7 @@ impl Store {
                 let _ = fs::remove_file(&path);
             }
         }
-        if !removed_hashes.is_empty() {
-            if let Some(wal) = &mut self.wal {
-                if let Err(e) = wal.append_purge_hashes(&removed_hashes) {
-                    eprintln!("Store::purge_by_hashes: WAL append failed: {e}");
-                } else if let Err(e) = wal.sync(self.sync_on_write) {
-                    eprintln!("Store::purge_by_hashes: WAL sync failed: {e}");
-                } else {
-                    self.maybe_rotate_wal();
-                }
-            }
-        }
-        removed
+        Ok(removed)
     }
 
     /// epoch-GC: current wall-clock. Snapshotted by the gateway
@@ -995,8 +1020,10 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
         }
         Request::Purge { object_id } => {
             let mut s = store.lock().await;
-            s.purge(object_id);
-            Response::Ack
+            match s.purge(object_id) {
+                Ok(_) => Response::Ack,
+                Err(e) => Response::Error(format!("purge failed: {e}")),
+            }
         }
         Request::Stat => {
             let s = store.lock().await;
@@ -1025,8 +1052,10 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
         Request::PurgeByHash { hashes } => {
             let set: std::collections::HashSet<Hash> = hashes.into_iter().collect();
             let mut s = store.lock().await;
-            s.purge_by_hashes(&set);
-            Response::Ack
+            match s.purge_by_hashes(&set) {
+                Ok(_) => Response::Ack,
+                Err(e) => Response::Error(format!("purge_by_hash failed: {e}")),
+            }
         }
         Request::PutBatch {
             object_id,
@@ -1068,8 +1097,10 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
         Request::PurgeByHashUpTo { hashes, max_epoch } => {
             let set: std::collections::HashSet<Hash> = hashes.into_iter().collect();
             let mut s = store.lock().await;
-            s.purge_by_hashes_up_to(&set, max_epoch);
-            Response::Ack
+            match s.purge_by_hashes_up_to(&set, max_epoch) {
+                Ok(_) => Response::Ack,
+                Err(e) => Response::Error(format!("purge_by_hash_up_to failed: {e}")),
+            }
         }
         Request::PutTimings => {
             use std::sync::atomic::Ordering;
@@ -1395,7 +1426,7 @@ mod tests {
         targets.insert(h_old);
         targets.insert(h_new);
         // Snapshot only covers the old shard.
-        let removed = s.purge_by_hashes_up_to(&targets, snapshot);
+        let removed = s.purge_by_hashes_up_to(&targets, snapshot).unwrap();
         assert_eq!(removed, 1, "only old shard should be purged");
         assert!(s.get_by_hash((1, 0, 0), &h_new).is_some());
         assert!(s.get_by_hash((1, 0, 0), &h_old).is_none());

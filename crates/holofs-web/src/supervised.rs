@@ -95,8 +95,21 @@ where
                     warn!(
                         task = name,
                         total_restarts = restarts_counter.load(Ordering::Relaxed),
-                        "task returned without shutdown; restarting immediately"
+                        "task returned without shutdown; restarting after backoff"
                     );
+                    // v2 P1.7: sleep at least `INITIAL_BACKOFF` before
+                    // relaunching even on `Ok(())`. Prior to this a
+                    // task that mistakenly returned Ok immediately
+                    // (misconfigured loop condition, empty poll list)
+                    // burned a whole CPU as the supervisor
+                    // relaunched it in a tight loop.
+                    tokio::select! {
+                        _ = shutdown.cancelled() => {
+                            info!(task = name, "supervised task exiting (shutdown)");
+                            return;
+                        }
+                        _ = tokio::time::sleep(INITIAL_BACKOFF) => {}
+                    }
                     backoff = INITIAL_BACKOFF;
                 }
                 Err(e) if e.is_panic() => {

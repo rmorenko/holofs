@@ -39,9 +39,9 @@
 //! total_n         2  bytes BE — total number of shares
 //! total_k         2  bytes BE — recovery threshold
 //! real_len        8  bytes BE — original file length in bytes
-//! content_type_n  1  byte  — length of content_type
+//! content_type_n  2  bytes BE — length of content_type
 //! content_type    N  bytes — original MIME
-//! filename_n      1  byte  — length of filename
+//! filename_n      2  bytes BE — length of filename
 //! filename        N  bytes — original filename
 //! coeffs_len      2  bytes BE = K
 //! coeffs          K  bytes — linear coefficients
@@ -54,7 +54,14 @@ use holofs_core::hash::Sha256;
 use holofs_core::rlnc::{decode_layer_with_k, encode_layer_with_k_random, Shard};
 use holofs_core::rng::Rng;
 
-pub const SHARE_MAGIC: &[u8; 9] = b"HOLOSHAR1";
+/// Current `.holoshare` magic. B8: v2 bumped the `content_type` and
+/// `filename` length prefixes from `u8` to `u16` BE. `u8` silently
+/// truncated at ≥256 bytes (a 300-byte content_type wrote length=44,
+/// and the decoder then slurped the remaining 256 bytes as the start
+/// of the filename length prefix and everything after), producing a
+/// share the recovery path could not decode. No `HOLOSHAR1` backward
+/// compat because escrow was v1-dev-only — no shares in the wild.
+pub const SHARE_MAGIC: &[u8; 9] = b"HOLOSHAR2";
 
 /// Escrow split parameters.
 #[derive(Debug, Clone)]
@@ -89,10 +96,10 @@ impl ShareFile {
         out.extend_from_slice(&self.total_k.to_be_bytes());
         out.extend_from_slice(&self.real_len.to_be_bytes());
         let ct = self.content_type.as_bytes();
-        out.push(ct.len() as u8);
+        out.extend_from_slice(&(ct.len() as u16).to_be_bytes());
         out.extend_from_slice(ct);
         let fn_b = self.filename.as_bytes();
-        out.push(fn_b.len() as u8);
+        out.extend_from_slice(&(fn_b.len() as u16).to_be_bytes());
         out.extend_from_slice(fn_b);
         out.extend_from_slice(&(self.coeffs.len() as u16).to_be_bytes());
         out.extend_from_slice(&self.coeffs);
@@ -132,16 +139,16 @@ impl ShareFile {
         need(p, 8)?;
         let real_len = u64::from_be_bytes(bytes[p..p + 8].try_into().unwrap());
         p += 8;
-        need(p, 1)?;
-        let ctn = bytes[p] as usize;
-        p += 1;
+        need(p, 2)?;
+        let ctn = u16::from_be_bytes([bytes[p], bytes[p + 1]]) as usize;
+        p += 2;
         need(p, ctn)?;
         let content_type =
             String::from_utf8(bytes[p..p + ctn].to_vec()).map_err(|e| format!("ct: {e}"))?;
         p += ctn;
-        need(p, 1)?;
-        let fnn = bytes[p] as usize;
-        p += 1;
+        need(p, 2)?;
+        let fnn = u16::from_be_bytes([bytes[p], bytes[p + 1]]) as usize;
+        p += 2;
         need(p, fnn)?;
         let filename =
             String::from_utf8(bytes[p..p + fnn].to_vec()).map_err(|e| format!("filename: {e}"))?;
@@ -460,5 +467,35 @@ mod tests {
         // Different data → different escrow_id.
         let c = split_into_shares(b"different data", &params);
         assert_ne!(a[0].escrow_id, c[0].escrow_id);
+    }
+
+    /// B8 regression: a filename longer than 255 bytes used to
+    /// silently truncate the on-disk length prefix (which was `u8`),
+    /// leaving the parser to interpret filename bytes as the next
+    /// length field. Encode/decode round-trip must now survive
+    /// arbitrarily long content_type + filename up to `u16::MAX`
+    /// bytes each.
+    #[test]
+    fn share_encode_decode_handles_long_names() {
+        let long_ct = "application/x-".to_string() + &"a".repeat(400);
+        let long_fn = "very-".repeat(60) + "secret.bin"; // ~310 bytes
+        let sh = ShareFile {
+            escrow_id: [42u8; 16],
+            shard_idx: 7,
+            total_n: 5,
+            total_k: 3,
+            real_len: 1234,
+            content_type: long_ct.clone(),
+            filename: long_fn.clone(),
+            coeffs: vec![1u8, 2, 3, 4],
+            payload: vec![0xAAu8, 0xBB, 0xCC],
+        };
+        let bytes = sh.encode();
+        let back = ShareFile::decode(&bytes).expect("round-trip must succeed");
+        assert_eq!(back.content_type, long_ct);
+        assert_eq!(back.filename, long_fn);
+        assert_eq!(back.shard_idx, 7);
+        assert_eq!(back.coeffs, sh.coeffs);
+        assert_eq!(back.payload, sh.payload);
     }
 }

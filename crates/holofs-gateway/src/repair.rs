@@ -97,7 +97,7 @@ impl Gateway {
         &self,
         name: &str,
         max_layer: u8,
-    ) -> Result<(Vec<Vec<f32>>, u64), ClientError> {
+    ) -> Result<(u32, u32, Vec<Vec<f32>>, u64), ClientError> {
         use holofs_model::manifest::ObjectEncoding;
         let live = self.effective_live().await;
         let manifest = {
@@ -106,6 +106,16 @@ impl Gateway {
                 ClientError::RemoteError(format!("decode_with_autorepair: {name} not in catalog"))
             })?
         };
+        // v2 P1.5 (decode size race): grab the dimensions from THIS
+        // snapshot so a concurrent restore_version / PUT-replace
+        // can't leave the caller with `(width, height)` from an old
+        // manifest and `channels` from a new one — that mismatch
+        // used to panic inside `to_rgb` on the outer encode step.
+        // Auto-repair only rewrites `shard_hashes`, not
+        // dimensions, so returning the initial (w, h) stays valid
+        // through the retry path.
+        let dim_w = manifest.width;
+        let dim_h = manifest.height;
         // Fork on encoding: RLNC uses gather+decode with an
         // auto-repair retry on LayerLost. Replicated uses the
         // block-fetch decoder — auto-repair for it lives at
@@ -129,7 +139,7 @@ impl Gateway {
                 })
                 .collect();
             match get_object_blocks(&manifest, &live, &all_ids).await {
-                Ok(v) => return Ok(v),
+                Ok((ch, b)) => return Ok((dim_w, dim_h, ch, b)),
                 Err(ClientError::LayerLost { channel, layer }) => {
                     if self.auto_repair_cooldown_hit(name).await {
                         return Err(ClientError::LayerLost { channel, layer });
@@ -157,7 +167,7 @@ impl Gateway {
                         })?
                     };
                     return match get_object_blocks(&repaired, &live, &all_ids).await {
-                        Ok(v) => Ok(v),
+                        Ok((ch, b)) => Ok((dim_w, dim_h, ch, b)),
                         Err(e) => {
                             self.metrics.auto_repair_failures_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -169,7 +179,7 @@ impl Gateway {
             }
         }
         match get_object_up_to_layer(&self.gf, &manifest, &live, max_layer).await {
-            Ok(v) => Ok(v),
+            Ok((ch, b)) => Ok((dim_w, dim_h, ch, b)),
             Err(ClientError::LayerLost { channel, layer }) => {
                 // B7: the Replicated branch above already gates on the
                 // per-name cooldown, but the default RLNC path here
@@ -209,7 +219,7 @@ impl Gateway {
                     })?
                 };
                 match get_object_up_to_layer(&self.gf, &repaired, &live, max_layer).await {
-                    Ok(v) => Ok(v),
+                    Ok((ch, b)) => Ok((dim_w, dim_h, ch, b)),
                     Err(e) => {
                         self.metrics.auto_repair_failures_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

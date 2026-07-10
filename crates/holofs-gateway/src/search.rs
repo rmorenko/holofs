@@ -201,7 +201,7 @@ impl Gateway {
                 continue;
             }
 
-            let (channels, _bytes_dl) = self
+            let (_, _, channels, _bytes_dl) = self
                 .decode_with_autorepair(name, max_layer)
                 .await
                 .map_err(|e| GatewayError::Decode(format!("embed decode: {e}")))?;

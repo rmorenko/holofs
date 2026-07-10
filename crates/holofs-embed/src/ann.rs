@@ -150,6 +150,15 @@ impl HnswIndex {
         query: &[f32],
         k: usize,
     ) -> Vec<SearchHit> {
+        // v2 P1.7: degenerate `k = 0` used to return one hit anyway
+        // because the "already have enough" check ran AFTER the
+        // push. Short-circuit here so the callsite gets the empty
+        // result it asked for.
+        if k == 0 {
+            let _ = recs;
+            let _ = band;
+            return Vec::new();
+        }
         let q = EmbVec(query.to_vec());
         let mut search = Search::default();
         // Pull a few more than `k` so post-dedup we can still return a

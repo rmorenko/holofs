@@ -373,7 +373,23 @@ impl Gateway {
         let t0 = Instant::now();
         let (mut manifest, _kind_str, total_shards) = match self.put_any(name, body, &live).await {
             Ok(v) => v,
-            Err((e, _partial)) => return Err(GatewayError::BadRequest(e)),
+            Err((e, partial)) => {
+                // B11 (v2 completion): if put_any managed to fan out
+                // some shards before failing, purge them under the
+                // REAL `object_id` (data_cid-derived, in the partial
+                // manifest) instead of leaking them until the next
+                // `/api/gc`. The async encoder already did this; the
+                // sync path used to just discard `partial`.
+                if let Some(m) = partial {
+                    if let Err(pe) = holofs_client::purge_object(&m, &live).await {
+                        eprintln!(
+                            "PUT {name}: best-effort purge after put failure hit an error \
+                             (will settle at /api/gc): {pe:?}"
+                        );
+                    }
+                }
+                return Err(GatewayError::BadRequest(e));
+            }
         };
         // stamp the manifest with creation time so the
         // tree view can sort by date.

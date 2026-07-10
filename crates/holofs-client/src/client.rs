@@ -933,13 +933,22 @@ pub async fn get_object_blocks(
                 // Walk replicas in HRW order — first hit wins.
                 let mut fetched: Option<Shard> = None;
                 for node in &replicas {
+                    // B4 (v2 completion): every other raw
+                    // `manifest.nodes[..]` in this crate is already
+                    // `.get(..)`-guarded; this Replicated-audit
+                    // callsite is the one v2 flagged. A monitor
+                    // tick racing an in-progress add_node could hand
+                    // an index past `manifest.nodes.len()` here too.
+                    let Some(addr) = manifest.nodes.get(*node) else {
+                        continue;
+                    };
                     let req = Request::Audit {
                         object_id: manifest.object_id,
                         channel: c as u8,
                         layer: l as u8,
                         shard_hash: expected_hash,
                     };
-                    match rpc(&manifest.nodes[*node], req).await {
+                    match rpc(addr, req).await {
                         Ok(Response::AuditResp { shard: Some(s) })
                             if shard_hash(&s) == expected_hash =>
                         {
@@ -1494,8 +1503,14 @@ pub async fn repair_node(
     let mut stats = RepairStats::default();
 
     // Clear storage on the node being replaced.
+    let replacement_addr = manifest.nodes.get(replacement).ok_or_else(|| {
+        ClientError::RemoteError(format!(
+            "repair_node: replacement index {replacement} outside manifest.nodes (len={})",
+            manifest.nodes.len()
+        ))
+    })?;
     match rpc(
-        &manifest.nodes[replacement],
+        replacement_addr,
         Request::Purge {
             object_id: manifest.object_id,
         },
@@ -1581,7 +1596,7 @@ pub async fn repair_node(
                 let h = shard_hash(&shard);
                 manifest.shard_hashes[c as usize][l as usize].push(h);
                 match rpc(
-                    &manifest.nodes[replacement],
+                    replacement_addr,
                     Request::Put {
                         object_id: manifest.object_id,
                         channel: c,
@@ -1669,12 +1684,19 @@ pub async fn repair_node_replicated(
             ))
         }
     };
+    let replacement_addr = manifest.nodes.get(replacement).ok_or_else(|| {
+        ClientError::RemoteError(format!(
+            "repair_node_replicated: replacement index {replacement} outside \
+             manifest.nodes (len={})",
+            manifest.nodes.len()
+        ))
+    })?;
     let mut stats = RepairStats::default();
     // Purge the replacement's object bucket first — clears any
     // stale shards from a previous incarnation (matches the RLNC
     // repair's Purge step). Idempotent on a fresh node.
     match rpc(
-        &manifest.nodes[replacement],
+        replacement_addr,
         Request::Purge {
             object_id: manifest.object_id,
         },
@@ -1754,7 +1776,7 @@ pub async fn repair_node_replicated(
                     layer: l,
                     shard,
                 };
-                match rpc(&manifest.nodes[replacement], put_req).await? {
+                match rpc(replacement_addr, put_req).await? {
                     Response::Ack => {
                         stats.shards_generated += 1;
                         layer_touched = true;

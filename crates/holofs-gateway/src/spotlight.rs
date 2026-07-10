@@ -85,13 +85,16 @@ impl Gateway {
         let max_layer = manifest.nlayers.saturating_sub(1);
 
         // Coarse pass (L0). Cheap — typically a tenth of the bytes of
-        // the full decode.
-        let (lo_channels, lo_bytes) = self
+        // the full decode. `decode_with_autorepair` returns (w, h)
+        // of the manifest it snapshot'd; we ignore them here since
+        // the outer `manifest` in this scope is a stable snapshot
+        // for the whole spotlight pass and provides the same dims.
+        let (_, _, lo_channels, lo_bytes) = self
             .decode_with_autorepair(name, 0)
             .await
             .map_err(|e| GatewayError::Decode(format!("spotlight L0: {e}")))?;
         // Full pass.
-        let (hi_channels, hi_bytes) = self
+        let (_, _, hi_channels, hi_bytes) = self
             .decode_with_autorepair(name, max_layer)
             .await
             .map_err(|e| GatewayError::Decode(format!("spotlight full: {e}")))?;

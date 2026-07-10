@@ -45,13 +45,36 @@ pub fn data_cid(channels: &[Vec<f32>], w: usize, h: usize, levels: u8, k: u16) -
     s.finalize()
 }
 
-/// Root of a binary Merkle tree. On odd count the last hash is duplicated
-/// (CV-style padding). Empty set → zero root.
+/// Root of a binary Merkle tree, second-preimage-hardened.
+///
+/// v2 P1.6 (CVE-2012-2459 class): the prior implementation left
+/// `root([A,B,C]) == root([A,B,C,C])` — duplication of the trailing
+/// odd leaf collided the two distinct leaf sets. That's a
+/// tree-shape ambiguity: an attacker who knew a valid `(A,B,C)`
+/// set could exhibit a padded `(A,B,C,C)` set with the same root
+/// and pass it off as authentic.
+///
+/// Two defences applied together:
+///
+/// 1. **Domain-separate leaves from interior nodes.** Every leaf is
+///    wrapped with a `TAG_LEAF` prefix before entering the tree.
+///    A raw shard hash on the wire (which lives in the plain leaf
+///    domain) can no longer collide with an interior-node hash
+///    (which lives in the `TAG_MERKLE` domain — see `hash_pair`).
+///
+/// 2. **Bind the leaf count into the root.** After the tree is
+///    reduced to a single hash, we finalise `root ← SHA256(TAG_ROOT
+///    || leaf_count_be || tree_root)`. Two leaf sets of different
+///    length produce two different roots even before the tree walk
+///    starts, so the `(A,B,C)` vs `(A,B,C,C)` collision above is
+///    impossible.
+///
+/// Empty set → zero root.
 pub fn merkle_root(leaves: &[Hash]) -> Hash {
     if leaves.is_empty() {
         return [0u8; HASH_LEN];
     }
-    let mut level: Vec<Hash> = leaves.to_vec();
+    let mut level: Vec<Hash> = leaves.iter().map(hash_leaf).collect();
     while level.len() > 1 {
         let mut next = Vec::with_capacity((level.len() + 1) / 2);
         let mut i = 0;
@@ -66,7 +89,22 @@ pub fn merkle_root(leaves: &[Hash]) -> Hash {
         }
         level = next;
     }
-    level[0]
+    // Mix leaf count into the root — see docstring #2.
+    let mut buf = Vec::with_capacity(TAG_ROOT.len() + 8 + HASH_LEN);
+    buf.extend_from_slice(TAG_ROOT);
+    buf.extend_from_slice(&(leaves.len() as u64).to_be_bytes());
+    buf.extend_from_slice(&level[0]);
+    sha256(&buf)
+}
+
+const TAG_LEAF: &[u8] = b"holofs-merkle-leaf-v1\0";
+const TAG_ROOT: &[u8] = b"holofs-merkle-root-v1\0";
+
+fn hash_leaf(leaf: &Hash) -> Hash {
+    let mut buf = Vec::with_capacity(TAG_LEAF.len() + HASH_LEN);
+    buf.extend_from_slice(TAG_LEAF);
+    buf.extend_from_slice(leaf);
+    sha256(&buf)
 }
 
 fn hash_pair(a: &Hash, b: &Hash) -> Hash {
@@ -142,16 +180,28 @@ mod tests {
     }
 
     #[test]
-    fn merkle_root_single_leaf_is_itself() {
+    fn merkle_root_single_leaf_is_deterministic() {
+        // Post-P1.6: root is no longer identity even at a single
+        // leaf (leaf-domain tag + leaf-count mix). We only require
+        // that it's stable across calls and non-zero for a
+        // non-zero leaf.
         let leaf = [7u8; HASH_LEN];
-        assert_eq!(merkle_root(&[leaf]), leaf);
+        let r = merkle_root(&[leaf]);
+        assert_eq!(r, merkle_root(&[leaf]));
+        assert_ne!(r, [0u8; HASH_LEN]);
     }
 
     #[test]
-    fn merkle_root_two_leaves() {
+    fn merkle_root_two_leaves_is_deterministic() {
+        // Post-P1.6: no longer equal to `hash_pair(a, b)` because
+        // leaves get domain-tagged and the root is finalised with
+        // the leaf count. Stability + non-collision with the
+        // single-leaf case is what we check.
         let a = [1u8; HASH_LEN];
         let b = [2u8; HASH_LEN];
-        assert_eq!(merkle_root(&[a, b]), hash_pair(&a, &b));
+        let r = merkle_root(&[a, b]);
+        assert_eq!(r, merkle_root(&[a, b]));
+        assert_ne!(r, merkle_root(&[a]));
     }
 
     #[test]
@@ -169,5 +219,29 @@ mod tests {
         let leaves: Vec<Hash> = (0..5u8).map(|i| [i; HASH_LEN]).collect();
         // does not panic and is stable
         assert_eq!(merkle_root(&leaves), merkle_root(&leaves));
+    }
+
+    /// P1.6 regression (CVE-2012-2459 class): a set with the trailing
+    /// leaf duplicated must NOT collide with the original. Prior to
+    /// TAG_LEAF + leaf-count mixing, `root([A,B,C]) == root([A,B,C,C])`
+    /// because the odd-count padding rule internally duplicated the
+    /// tail anyway.
+    #[test]
+    fn merkle_root_rejects_odd_leaf_duplication() {
+        let three: Vec<Hash> = (0..3u8).map(|i| [i; HASH_LEN]).collect();
+        let mut four = three.clone();
+        four.push(three[2]); // duplicate the odd-tail leaf
+        assert_ne!(merkle_root(&three), merkle_root(&four));
+    }
+
+    /// P1.6 regression: leaf count is mixed into the root, so two
+    /// distinct-length sets with the same left-projection give
+    /// distinct roots.
+    #[test]
+    fn merkle_root_binds_leaf_count() {
+        let short: Vec<Hash> = (0..2u8).map(|i| [i; HASH_LEN]).collect();
+        let mut long = short.clone();
+        long.push([0u8; HASH_LEN]); // append a zero leaf
+        assert_ne!(merkle_root(&short), merkle_root(&long));
     }
 }

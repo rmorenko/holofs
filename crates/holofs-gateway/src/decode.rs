@@ -70,18 +70,16 @@ impl Gateway {
                 return Some(Arc::clone(c));
             }
         }
-        // The catalog snapshot + live set are taken inside
-        // `decode_with_autorepair`; this branch only needs the
-        // post-decode width/height (which doesn't change across
-        // auto-repair since `repair_node` only rewrites
-        // `shard_hashes`, not dimensions).
-        let (width, height) = {
-            let cat = self.catalog.read().await;
-            let m = cat.get(name)?;
-            (m.width, m.height)
-        };
+        // v2 P1.5: `decode_with_autorepair` now returns the
+        // dimensions from the same manifest snapshot it decoded
+        // from. Previously we read (width, height) from a fresh
+        // catalog lookup here, which could disagree with the
+        // manifest that decode_with_autorepair snapshot'd
+        // *afterwards* — a concurrent restore_version between the
+        // two reads left `encode_png(channels_new, width_old,
+        // height_old)` panicking inside `to_rgb`.
         let t0 = Instant::now();
-        let (channels, bytes) = self
+        let (width, height, channels, bytes) = self
             .decode_with_autorepair(name, max_layer)
             .await
             .ok()?;
