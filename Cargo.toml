@@ -17,6 +17,10 @@ members = [
   "crates/holofs-e2e",
   "crates/holofs-testutils",
 ]
+# Fuzz harnesses live outside the workspace so `cargo build/test`
+# don't pick up `libfuzzer-sys` (which needs nightly + LLVM's fuzzer
+# runtime) on a normal build. See `fuzz/README.md`.
+exclude = [ "fuzz" ]
 
 [workspace.package]
 version = "1.0.0"
