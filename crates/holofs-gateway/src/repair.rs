@@ -25,6 +25,15 @@ use holofs_model::placement::{place_replicas, ShardKey};
 use crate::error::GatewayError;
 use crate::Gateway;
 
+/// How long to wait between auto-repair attempts on the same
+/// object. If a decode fails on X, we run one repair pass and
+/// suppress further repair attempts for X within this window —
+/// even under a hot GET loop that keeps hitting the same broken
+/// name. Bounded so hot objects don't monopolise the shared node
+/// HTTP pool; long enough that a legitimately-broken layer gets
+/// one honest recovery try.
+const AUTO_REPAIR_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Returns `true` when a `repair_object_inplace` error is the
 /// concurrent-DELETE race — the object legitimately vanished from
 /// the catalog between the decode failure that triggered the repair
@@ -36,6 +45,30 @@ fn is_object_gone(e: &ClientError) -> bool {
         e,
         ClientError::RemoteError(msg) if msg.contains("not in catalog")
     )
+}
+
+impl Gateway {
+    /// `true` if an auto-repair attempt for `name` fired within
+    /// [`AUTO_REPAIR_COOLDOWN`] and the caller should short-circuit
+    /// the repair. Records the current instant when the caller is
+    /// permitted to proceed so the next call within the window
+    /// hits the cooldown.
+    async fn auto_repair_cooldown_hit(&self, name: &str) -> bool {
+        let now = std::time::Instant::now();
+        let mut guard = self.auto_repair_cooldown.lock().await;
+        // Piggy-back a lightweight garbage-collect: purge entries
+        // older than 2 × cooldown so a soak-shaped churn doesn't
+        // leak entries for deleted names indefinitely.
+        let horizon = AUTO_REPAIR_COOLDOWN * 2;
+        guard.retain(|_, at| now.duration_since(*at) < horizon);
+        if let Some(at) = guard.get(name) {
+            if now.duration_since(*at) < AUTO_REPAIR_COOLDOWN {
+                return true;
+            }
+        }
+        guard.insert(name.to_string(), now);
+        false
+    }
 }
 
 impl Gateway {
@@ -98,6 +131,9 @@ impl Gateway {
             match get_object_blocks(&manifest, &live, &all_ids).await {
                 Ok(v) => return Ok(v),
                 Err(ClientError::LayerLost { channel, layer }) => {
+                    if self.auto_repair_cooldown_hit(name).await {
+                        return Err(ClientError::LayerLost { channel, layer });
+                    }
                     self.auto_repairs_total
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Err(e) = self.repair_object_inplace(name).await {

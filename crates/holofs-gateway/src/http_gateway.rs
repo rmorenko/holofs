@@ -192,6 +192,23 @@ pub struct Gateway {
     /// harmless clutter). No invalidation logic needed.
     pub(crate) fingerprint_cache:
         Mutex<HashMap<u64, holofs_analytics::fingerprint::Fingerprint>>,
+    /// Cooldown table for auto-repair: `object_name → last_attempt`.
+    /// `decode_with_autorepair` skips firing another `repair_node`
+    /// pass on a name whose entry here is younger than
+    /// [`AUTO_REPAIR_COOLDOWN`], returning the original `LayerLost`
+    /// error to the caller immediately.
+    ///
+    /// Without this a soak-shaped read workload that hits a
+    /// transient LayerLost on the same hot object N times in a
+    /// row fires N full repair passes, each doing K shard-encode
+    /// RPCs per node. On the July 2026 soak that showed up as
+    /// 385 `auto_repair` attempts in 3 min sharing a small set
+    /// of names, saturating the shared node HTTP pool and causing
+    /// unrelated GET requests to time out at the transport layer
+    /// (24 % of `get_random`). One retry per name per cooldown
+    /// window is enough to heal a real hole while keeping the
+    /// gateway responsive.
+    pub(crate) auto_repair_cooldown: Mutex<HashMap<String, std::time::Instant>>,
     /// Auto-repair-on-read counters. Bumped from
     /// `decode_with_autorepair` when the first decode attempt
     /// hits `ClientError::LayerLost` and the retry path kicks in.
@@ -338,6 +355,7 @@ impl Gateway {
             shard_cache: Mutex::new(HashMap::new()),
             escrow_cache: Mutex::new(HashMap::new()),
             fingerprint_cache: Mutex::new(HashMap::new()),
+            auto_repair_cooldown: Mutex::new(HashMap::new()),
             auto_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             auto_repair_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scrub_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -394,6 +412,7 @@ impl Gateway {
             shard_cache: Mutex::new(HashMap::new()),
             escrow_cache: Mutex::new(HashMap::new()),
             fingerprint_cache: Mutex::new(HashMap::new()),
+            auto_repair_cooldown: Mutex::new(HashMap::new()),
             auto_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             auto_repair_failures_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             scrub_repairs_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
