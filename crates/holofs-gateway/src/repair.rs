@@ -171,6 +171,16 @@ impl Gateway {
         match get_object_up_to_layer(&self.gf, &manifest, &live, max_layer).await {
             Ok(v) => Ok(v),
             Err(ClientError::LayerLost { channel, layer }) => {
+                // B7: the Replicated branch above already gates on the
+                // per-name cooldown, but the default RLNC path here
+                // used to fire `repair_object_inplace` on every GET
+                // for the same permanently-degraded object — a
+                // repair-storm that monopolised node HTTP pools.
+                // Consult the same cooldown here so both encodings
+                // are equally protected.
+                if self.auto_repair_cooldown_hit(name).await {
+                    return Err(ClientError::LayerLost { channel, layer });
+                }
                 self.auto_repairs_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 eprintln!(

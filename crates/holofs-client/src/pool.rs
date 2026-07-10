@@ -112,6 +112,20 @@ pub async fn acquire(addr: &str) -> io::Result<Pooled> {
     Ok(Pooled::new(addr.to_string(), stream, false))
 }
 
+/// Acquire a freshly-dialed connection, bypassing the idle pool.
+/// Used on the [`rpc`] retry path (B12): the first attempt may have
+/// failed on a stale keepalive socket the OS hadn't yet reaped, and
+/// `pop_fresh` would happily hand out the next idle sibling from the
+/// same LIFO queue — very likely equally dead. Freshly dialing on
+/// the retry breaks that streak.
+pub async fn acquire_fresh(addr: &str) -> io::Result<Pooled> {
+    let stream = transport::connect(addr).await?;
+    if disabled() {
+        return Ok(Pooled::detached(addr.to_string(), stream));
+    }
+    Ok(Pooled::new(addr.to_string(), stream, false))
+}
+
 fn pop_fresh(addr: &str) -> Option<TransportStream> {
     let ttl = idle_ttl();
     let now = Instant::now();

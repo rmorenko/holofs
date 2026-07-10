@@ -133,13 +133,27 @@ async fn rpc(addr: &str, req: Request) -> io::Result<Response> {
         // before the second attempt, OR the second attempt gets a
         // fresh socket (pooled stream was poisoned on the timeout
         // path) and reaches a different ephemeral port quickly.
-        Err(e) if is_likely_transient(&e) => rpc_attempt(addr, &encoded).await,
+        Err(e) if is_likely_transient(&e) => rpc_attempt_fresh(addr, &encoded).await,
         Err(e) => Err(e),
     }
 }
 
 async fn rpc_attempt(addr: &str, encoded_req: &[u8]) -> io::Result<Response> {
     let mut s = pool::acquire(addr).await?;
+    let response = rpc_over_stream(&mut s, addr, encoded_req).await;
+    if response.is_ok() {
+        s.mark_clean();
+    }
+    response
+}
+
+/// Retry path: dial a fresh connection instead of grabbing the next
+/// idle sibling from the pool. Without this the LIFO queue would hand
+/// out another same-vintage keepalive socket that is probably in the
+/// same "peer dead but OS hasn't reaped it yet" state as the one that
+/// just failed, causing spurious back-to-back errors.
+async fn rpc_attempt_fresh(addr: &str, encoded_req: &[u8]) -> io::Result<Response> {
+    let mut s = pool::acquire_fresh(addr).await?;
     let response = rpc_over_stream(&mut s, addr, encoded_req).await;
     // Only a fully-decoded response on a clean frame boundary is
     // safe to recycle. `pool::Pooled` defaults to "discard on
@@ -535,15 +549,15 @@ pub async fn put_object_replicated_blocks(
             // the 512×512 PUT under the MEDIUM-bucket timeout
             //sequential dispatch made
             // large clusters + Replicated encoding 504 out).
-            let dispatches = batches.into_iter().map(|(node, shards)| {
-                let addr = manifest.nodes[node].clone();
+            let dispatches = batches.into_iter().filter_map(|(node, shards)| {
+                let addr = manifest.nodes.get(node)?.clone();
                 let req = Request::PutBatch {
                     object_id: manifest.object_id,
                     channel: c as u8,
                     layer: l as u8,
                     shards,
                 };
-                async move { rpc(&addr, req).await }
+                Some(async move { rpc(&addr, req).await })
             });
             for result in futures_util::future::join_all(dispatches).await {
                 match result? {
@@ -1363,12 +1377,19 @@ pub async fn gather_layer(
 ) -> Result<Vec<Shard>, ClientError> {
     let mut acc = Vec::new();
     for &node in live {
+        // Manifests written when the cluster had fewer nodes carry a
+        // shorter `manifest.nodes` — `add_node` extends existing
+        // manifests but a monitor tick can race that mutation. Skip
+        // out-of-range indices instead of panicking on a raw index.
+        let Some(addr) = manifest.nodes.get(node) else {
+            continue;
+        };
         let req = Request::Get {
             object_id: manifest.object_id,
             channel,
             layer,
         };
-        match rpc(&manifest.nodes[node], req).await? {
+        match rpc(addr, req).await? {
             Response::Shards(mut v) => acc.append(&mut v),
             Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
             other => {
@@ -1458,12 +1479,15 @@ pub async fn repair_node(
                 live.iter().copied().filter(|&n| n != replacement).collect();
             let mut donors: Vec<Shard> = Vec::new();
             for &node in &live_others {
+                let Some(addr) = manifest.nodes.get(node) else {
+                    continue;
+                };
                 let req = Request::Get {
                     object_id: manifest.object_id,
                     channel: c,
                     layer: l,
                 };
-                match rpc(&manifest.nodes[node], req).await? {
+                match rpc(addr, req).await? {
                     Response::Shards(v) => {
                         for s in v {
                             if expected.contains(&shard_hash(&s)) {
@@ -1645,13 +1669,16 @@ pub async fn repair_node_replicated(
                 }
                 let mut fetched: Option<Shard> = None;
                 for &node in &sources {
+                    let Some(addr) = manifest.nodes.get(node) else {
+                        continue;
+                    };
                     let req = Request::Audit {
                         object_id: manifest.object_id,
                         channel: c,
                         layer: l,
                         shard_hash: expected_hash,
                     };
-                    match rpc(&manifest.nodes[node], req).await {
+                    match rpc(addr, req).await {
                         Ok(Response::AuditResp { shard: Some(s) })
                             if shard_hash(&s) == expected_hash =>
                         {
@@ -1702,10 +1729,13 @@ pub async fn repair_node_replicated(
 /// the Purge; the first refusal yields Err.
 pub async fn purge_object(manifest: &Manifest, live: &LiveNodes) -> Result<(), ClientError> {
     for &node in live {
+        let Some(addr) = manifest.nodes.get(node) else {
+            continue;
+        };
         let req = Request::Purge {
             object_id: manifest.object_id,
         };
-        match rpc(&manifest.nodes[node], req).await? {
+        match rpc(addr, req).await? {
             Response::Ack => {}
             Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
             other => {

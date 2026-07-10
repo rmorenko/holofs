@@ -273,16 +273,36 @@ pub async fn run_periodic(
         if shutdown.is_cancelled() {
             return;
         }
+        // Guard against a heterogeneous-catalog panic inside tick_once
+        // — before B4 an object whose `nodes.len()` disagreed with the
+        // first entry's could crash the tick body and kill the whole
+        // periodic loop (the supervisor would restart it, but the
+        // caller lost visibility on the drop). Now one bad sample
+        // just costs one tick.
+        use futures_util::FutureExt;
+        let tick_fut = std::panic::AssertUnwindSafe(tick_once(
+            &gf,
+            Arc::clone(&catalog),
+            &mut state,
+            &config,
+            &mut rng,
+            reputation.clone(),
+        ))
+        .catch_unwind();
         let events = tokio::select! {
             _ = shutdown.cancelled() => return,
-            evs = tick_once(
-                &gf,
-                Arc::clone(&catalog),
-                &mut state,
-                &config,
-                &mut rng,
-                reputation.clone(),
-            ) => evs,
+            res = tick_fut => match res {
+                Ok(evs) => evs,
+                Err(payload) => {
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("<opaque panic payload>");
+                    eprintln!("monitor::tick_once panicked (dropped one sample): {msg}");
+                    Vec::new()
+                }
+            },
         };
         for e in &events {
             on_event(e);

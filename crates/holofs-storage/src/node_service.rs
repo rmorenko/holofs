@@ -788,14 +788,22 @@ async fn spawn_node_with_identity(
     // 5 ms is a compromise: shorter tightens the tail latency
     // (each handler waits ≤ 5 ms for its fsync) at the cost of
     // more idle wakeups; longer batches more but stalls callers.
-    // Tune via `HOLOFS_NODE_FLUSH_INTERVAL_MS` — 0 disables the
-    // flusher entirely, which reverts to the old per-Put fsync
-    // path via `Store::put`.
+    // Tune via `HOLOFS_NODE_FLUSH_INTERVAL_MS` — minimum 1 ms.
+    //
+    // B3: the previous docstring advertised `0` as "disable the
+    // flusher; revert to per-Put fsync via `Store::put`", but the
+    // handler always went through `put_appended` +
+    // `wait_for_wal_seq` — with no flusher publishing
+    // `wal_synced_seq`, every persistent-store `Put` hung forever.
+    // Silently clamping to 1 ms is the least-surprising behaviour:
+    // it matches the doc's stated goal (aggressive per-tick
+    // batching) without breaking the handler contract.
     let flush_interval_ms: u64 = std::env::var("HOLOFS_NODE_FLUSH_INTERVAL_MS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(5);
-    if flush_interval_ms > 0 {
+        .unwrap_or(5)
+        .max(1);
+    {
         let store_for_flusher = store.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_millis(

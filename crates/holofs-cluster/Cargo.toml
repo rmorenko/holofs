@@ -15,6 +15,7 @@ holofs-storage.workspace = true
 holofs-client.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+futures-util = { workspace = true, features = [ "alloc" ] }
 
 [dev-dependencies]
 holofs-testutils.workspace = true

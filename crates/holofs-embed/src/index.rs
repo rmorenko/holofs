@@ -79,8 +79,57 @@ impl Index {
                     "bad magic: expected {MAGIC:?}, got {buf:?}"
                 )));
             }
+            drop(f);
+            // B13: truncate any partial record trailing the last
+            // clean one. `IndexIter` already tolerates a torn tail
+            // on read (it stops iteration on short reads), but
+            // `append` writes at the current file end — which
+            // includes those corrupt bytes. The next reader then
+            // sees them anew each time. Rewinding to the last
+            // clean boundary means one bad byte stays quarantined
+            // to at most one restart.
+            Self::truncate_torn_tail(&path)?;
         }
         Ok(Self { path })
+    }
+
+    /// Scan records from the start; find the byte offset of the last
+    /// successfully-parsed record's end, and truncate the file to
+    /// that offset. Called from [`Self::open`] so subsequent
+    /// [`Self::append`] calls never write on top of stale garbage.
+    fn truncate_torn_tail(path: &Path) -> Result<(), EmbedError> {
+        let f = File::open(path)?;
+        let file_len = f.metadata()?.len();
+        let mut it = IndexIter {
+            r: BufReader::new(f),
+        };
+        // Skip magic.
+        let mut magic = [0u8; 8];
+        it.r.read_exact(&mut magic)?;
+        let mut last_clean: u64 = 8;
+        let display = path.display().to_string();
+        loop {
+            let pos = it.r.stream_position()?;
+            match it.next() {
+                Some(Ok(_)) => {
+                    last_clean = it.r.stream_position()?;
+                }
+                Some(Err(e)) => {
+                    eprintln!(
+                        "Index::open: {display}: dropping corrupt tail starting at offset {pos}: {e}"
+                    );
+                    break;
+                }
+                None => break,
+            }
+        }
+        drop(it);
+        if last_clean < file_len {
+            let f = OpenOptions::new().write(true).open(path)?;
+            f.set_len(last_clean)?;
+            f.sync_all()?;
+        }
+        Ok(())
     }
 
     /// Path the index lives at — useful for logging / health output.
@@ -448,10 +497,12 @@ mod tests {
         assert_eq!(idx.path(), t.path());
     }
 
+    /// B13: after `open` sees a corrupt record it truncates the tail
+    /// so the index is left in a self-consistent state (subsequent
+    /// `append` writes on clean bytes). Here the corrupt record is
+    /// the whole file → index becomes empty.
     #[test]
-    fn iter_on_corrupt_band_byte_returns_error() {
-        // Hand-craft an index file: valid magic + one record header
-        // with a deliberately bogus band discriminant.
+    fn open_truncates_corrupt_band_byte() {
         let t = TempPath::new("corruptband");
         let mut buf = Vec::new();
         buf.extend_from_slice(b"HOLOFEM1");
@@ -465,7 +516,42 @@ mod tests {
         }
         std::fs::write(t.path(), &buf).unwrap();
         let idx = Index::open(t.path()).unwrap();
-        let first = idx.iter().unwrap().next().unwrap();
-        assert!(matches!(first, Err(EmbedError::Corrupt(_))));
+        // Corrupt record was truncated → empty index.
+        assert_eq!(idx.len().unwrap(), 0);
+    }
+
+    /// B13: torn tail *after* one good record — the good record must
+    /// survive, the trailing garbage must be gone. Before B13 the
+    /// next append would land on top of the garbage and every
+    /// subsequent iter would either surface the garbage as Err or
+    /// silently skip beyond it, producing a mixed-in ghost record.
+    #[test]
+    fn open_preserves_good_record_and_drops_torn_tail() {
+        let t = TempPath::new("goodplustorn");
+        let idx = Index::open(t.path()).unwrap();
+        let good = EmbedRecord {
+            data_cid: [7u8; 32],
+            band: LayerBand::Coarse,
+            name: "keeper".into(),
+            vec: vec![0.5; EMBED_DIM],
+        };
+        idx.append(&good).unwrap();
+        drop(idx);
+        // Simulate a torn append: 33 bytes of half-record garbage.
+        {
+            let mut f = OpenOptions::new().append(true).open(t.path()).unwrap();
+            f.write_all(&[0xEEu8; 33]).unwrap();
+        }
+        let file_len_before = std::fs::metadata(t.path()).unwrap().len();
+        let idx = Index::open(t.path()).unwrap();
+        let file_len_after = std::fs::metadata(t.path()).unwrap().len();
+        assert!(
+            file_len_after < file_len_before,
+            "expected torn tail dropped: before={file_len_before}, after={file_len_after}"
+        );
+        assert_eq!(idx.len().unwrap(), 1);
+        let recs: Vec<_> = idx.iter().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].name, "keeper");
     }
 }

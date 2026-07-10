@@ -65,20 +65,24 @@ pub struct IngestResult {
 impl Gateway {
     /// Universal PUT: tries image → audio → text → opaque. Returns the
     /// finished Manifest (with shards already distributed), the kind
-    /// label, and the total shard count.
+    /// label, and the total shard count. On failure the mutated
+    /// manifest (if any) is surfaced in the error tuple's second slot
+    /// so best-effort shard cleanup can use the *real*, data_cid-
+    /// derived `object_id` instead of the placeholder that used to
+    /// leak orphan shards until the next `/api/gc` (B11).
     pub(crate) async fn put_any(
         &self,
         name: &str,
         body: &[u8],
         live: &LiveNodes,
-    ) -> Result<(Manifest, &'static str, u32), String> {
+    ) -> Result<(Manifest, &'static str, u32), (String, Option<Manifest>)> {
         // 1. Image — the most common case, try first.
         if let Ok(arr) = load_photo_from_bytes(body, self.cluster.width, self.cluster.height) {
             let channels = vec![arr[0].clone(), arr[1].clone(), arr[2].clone()];
             let mut m = self.blank_manifest();
-            put_object(&self.gf, &mut m, live, &channels)
-                .await
-                .map_err(|e| format!("put image: {e}"))?;
+            if let Err(e) = put_object(&self.gf, &mut m, live, &channels).await {
+                return Err((format!("put image: {e}"), Some(m)));
+            }
             let total: u32 = m.n_per_layer.iter().sum::<u32>() * m.channels as u32;
             return Ok((m, "image", total));
         }
@@ -90,10 +94,12 @@ impl Gateway {
                     audio.n_channels(),
                     audio.sample_count as usize,
                 )
-                .map_err(|e| format!("audio manifest: {e}"))?;
-            holofs_client::put_audio_object(&self.gf, &mut m, live, &audio.channels)
-                .await
-                .map_err(|e| format!("put audio: {e}"))?;
+                .map_err(|e| (format!("audio manifest: {e}"), None))?;
+            if let Err(e) =
+                holofs_client::put_audio_object(&self.gf, &mut m, live, &audio.channels).await
+            {
+                return Err((format!("put audio: {e}"), Some(m)));
+            }
             let total: u32 = m.n_per_layer.iter().sum::<u32>() * m.channels as u32;
             return Ok((m, "audio", total));
         }
@@ -101,18 +107,18 @@ impl Gateway {
         if let Ok(text) = std::str::from_utf8(body) {
             let ct = guess_text_content_type(name);
             let mut m = self.blank_text_manifest(ct);
-            holofs_client::put_text_object(&self.gf, &mut m, live, text)
-                .await
-                .map_err(|e| format!("put text: {e}"))?;
+            if let Err(e) = holofs_client::put_text_object(&self.gf, &mut m, live, text).await {
+                return Err((format!("put text: {e}"), Some(m)));
+            }
             let total = m.n_per_layer[0];
             return Ok((m, "text", total));
         }
         // 4. Opaque blob — last fallback. PDF, DOCX, ZIP, EXE, etc.
         let ct = guess_opaque_content_type(name);
         let mut m = self.blank_opaque_manifest(ct);
-        holofs_client::put_opaque_object(&self.gf, &mut m, live, body)
-            .await
-            .map_err(|e| format!("put opaque: {e}"))?;
+        if let Err(e) = holofs_client::put_opaque_object(&self.gf, &mut m, live, body).await {
+            return Err((format!("put opaque: {e}"), Some(m)));
+        }
         let total = m.n_per_layer[0];
         Ok((m, "opaque", total))
     }
@@ -365,10 +371,10 @@ impl Gateway {
             }
         }
         let t0 = Instant::now();
-        let (mut manifest, _kind_str, total_shards) = self
-            .put_any(name, body, &live)
-            .await
-            .map_err(GatewayError::BadRequest)?;
+        let (mut manifest, _kind_str, total_shards) = match self.put_any(name, body, &live).await {
+            Ok(v) => v,
+            Err((e, _partial)) => return Err(GatewayError::BadRequest(e)),
+        };
         // stamp the manifest with creation time so the
         // tree view can sort by date.
         manifest.created_at_unix = now_unix();
@@ -378,10 +384,29 @@ impl Gateway {
         let kind = manifest.kind;
         let width = manifest.width;
         let height = manifest.height;
-        self.catalog
-            .write()
-            .await
-            .insert(name.to_string(), manifest);
+        // B10 CAS: the pre-check under read-lock at :309 saw an empty
+        // slot or a non-directory. Between then and now a mkdir or
+        // parallel PUT could have taken the slot; commit only if the
+        // invariant still holds. On conflict purge the shards we
+        // already dispatched — otherwise they become orphans until
+        // /api/gc.
+        {
+            let mut cat = self.catalog.write().await;
+            if let Some(existing) = cat.get(name) {
+                if existing.kind == ObjectKind::Directory {
+                    drop(cat);
+                    if let Err(e) =
+                        self.purge_orphans_of(&manifest, &live, Some(name)).await
+                    {
+                        eprintln!(
+                            "PUT {name}: TOCTOU conflict purge failed (will settle at /api/gc): {e}"
+                        );
+                    }
+                    return Err(GatewayError::AlreadyExists);
+                }
+            }
+            cat.insert(name.to_string(), manifest);
+        }
         self.invalidate_cache(name).await;
         self.persist_catalog().await?;
         Ok(IngestResult {
@@ -720,8 +745,18 @@ impl Gateway {
             .expect("encode permit semaphore closed");
 
         let live = self.effective_live().await;
-        let result = if live.is_empty() {
-            Err("cluster has no live nodes at worker time".to_string())
+        // Result carries either the finished manifest (Ok) or a
+        // best-effort partial manifest (Err) whose `object_id` /
+        // `nodes` reflect what actually landed on the cluster. B11:
+        // the cleanup path used to purge under the placeholder id
+        // (zero), which never matched the shards fanned out under
+        // the real data_cid-derived id — they stayed as orphans
+        // until /api/gc.
+        let result: Result<(Manifest, u32), (String, Option<Manifest>)> = if live.is_empty() {
+            Err((
+                "cluster has no live nodes at worker time".to_string(),
+                None,
+            ))
         } else {
             self.put_any(&name, &body, &live)
                 .await
@@ -746,14 +781,8 @@ impl Gateway {
                     self.embed_object_in_background(name.clone());
                 }
             }
-            Err(err) => {
+            Err((err, partial)) => {
                 eprintln!("PUT-async {name}: encode failed: {err}");
-                // Snapshot the placeholder's object_id + nodes list
-                // BEFORE we drop the catalog guard — best-effort
-                // Purge below needs both, and the state flip has to
-                // happen atomically with catalog read to avoid a
-                // concurrent PUT of the same name racing us.
-                let placeholder = cat.get(&name).cloned();
                 if let Some(m) = cat.get_mut(&name) {
                     if m.state == ManifestState::Encoding {
                         m.state = ManifestState::Failed;
@@ -765,13 +794,12 @@ impl Gateway {
                 self.encode_failed_total.fetch_add(1, Ordering::Relaxed);
 
                 // Best-effort shard cleanup: fire `Purge { object_id }`
-                // at every live node. Every shard the failed encode
-                // dispatched keys off the same `object_id`, so the
-                // node-side handler will drop them all. Runs sequentially
-                // and swallows every error — this is a cleanup pass, a
-                // failure here just means /api/gc will pick the residue
-                // up later.
-                if let Some(m) = placeholder {
+                // at every live node using the REAL manifest surfaced
+                // by `put_any` (has the data_cid-derived object_id).
+                // Falling back to a fresh live-set: put_any's fanout
+                // may have failed because the original `live` moved
+                // under us, so re-fetch before the purge.
+                if let Some(m) = partial {
                     let live = self.effective_live().await;
                     if !live.is_empty() {
                         if let Err(e) = holofs_client::purge_object(&m, &live).await {

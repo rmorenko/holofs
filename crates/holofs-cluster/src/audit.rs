@@ -164,12 +164,19 @@ pub async fn tick_once(
         return events;
     }
 
-    let live_all: Vec<usize> = (0..snapshot[0].1.nodes.len()).collect();
-
     for _ in 0..config.samples_per_tick {
         // Pick a random object.
         let obj_idx = (rng.next() as usize) % snapshot.len();
         let (name, manifest) = &snapshot[obj_idx];
+
+        // Per-object live_all. Previously derived from `snapshot[0]`,
+        // which panicked on a heterogeneous catalog: sampling an
+        // object with more nodes than the first entry meant
+        // `place_shard(..., &live_all)` returned an index that then
+        // overran `manifest.nodes[node]`. `add_node` and mixed
+        // encoding (Opaque with a different N) make heterogeneity
+        // reachable, so `live_all` must track the *sampled* object.
+        let live_all: Vec<usize> = (0..manifest.nodes.len()).collect();
 
         // Random (channel, layer) with at least one shard.
         let c = (rng.next() as usize) % manifest.channels as usize;
@@ -187,16 +194,24 @@ pub async fn tick_once(
         // that case `place_shard` points to the "canonical" node, and audit
         // there may return Missing — a normal outcome reflecting shard movement.
         let shard_idx = h_idx as u32;
-        // `live_all` is the index space of `manifest.nodes`, which is
-        // guaranteed non-empty by the snapshot filter above. The Ok
-        // branch is the only realistic outcome here; if it ever fires
-        // we skip this audit sample rather than panic.
+        // `live_all` is the index space of THIS manifest's
+        // `manifest.nodes`, guaranteed non-empty by the snapshot
+        // filter above. `place_shard` errs only when the live set is
+        // empty (unreachable here); if that ever fires we skip this
+        // audit sample rather than panic.
         let Ok(node) = manifest.place_shard(c as u8, l as u8, shard_idx, &live_all) else {
+            continue;
+        };
+        // Belt-and-braces: if `place_shard` returns an index outside
+        // this manifest's `nodes` (should never happen — `live_all`
+        // is exactly `0..nodes.len()`), silently skip rather than
+        // panic on the indexing.
+        let Some(node_addr) = manifest.nodes.get(node) else {
             continue;
         };
 
         let outcome = audit_shard(
-            &manifest.nodes[node],
+            node_addr,
             manifest.object_id,
             c as u8,
             l as u8,
@@ -263,14 +278,30 @@ pub async fn run_periodic(
         if shutdown.is_cancelled() {
             return;
         }
+        // Same panic-guard as the monitor loop — a bad sample must
+        // not kill the periodic auditor (B4).
+        use futures_util::FutureExt;
+        let tick_fut = std::panic::AssertUnwindSafe(tick_once(
+            Arc::clone(&catalog),
+            Arc::clone(&reputation),
+            &config,
+            &mut rng,
+        ))
+        .catch_unwind();
         let events = tokio::select! {
             _ = shutdown.cancelled() => return,
-            evs = tick_once(
-                Arc::clone(&catalog),
-                Arc::clone(&reputation),
-                &config,
-                &mut rng,
-            ) => evs,
+            res = tick_fut => match res {
+                Ok(evs) => evs,
+                Err(payload) => {
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("<opaque panic payload>");
+                    eprintln!("audit::tick_once panicked (dropped one sample): {msg}");
+                    Vec::new()
+                }
+            },
         };
         for e in &events {
             on_event(e);

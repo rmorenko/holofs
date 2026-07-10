@@ -1812,6 +1812,7 @@ dependencies = [
 name = "holofs-cluster"
 version = "1.0.0"
 dependencies = [
+ "futures-util",
  "holofs-client",
  "holofs-core",
  "holofs-model",
