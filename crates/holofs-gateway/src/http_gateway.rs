@@ -67,11 +67,15 @@ pub const DEFAULT_MEDIUM_CONCURRENCY: usize = 64;
 
 /// N3: default LONG-bucket concurrency. `semantic_search` +
 /// `similar_to` + `spotlight` each walk the catalog and dispatch
-/// N-shard fetches; running more than a handful in parallel just
-/// serialises them on the shared shard cache and dropbox. 8 is a
-/// reasonable ceiling for the dev cluster; production deployments
-/// tune it via `HOLOFS_LONG_CONCURRENCY`.
-pub const DEFAULT_LONG_CONCURRENCY: usize = 8;
+/// N-shard fetches; running more than a handful in parallel used to
+/// serialise them on the shared shard cache and dropbox. Raised from
+/// 8 to 24 after Stage-2 `gather_layer`/`get_object_up_to_layer`
+/// parallelisation cut the per-request node time roughly 3×: the
+/// 50-worker soak turned that headroom into 60 %+ backpressure
+/// rejects on spotlight/similar/search (all 503 with `ms=0`). Bumping
+/// to 24 tracks the new throughput budget while leaving room for
+/// production overrides via `HOLOFS_LONG_CONCURRENCY`.
+pub const DEFAULT_LONG_CONCURRENCY: usize = 24;
 
 /// Async-ingest encode-worker concurrency cap. RLNC over GF(2⁸) is
 /// pure CPU; oversubscribing by 5× (which is what happens when

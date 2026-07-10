@@ -593,7 +593,7 @@ pub async fn get_object_up_to_layer(
     live: &LiveNodes,
     max_layer: u8,
 ) -> Result<(Vec<Vec<f32>>, u64), ClientError> {
-    use futures_util::future::try_join_all;
+    use futures_util::stream::StreamExt;
 
     let w = manifest.width as usize;
     let h = manifest.height as usize;
@@ -601,24 +601,37 @@ pub async fn get_object_up_to_layer(
     let nlayers = manifest.nlayers as usize;
     let channels = manifest.channels as usize;
 
-    // Fan out every (channel, layer) fetch at once. Combined with the
-    // parallel `gather_layer` (fan-out across nodes), this collapses
-    // the pre-fix `O(C·L·N)` sequential RTT into a single ~max-RTT
-    // hop — the biggest single win on the GET path per the review's
-    // 3a bottleneck analysis.
-    let mut fetches = Vec::with_capacity(channels * nlayers);
+    // Fan out (channel, layer) fetches — combined with the parallel
+    // `gather_layer` (per-node fan-out) this collapses the pre-fix
+    // O(C·L·N) sequential RTT into a small number of ~max-RTT hops.
+    //
+    // Concurrency cap: unbounded `try_join_all` blew up total in-flight
+    // RPCs to `C·L·N` per GET (RGB × 7 layers × 8 nodes = 168 per
+    // request). Under 50 workers that saturated the connection pool
+    // and the LONG backpressure semaphore, sending the 3-min soak
+    // error rate from 9.8 % to 20 % on 503 rejects. Capping at 4
+    // in-flight (channel, layer) fetches at a time still hides most
+    // network latency (each fetch itself parallelises over N nodes
+    // internally) without stampeding the pool.
+    const CL_INFLIGHT: usize = 4;
+
+    let mut targets: Vec<(usize, usize)> = Vec::with_capacity(channels * nlayers);
     for c in 0..channels {
         for l in 0..nlayers {
-            if (l as u8) > max_layer {
-                continue;
+            if (l as u8) <= max_layer {
+                targets.push((c, l));
             }
-            fetches.push(async move {
-                let raw = gather_layer(manifest, live, c as u8, l as u8).await?;
-                Ok::<(usize, usize, Vec<Shard>), ClientError>((c, l, raw))
-            });
         }
     }
-    let fetched = try_join_all(fetches).await?;
+    let mut fetch_stream = futures_util::stream::iter(targets.into_iter().map(|(c, l)| async move {
+        let raw = gather_layer(manifest, live, c as u8, l as u8).await?;
+        Ok::<(usize, usize, Vec<Shard>), ClientError>((c, l, raw))
+    }))
+    .buffer_unordered(CL_INFLIGHT);
+    let mut fetched: Vec<(usize, usize, Vec<Shard>)> = Vec::new();
+    while let Some(res) = fetch_stream.next().await {
+        fetched.push(res?);
+    }
 
     // CPU chunk stays sequential — decode + IDWT are CPU-bound and
     // running them in parallel wouldn't help on the single tokio
