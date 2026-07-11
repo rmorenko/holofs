@@ -192,4 +192,30 @@ mod tests {
             assert_eq!(gf.inv(gf.inv(a)), a, "a = {a}");
         }
     }
+
+    #[test]
+    fn mul_table_matches_scalar_mul_for_every_scalar() {
+        // v3-10 correctness gate: the precomputed 256-byte table used
+        // on the RLNC encode hot path must be pointwise identical to
+        // per-byte `Gf::mul`. If they ever drift, encoded shards would
+        // decode into garbage — silently, since the outer Merkle root
+        // is checked against the encoded stream, not the source.
+        let gf = Gf::new();
+        for a in 0u8..=255 {
+            let t = gf.mul_table(a);
+            for b in 0u8..=255 {
+                assert_eq!(t[b as usize], gf.mul(a, b), "a={a} b={b}");
+            }
+        }
+    }
+
+    #[test]
+    fn mul_table_zero_scalar_is_all_zeros() {
+        // Sanity: mul_table(0) must be the all-zero table (0 · x = 0).
+        // Guarded by the early `if a == 0 { return t }` branch — this
+        // test locks that behaviour in so a future "optimisation" that
+        // deletes the branch can't slip past review.
+        let gf = Gf::new();
+        assert_eq!(gf.mul_table(0), [0u8; 256]);
+    }
 }

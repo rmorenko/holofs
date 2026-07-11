@@ -223,10 +223,12 @@ impl Manifest {
     ///
     /// v2 P4.1: single source of truth for the image manifest
     /// layout. Prior to this the same shape was inlined in
-    /// `Gateway::blank_manifest` (ingest.rs) *and* the seed helper
-    /// `holofs_web::bootstrap::put_named` — a canonical maintenance
-    /// trap that the review flagged for dedup. The factory lives on
-    /// `Manifest` itself so both call sites now share it.
+    /// `Gateway::blank_manifest` (ingest.rs) *and* the CLI /
+    /// bootstrap seed helpers — a canonical maintenance trap that
+    /// the review flagged for dedup. The factory lives on `Manifest`
+    /// itself so every call site (gateway ingest, CLI `holofs-fs`)
+    /// shares it; the bootstrap seed path was retired in v3-11 in
+    /// favour of `Gateway::ingest_bytes`.
     ///
     /// - `w`, `h`: source image dimensions in pixels. Must be
     ///   multiples of `2^LEVELS`; asserted by DWT downstream, not here.

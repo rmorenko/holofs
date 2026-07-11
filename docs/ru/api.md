@@ -508,21 +508,24 @@ signature     64 bytes Ed25519
               подписывает ("holofs-whitelist-v1" || всё-до-подписи)
 ```
 
-### 3.5. Holoshare (`HOLOSHAR1`)
+### 3.5. Holoshare (`HOLOSHAR2`)
 
 Одна escrow-доля. Escrow **не хранится в кластере**; этот файл
-предназначен для распространения людям / устройствам.
+предназначен для распространения людям / устройствам. `HOLOSHAR2`
+расширяет префиксы длины `content_type` и `filename` с `u8` до
+`u16 BE`, чтобы длинные MIME-строки и имена файлов больше не
+обрезались молча на границе ≥256 байт.
 
 ```
-magic           9 bytes = "HOLOSHAR1"
+magic           9 bytes = "HOLOSHAR2"
 escrow_id       16 bytes (первые 16 SHA-256 над исходными данными)
 shard_idx       u16 BE
 total_n         u16 BE
 total_k         u16 BE
 real_len        u64 BE (длина оригинального файла в байтах)
-content_type_n  1 byte
+content_type_n  u16 BE
 content_type    content_type_n bytes UTF-8
-filename_n      1 byte
+filename_n      u16 BE
 filename        filename_n bytes UTF-8
 coeffs_len      u16 BE = total_k
 coeffs          coeffs_len bytes

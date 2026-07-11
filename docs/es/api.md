@@ -517,21 +517,24 @@ signature     64 bytes Ed25519
               signs ("holofs-whitelist-v1" || everything-above-the-signature)
 ```
 
-### 3.5. Holoshare (`HOLOSHAR1`)
+### 3.5. Holoshare (`HOLOSHAR2`)
 
 Una parte de escrow. El escrow **no se almacena en el clúster**; este
 archivo está pensado para distribución a humanos / dispositivos.
+`HOLOSHAR2` amplía los prefijos de longitud de `content_type` y
+`filename` de `u8` a `u16 BE`, para que las cadenas MIME y los nombres
+de archivo largos ya no se trunquen silenciosamente en ≥256 bytes.
 
 ```
-magic           9 bytes = "HOLOSHAR1"
+magic           9 bytes = "HOLOSHAR2"
 escrow_id       16 bytes (first 16 of SHA-256 over the source data)
 shard_idx       u16 BE
 total_n         u16 BE
 total_k         u16 BE
 real_len        u64 BE (length of the original file in bytes)
-content_type_n  1 byte
+content_type_n  u16 BE
 content_type    content_type_n bytes UTF-8
-filename_n      1 byte
+filename_n      u16 BE
 filename        filename_n bytes UTF-8
 coeffs_len      u16 BE = total_k
 coeffs          coeffs_len bytes

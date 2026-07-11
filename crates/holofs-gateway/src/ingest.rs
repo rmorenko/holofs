@@ -244,11 +244,10 @@ impl Gateway {
         }
     }
 
-    /// Blank manifest for an image object. Width/height come from the cluster
-    /// Blank RGB image manifest. v2 P4.1 dedup: forwards to the
-    /// canonical `Manifest::blank_image` factory in `holofs-model`
-    /// so this gateway path and `holofs_web::bootstrap::put_named`
-    /// share one implementation.
+    /// Blank RGB image manifest. Width/height come from the cluster.
+    /// v2 P4.1 dedup: forwards to the canonical `Manifest::blank_image`
+    /// factory in `holofs-model` so this gateway path and every other
+    /// image-manifest constructor share one implementation.
     fn blank_manifest(&self) -> Manifest {
         Manifest::blank_image(
             self.cluster.width,

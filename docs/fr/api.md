@@ -521,22 +521,25 @@ signature     64 bytes Ed25519
               signs ("holofs-whitelist-v1" || everything-above-the-signature)
 ```
 
-### 3.5. Holoshare (`HOLOSHAR1`)
+### 3.5. Holoshare (`HOLOSHAR2`)
 
 Une part de séquestre. Le séquestre n'est **pas stocké sur le
 cluster** ; ce fichier est destiné à la distribution à des humains /
-appareils.
+appareils. `HOLOSHAR2` élargit les préfixes de longueur de
+`content_type` et `filename` de `u8` à `u16 BE`, afin que les chaînes
+MIME et noms de fichiers longs ne soient plus tronqués silencieusement
+au-delà de 256 octets.
 
 ```
-magic           9 bytes = "HOLOSHAR1"
+magic           9 bytes = "HOLOSHAR2"
 escrow_id       16 bytes (first 16 of SHA-256 over the source data)
 shard_idx       u16 BE
 total_n         u16 BE
 total_k         u16 BE
 real_len        u64 BE (length of the original file in bytes)
-content_type_n  1 byte
+content_type_n  u16 BE
 content_type    content_type_n bytes UTF-8
-filename_n      1 byte
+filename_n      u16 BE
 filename        filename_n bytes UTF-8
 coeffs_len      u16 BE = total_k
 coeffs          coeffs_len bytes
