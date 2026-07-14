@@ -59,6 +59,35 @@ pub struct RenameResult {
     pub moved_entries: usize,
 }
 
+/// Per-name outcome inside a [`Gateway::remove_objects_batch`] response.
+/// Success carries the removed object's `object_id` for symmetry with
+/// [`RemoveResult`]; every failure kind is a distinct `error` string so
+/// clients can dispatch on it without parsing.
+#[derive(Debug, Clone)]
+pub struct BatchDeleteOutcome {
+    pub name: String,
+    /// `Some` iff the entry was actually removed. `None` on any failure
+    /// (`error` populated).
+    pub object_id: Option<u64>,
+    /// One of: `"not_found"`, `"is_directory"`, `"bad_request: <detail>"`.
+    /// Empty on success.
+    pub error: String,
+}
+
+/// Aggregate result of [`Gateway::remove_objects_batch`]. `removed` +
+/// `errors.len()` equals the request's `names.len()`.
+#[derive(Debug, Clone, Default)]
+pub struct BatchDeleteResult {
+    /// Number of catalog entries actually removed.
+    pub removed: usize,
+    /// Per-name outcome, in request order.
+    pub outcomes: Vec<BatchDeleteOutcome>,
+    /// Number of shard hashes purged from the cluster (union across
+    /// every successfully-removed manifest, minus hashes still
+    /// referenced by other catalog entries or version archives).
+    pub orphan_shards_purged: usize,
+}
+
 impl Gateway {
     /// Remove a data object by catalog name. Returns `NotFound` if the
     /// entry is missing, `IsDirectory` if the entry is a directory in the
@@ -90,6 +119,181 @@ impl Gateway {
             name: name.to_string(),
             object_id: manifest.object_id,
         })
+    }
+
+    /// Delete N objects under a single catalog write-lock + single
+    /// `persist_catalog` fsync + single fanout PurgeByHash. Purpose:
+    /// bulk cleanup (test drain, admin sweep). Per-name remove is
+    /// still `remove_object` — the batch semantics are only about
+    /// amortising the expensive cluster-wide steps.
+    ///
+    /// The `holofs-stability` 25 k-object drain used to take ~2.5 h
+    /// via per-object DELETE; the batch path plus the v4 reverse
+    /// index in `Directory::orphan_hashes` reduces that to seconds.
+    ///
+    /// Per-name failures (not-found, is-directory, invalid path) are
+    /// reported in `outcomes` — the batch does not abort on one bad
+    /// name. Any cluster-side error during the shared purge is
+    /// surfaced through the return value (best-effort semantics: the
+    /// catalog change already committed, so failure means shards
+    /// leak until the next `/api/gc`).
+    pub async fn remove_objects_batch(
+        &self,
+        names: &[String],
+    ) -> Result<BatchDeleteResult, GatewayError> {
+        use std::collections::HashSet;
+
+        let mut result = BatchDeleteResult {
+            removed: 0,
+            outcomes: Vec::with_capacity(names.len()),
+            orphan_shards_purged: 0,
+        };
+        // Collect the removed manifests so we can compute the union of
+        // orphan candidates after we've released the write-lock.
+        let mut removed_manifests: Vec<Manifest> = Vec::new();
+        {
+            let mut cat = self.catalog.write().await;
+            for name in names {
+                if let Err(e) = catalog_path::validate(name) {
+                    result.outcomes.push(BatchDeleteOutcome {
+                        name: name.clone(),
+                        object_id: None,
+                        error: format!("bad_request: {e}"),
+                    });
+                    continue;
+                }
+                match cat.get(name).map(|m| m.kind) {
+                    None => {
+                        result.outcomes.push(BatchDeleteOutcome {
+                            name: name.clone(),
+                            object_id: None,
+                            error: "not_found".into(),
+                        });
+                    }
+                    Some(ObjectKind::Directory) => {
+                        result.outcomes.push(BatchDeleteOutcome {
+                            name: name.clone(),
+                            object_id: None,
+                            error: "is_directory".into(),
+                        });
+                    }
+                    Some(_) => {
+                        let m = cat.remove(name).expect("checked present above");
+                        result.outcomes.push(BatchDeleteOutcome {
+                            name: name.clone(),
+                            object_id: Some(m.object_id),
+                            error: String::new(),
+                        });
+                        result.removed += 1;
+                        removed_manifests.push(m);
+                    }
+                }
+            }
+        }
+        // Invalidate cached decodes for every removed name. Cheap —
+        // Mutex per name, no cluster I/O.
+        for outcome in &result.outcomes {
+            if outcome.error.is_empty() {
+                self.invalidate_cache(&outcome.name).await;
+            }
+        }
+        // ONE catalog fsync for the entire batch. The persist ticket
+        // coalesces callers so overlapping single-DELETEs would already
+        // share an fsync, but the batch skips even the ticket dance.
+        self.persist_catalog().await?;
+
+        if removed_manifests.is_empty() {
+            return Ok(result);
+        }
+        // Union every removed manifest's shard hashes and ask the
+        // catalog's reverse index which are now orphans. Same
+        // `exclude_name = None` semantics as `remove_object` (the
+        // catalog no longer contains any of these entries).
+        let mut candidate_hashes: HashSet<[u8; 32]> = HashSet::new();
+        for m in &removed_manifests {
+            for chan in &m.shard_hashes {
+                for per_l in chan {
+                    for h in per_l {
+                        candidate_hashes.insert(*h);
+                    }
+                }
+            }
+        }
+        if candidate_hashes.is_empty() {
+            return Ok(result);
+        }
+        let live = self.effective_live().await;
+        let orphans_from_catalog: Vec<[u8; 32]> = {
+            let cat = self.catalog.read().await;
+            cat.orphan_hashes(candidate_hashes.iter(), None)
+        };
+        if orphans_from_catalog.is_empty() {
+            return Ok(result);
+        }
+        // Subtract hashes still referenced by version archives on disk.
+        let mut orphans: HashSet<[u8; 32]> = orphans_from_catalog.into_iter().collect();
+        let versions_dir = self
+            .versions
+            .lock()
+            .await
+            .root
+            .clone()
+            .map(|r| r.join("versions"));
+        if let Some(dir) = versions_dir {
+            if dir.exists() {
+                if let Ok(by_name) = std::fs::read_dir(&dir) {
+                    for name_entry in by_name.flatten() {
+                        let path = name_entry.path();
+                        if !path.is_dir() {
+                            continue;
+                        }
+                        if let Ok(versions) = std::fs::read_dir(&path) {
+                            for v_entry in versions.flatten() {
+                                let p = v_entry.path();
+                                if p.extension().and_then(|s| s.to_str()) != Some("bin") {
+                                    continue;
+                                }
+                                let bytes = match std::fs::read(&p) {
+                                    Ok(b) => b,
+                                    Err(_) => continue,
+                                };
+                                let m = match Manifest::decode(&bytes) {
+                                    Ok(m) => m,
+                                    Err(_) => continue,
+                                };
+                                for chan in &m.shard_hashes {
+                                    for per_l in chan {
+                                        for h in per_l {
+                                            orphans.remove(h);
+                                            if orphans.is_empty() {
+                                                return Ok(result);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if orphans.is_empty() {
+            return Ok(result);
+        }
+        // ONE fanout PurgeByHash for every live node. The prior per-
+        // object flow sent one RPC per node per DELETE — the batch
+        // ships every orphan hash in one round trip per node.
+        let orphan_vec: Vec<[u8; 32]> = orphans.into_iter().collect();
+        for &node_idx in &live {
+            let Some(addr) = self.cluster.node_addrs.get(node_idx).cloned() else {
+                continue;
+            };
+            if let Err(e) = holofs_client::purge_node_by_hash(&addr, orphan_vec.clone()).await {
+                eprintln!("remove_objects_batch: PurgeByHash on {addr}: {e}");
+            }
+        }
+        result.orphan_shards_purged = orphan_vec.len();
+        Ok(result)
     }
 
     /// Create a `Directory` entry at `path`. The parent (if any) must

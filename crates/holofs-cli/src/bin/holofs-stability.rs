@@ -1545,28 +1545,58 @@ async fn drain(state: Arc<State>, workers: usize) -> Result<()> {
     let start_owned = state.owned.read().await.len();
     let start_dirs = state.dirs.read().await.len();
     eprintln!(
-        "[stability] phase 3: draining {} objects + {} dirs + {} images with {} workers",
+        "[stability] phase 3: draining {} objects + {} dirs + {} images (batch delete via POST /api/batch/delete)",
         start_owned,
         start_dirs,
         state.image_names.len(),
-        workers
     );
-    let mut handles = Vec::new();
-    for _ in 0..workers {
+    // v4: bulk delete via `POST /api/batch/delete` — the per-object
+    // DELETE path used to take ~2.5 h to drain 25 k objects (each
+    // trigger a full-catalog O(N) scan inside `purge_orphans_of`).
+    // The batch endpoint drops the whole set under one catalog write-
+    // lock, one persist_catalog fsync, and one fanout PurgeByHash.
+    //
+    // Chunk size caps the write-lock hold at ~1 s per batch even on
+    // slow disks; the server hard-caps at 10 000 names.
+    const BATCH_CAP: usize = 1_000;
+    let all_names: Vec<String> = {
+        let mut owned = state.owned.write().await;
+        owned.drain().map(|(k, _)| k).collect()
+    };
+    let mut handles = Vec::with_capacity(workers.min(1).max(1));
+    // Split the name list into `workers` interleaved chunks so we
+    // still get parallel HTTP round-trips against the gateway.
+    let chunks: Vec<Vec<String>> = {
+        let mut buckets: Vec<Vec<String>> = (0..workers).map(|_| Vec::new()).collect();
+        for (i, name) in all_names.into_iter().enumerate() {
+            buckets[i % workers].push(name);
+        }
+        buckets
+    };
+    for chunk in chunks {
+        if chunk.is_empty() {
+            continue;
+        }
         let state = Arc::clone(&state);
         handles.push(tokio::spawn(async move {
-            loop {
-                let obj = {
-                    let mut owned = state.owned.write().await;
-                    if owned.is_empty() {
-                        break;
+            for slice in chunk.chunks(BATCH_CAP) {
+                let url = format!("{}/api/batch/delete", state.base);
+                let body = serde_json::json!({"names": slice});
+                let resp = state.client.post(&url).json(&body).send().await;
+                match resp {
+                    Ok(r) => {
+                        let status = r.status().as_u16();
+                        if status == 200 {
+                            if let Ok(v) = r.json::<serde_json::Value>().await {
+                                let removed = v.get("removed").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                                state.counters.delete.fetch_add(removed, Ordering::Relaxed);
+                            }
+                        } else {
+                            eprintln!("[stability] drain: batch_delete → HTTP {status}");
+                        }
                     }
-                    let key = owned.keys().next().cloned().unwrap();
-                    owned.remove(&key)
-                };
-                let Some(obj) = obj else { break };
-                let _ = delete_object(&state, &obj.name).await;
-                state.counters.delete.fetch_add(1, Ordering::Relaxed);
+                    Err(e) => eprintln!("[stability] drain: batch_delete transport ({e})"),
+                }
             }
         }));
     }
@@ -1584,9 +1614,11 @@ async fn drain(state: Arc<State>, workers: usize) -> Result<()> {
     for d in dirs {
         let _ = state.client.delete(format!("{}/api/rmdir/{}", state.base, d)).send().await;
     }
-    // Drop the image pool too.
-    for name in &state.image_names {
-        let _ = delete_object(&state, name).await;
+    // Drop the image pool via the same batch endpoint if there is one.
+    if !state.image_names.is_empty() {
+        let url = format!("{}/api/batch/delete", state.base);
+        let body = serde_json::json!({"names": state.image_names});
+        let _ = state.client.post(&url).json(&body).send().await;
     }
     Ok(())
 }

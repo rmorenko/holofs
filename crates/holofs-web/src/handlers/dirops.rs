@@ -24,8 +24,8 @@ use holofs_gateway::Gateway;
 
 use super::response::{mkdir_to_response, rename_to_response, rmdir_to_response};
 use super::util::{
-    bad_request, error_to_response, is_valid_put_name, parse_urlencoded_field,
-    pick_return_to, redirect_to,
+    bad_request, bad_request_owned, error_to_response, is_valid_put_name,
+    parse_urlencoded_field, pick_return_to, redirect_to,
 };
 
 /// `POST /api/mkdir/*path` — create a `Directory` marker at `path`.
@@ -168,6 +168,73 @@ pub async fn mv(
     }
     match gw.rename(&from, &to).await {
         Ok(res) => rename_to_response(res),
+        Err(e) => error_to_response(e),
+    }
+}
+
+/// `POST /api/batch/delete` — bulk delete under one catalog write-lock,
+/// one persist-catalog fsync, one fanout `PurgeByHash` per node.
+///
+/// Body: JSON `{"names": ["a", "b/c.txt", ...]}` (max 10 000 names).
+///
+/// Response: JSON
+/// ```json
+/// {
+///   "removed": 987,
+///   "orphan_shards_purged": 23568,
+///   "outcomes": [
+///     {"name": "a", "object_id": 123, "error": ""},
+///     {"name": "missing", "object_id": null, "error": "not_found"},
+///     ...
+///   ]
+/// }
+/// ```
+///
+/// Per-name failures are reported inside `outcomes` — the whole batch
+/// only fails on persist-catalog / cluster-side errors that would
+/// leave the catalog inconsistent.
+pub async fn batch_delete(
+    Extension(gw): Extension<Arc<Gateway>>,
+    body: Bytes,
+) -> Response {
+    #[derive(serde::Deserialize)]
+    struct Req {
+        names: Vec<String>,
+    }
+    let req: Req = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return bad_request_owned(format!("invalid JSON body: {e}")),
+    };
+    // Cap so a runaway client can't hold the catalog write-lock for
+    // seconds on end. 10 k names is roughly a 5-second write-lock
+    // hold at typical prod-node latencies — long, but bounded.
+    const MAX_BATCH: usize = 10_000;
+    if req.names.len() > MAX_BATCH {
+        return bad_request_owned(format!(
+            "batch too large: {} names (max {MAX_BATCH})",
+            req.names.len()
+        ));
+    }
+    match gw.remove_objects_batch(&req.names).await {
+        Ok(res) => {
+            let body = serde_json::json!({
+                "removed": res.removed,
+                "orphan_shards_purged": res.orphan_shards_purged,
+                "outcomes": res.outcomes.iter().map(|o| {
+                    serde_json::json!({
+                        "name": o.name,
+                        "object_id": o.object_id,
+                        "error": o.error,
+                    })
+                }).collect::<Vec<_>>(),
+            });
+            let bytes = serde_json::to_vec(&body).expect("json encode");
+            axum::response::Response::builder()
+                .status(axum::http::StatusCode::OK)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(bytes))
+                .expect("build response")
+        }
         Err(e) => error_to_response(e),
     }
 }

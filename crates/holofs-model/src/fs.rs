@@ -12,11 +12,13 @@
 //! byte ranges of the PNG, layer depth is chosen by the route
 //! (`/preview/<name>` vs `/<name>`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+
+use holofs_core::merkle::Hash;
 
 use crate::manifest::{Manifest, ObjectKind};
 use crate::path as catalog_path;
@@ -42,10 +44,33 @@ const MAGIC: &[u8; 8] = b"HOLOFSD1";
 ///   uses `Arc::make_mut` — copy-on-write clones the inner
 ///   `Manifest` only when another reader (e.g. the persist snapshot)
 ///   is still holding a handle to the old value.
-#[derive(Default, Clone, Debug, PartialEq, Eq)]
+#[derive(Default, Clone, Debug)]
 pub struct Directory {
     pub entries: BTreeMap<String, Arc<Manifest>>,
+    /// v4 (batch-delete perf): reverse index `shard_hash → set of catalog
+    /// names that reference it`. Kept in sync by
+    /// [`Self::insert`] / [`Self::insert_arc`] / [`Self::remove`] and
+    /// rebuilt from `entries` after [`Self::decode`]. Never serialised —
+    /// deriving it on load costs O(N × shards) once but avoids a wire-
+    /// format bump.
+    ///
+    /// Consumers use [`Self::orphan_hashes`] instead of scanning
+    /// `entries` when deciding which shard hashes are safe to purge —
+    /// turning `Gateway::purge_orphans_of` from O(catalog × shards) per
+    /// call into O(shards) per call. That kills the O(N²) drain-25k
+    /// behaviour caught by `holofs-stability`.
+    shard_refs: HashMap<Hash, HashSet<String>>,
 }
+
+// The reverse index is derivable from `entries`, so hand-roll `PartialEq`
+// to only compare `entries`. Otherwise, two catalogs with identical
+// content but different HashMap iteration order would look unequal.
+impl PartialEq for Directory {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+impl Eq for Directory {}
 
 impl Directory {
     pub fn new() -> Self {
@@ -53,13 +78,22 @@ impl Directory {
     }
 
     pub fn insert(&mut self, name: String, manifest: Manifest) {
-        self.entries.insert(name, Arc::new(manifest));
+        self.insert_arc(name, Arc::new(manifest));
     }
 
     /// Insert an already-shared manifest. Used by mv-style paths that
     /// want to move an existing catalog entry to a new key without
     /// deep-cloning the manifest first.
+    ///
+    /// Keeps `shard_refs` in sync: if `name` was already taken, drop
+    /// the old manifest's references first; then add references from
+    /// every shard hash in the new manifest.
     pub fn insert_arc(&mut self, name: String, manifest: Arc<Manifest>) {
+        if let Some(prev) = self.entries.get(&name) {
+            let prev = Arc::clone(prev);
+            self.deindex(&name, &prev);
+        }
+        self.index(&name, &manifest);
         self.entries.insert(name, manifest);
     }
 
@@ -75,14 +109,90 @@ impl Directory {
     /// (a persist snapshot, an api_stats snapshot, etc.), the entry
     /// is cloned in place first so the outside snapshot stays
     /// consistent.
+    ///
+    /// **Warning:** mutating `shard_hashes` through this handle
+    /// bypasses `shard_refs` maintenance and leaves the index stale.
+    /// The gateway's mutation callers (`repair_node`, async-encode
+    /// failure path) either don't touch `shard_hashes` or perform a
+    /// full [`Self::insert`] afterwards; if a new caller needs to
+    /// mutate `shard_hashes` in place, `remove` + `insert` restores
+    /// the invariant.
     pub fn get_mut(&mut self, name: &str) -> Option<&mut Manifest> {
         self.entries.get_mut(name).map(Arc::make_mut)
     }
 
     pub fn remove(&mut self, name: &str) -> Option<Manifest> {
-        self.entries
-            .remove(name)
-            .map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|arc| (*arc).clone()))
+        let arc = self.entries.remove(name)?;
+        self.deindex(name, &arc);
+        Some(Arc::try_unwrap(arc).unwrap_or_else(|arc| (*arc).clone()))
+    }
+
+    // ---- reverse-index maintenance -----------------------------------
+
+    fn index(&mut self, name: &str, manifest: &Manifest) {
+        for chan in &manifest.shard_hashes {
+            for per_l in chan {
+                for h in per_l {
+                    self.shard_refs
+                        .entry(*h)
+                        .or_default()
+                        .insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    fn deindex(&mut self, name: &str, manifest: &Manifest) {
+        for chan in &manifest.shard_hashes {
+            for per_l in chan {
+                for h in per_l {
+                    if let Some(refs) = self.shard_refs.get_mut(h) {
+                        refs.remove(name);
+                        if refs.is_empty() {
+                            self.shard_refs.remove(h);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rebuild `shard_refs` from `entries`. Called after `decode`; also
+    /// useful as an escape hatch for anyone who bypassed the maintained
+    /// API (e.g. via `get_mut` mutating `shard_hashes`).
+    pub fn rebuild_shard_index(&mut self) {
+        self.shard_refs.clear();
+        let entries: Vec<(String, Arc<Manifest>)> = self
+            .entries
+            .iter()
+            .map(|(k, v)| (k.clone(), Arc::clone(v)))
+            .collect();
+        for (name, manifest) in entries {
+            self.index(&name, &manifest);
+        }
+    }
+
+    /// Return the subset of `candidate` hashes that no catalog entry
+    /// (other than `exclude_name`, if any) still references. O(hashes)
+    /// on the reverse index vs. the O(catalog × shards) full scan the
+    /// gateway's `purge_orphans_of` used before v4.
+    pub fn orphan_hashes<'a>(
+        &self,
+        candidate: impl IntoIterator<Item = &'a Hash>,
+        exclude_name: Option<&str>,
+    ) -> Vec<Hash> {
+        candidate
+            .into_iter()
+            .filter(|h| match self.shard_refs.get(*h) {
+                None => true,
+                Some(refs) if refs.is_empty() => true,
+                Some(refs) => match exclude_name {
+                    Some(exc) => refs.iter().all(|n| n == exc),
+                    None => false,
+                },
+            })
+            .copied()
+            .collect()
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -133,6 +243,9 @@ impl Directory {
             let object_id = u64::from_be_bytes(id);
             // created_at = 0 — these placeholders are synthesized for
             // legacy catalogs and we have no honest timestamp for them.
+            // Directory manifests carry no shards, so the reverse
+            // index has nothing to add — safe to write `entries`
+            // directly without going through `insert_arc`.
             self.entries
                 .insert(path, Arc::new(Manifest::directory(object_id, 0)));
         }
@@ -264,7 +377,12 @@ impl Directory {
             pos += mlen;
             entries.insert(name, Arc::new(manifest));
         }
-        Ok(Directory { entries })
+        // shard_refs is derivable — build it once from the loaded
+        // entries so `orphan_hashes` works from boot without a
+        // wire-format bump. O(N × avg_shards) — a one-time boot cost.
+        let mut dir = Directory { entries, shard_refs: HashMap::new() };
+        dir.rebuild_shard_index();
+        Ok(dir)
     }
 }
 
@@ -480,5 +598,123 @@ mod tests {
         assert_eq!(added, 0);
         // The hand-picked id must survive untouched.
         assert_eq!(d.get("photos").unwrap().object_id, 0xDEAD);
+    }
+
+    // ---- v4 reverse-index tests --------------------------------------
+
+    /// Build a manifest with known shard hashes so we can test the
+    /// reverse index directly. Shape: 1 channel × 1 layer (opaque-
+    /// style); `hashes` populates that slot.
+    fn manifest_with_hashes(seed: u8, hashes: &[[u8; 32]]) -> Manifest {
+        let mut m = fake_manifest(seed);
+        m.channels = 1;
+        m.nlayers = 1;
+        m.n_per_layer = vec![hashes.len() as u32];
+        m.sym_len = vec![64];
+        m.layer_positions = vec![Vec::new()];
+        m.shard_hashes = vec![vec![hashes.to_vec()]];
+        m
+    }
+
+    fn h(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    #[test]
+    fn shard_index_populated_on_insert() {
+        let mut d = Directory::new();
+        d.insert("a".into(), manifest_with_hashes(0, &[h(1), h(2), h(3)]));
+        // Orphan check must return all three hashes now that no other
+        // entry references them (from `a`'s point of view we exclude
+        // "a" so its own refs don't count).
+        let orphans = d.orphan_hashes(&[h(1), h(2), h(3)], Some("a"));
+        assert_eq!(orphans.len(), 3);
+    }
+
+    #[test]
+    fn shard_index_reflects_shared_hashes() {
+        let mut d = Directory::new();
+        d.insert("a".into(), manifest_with_hashes(0, &[h(1), h(2)]));
+        d.insert("b".into(), manifest_with_hashes(1, &[h(2), h(3)]));
+        // Removing `a`: h(1) becomes orphan, h(2) still held by `b`.
+        let orphans = d.orphan_hashes(&[h(1), h(2)], None);
+        // No exclude → h(2) has refs (b) → not orphan; h(1) has ref (a)
+        // → not orphan. Both still referenced.
+        assert_eq!(orphans, Vec::<[u8; 32]>::new());
+        // Simulating DELETE-of-a: caller removes first, then asks.
+        let removed = d.remove("a").unwrap();
+        let owned: Vec<[u8; 32]> = removed.shard_hashes[0][0].clone();
+        let orphans = d.orphan_hashes(owned.iter(), None);
+        assert_eq!(orphans, vec![h(1)]);
+    }
+
+    #[test]
+    fn shard_index_replace_swaps_refs() {
+        let mut d = Directory::new();
+        d.insert("a".into(), manifest_with_hashes(0, &[h(1), h(2)]));
+        // Overwrite `a` with different shard hashes.
+        d.insert("a".into(), manifest_with_hashes(1, &[h(3), h(4)]));
+        // h(1)/h(2) now unreferenced.
+        let orphans = d.orphan_hashes(&[h(1), h(2), h(3), h(4)], Some("a"));
+        // Exclude "a" so `a`'s new refs are ignored — all four look
+        // orphan from `a`'s frame of reference.
+        assert_eq!(orphans.len(), 4);
+        // Without excluding "a", h(3)/h(4) still ref'd, h(1)/h(2) not.
+        let orphans = d.orphan_hashes(&[h(1), h(2), h(3), h(4)], None);
+        assert_eq!(orphans, vec![h(1), h(2)]);
+    }
+
+    #[test]
+    fn shard_index_remove_drops_refs() {
+        let mut d = Directory::new();
+        d.insert("a".into(), manifest_with_hashes(0, &[h(1)]));
+        d.remove("a").unwrap();
+        let orphans = d.orphan_hashes(&[h(1)], None);
+        assert_eq!(orphans, vec![h(1)]);
+    }
+
+    #[test]
+    fn shard_index_rebuild_matches_incremental() {
+        // Build two identical catalogs — one via the maintained API,
+        // one via `entries.insert` + `rebuild_shard_index`. Their
+        // `orphan_hashes` outputs must agree for every candidate.
+        let mut a = Directory::new();
+        a.insert("x".into(), manifest_with_hashes(0, &[h(1), h(2)]));
+        a.insert("y".into(), manifest_with_hashes(1, &[h(2), h(3)]));
+
+        let mut b = Directory::new();
+        b.entries.insert(
+            "x".into(),
+            Arc::new(manifest_with_hashes(0, &[h(1), h(2)])),
+        );
+        b.entries.insert(
+            "y".into(),
+            Arc::new(manifest_with_hashes(1, &[h(2), h(3)])),
+        );
+        b.rebuild_shard_index();
+
+        for candidate in [h(1), h(2), h(3), h(9)] {
+            assert_eq!(
+                a.orphan_hashes([&candidate], None),
+                b.orphan_hashes([&candidate], None),
+                "candidate {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shard_index_survives_decode_roundtrip() {
+        // The wire format doesn't carry shard_refs; `decode` must
+        // rebuild it. Verify by triggering a DELETE-style orphan
+        // check on the decoded catalog.
+        let mut d = Directory::new();
+        d.insert("a".into(), manifest_with_hashes(0, &[h(1), h(2)]));
+        d.insert("b".into(), manifest_with_hashes(1, &[h(2), h(3)]));
+
+        let back = Directory::decode(&d.encode()).unwrap();
+        let orphans = back.orphan_hashes(&[h(1), h(2), h(3)], Some("a"));
+        // With "a" excluded: h(1) has only "a" (orphan), h(2) has "b"
+        // (not orphan), h(3) has "b" (not orphan).
+        assert_eq!(orphans, vec![h(1)]);
     }
 }

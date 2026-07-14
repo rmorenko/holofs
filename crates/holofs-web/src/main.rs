@@ -280,6 +280,7 @@ async fn main() {
         // GCs any shards it uniquely held.
         .route("/api/versions/delete", post(handlers::delete_version_form))
         .route("/api/mv", post(handlers::mv))
+        .route("/api/batch/delete", post(handlers::batch_delete))
         // form-friendly file upload from the catalog page.
         .route(
             "/api/upload",

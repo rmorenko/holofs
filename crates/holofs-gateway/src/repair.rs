@@ -423,41 +423,34 @@ impl Gateway {
     ) -> Result<(), GatewayError> {
         use std::collections::HashSet;
         // 1. Hashes the deleted manifest claimed to own.
-        let mut owned: HashSet<[u8; 32]> = HashSet::new();
-        for chan in &manifest.shard_hashes {
-            for per_l in chan {
-                for h in per_l {
-                    owned.insert(*h);
-                }
-            }
-        }
-        if owned.is_empty() {
+        let owned_hashes: Vec<[u8; 32]> = manifest
+            .shard_hashes
+            .iter()
+            .flat_map(|chan| chan.iter().flat_map(|per_l| per_l.iter().copied()))
+            .collect();
+        if owned_hashes.is_empty() {
             return Ok(());
         }
-        // 2. Hashes still referenced by the rest of the catalog. The
-        //    PUT-replace caller hasn't yet removed `old` from the
-        //    catalog under `name`, so we skip that name explicitly —
-        //    otherwise `owned` would always empty itself out.
-        {
+        // 2. Ask the catalog's reverse index which of those hashes no
+        //    other live entry references. v4 (batch-delete perf):
+        //    replaced the old O(catalog × shards) full scan with
+        //    O(owned_hashes) lookups via `Directory::orphan_hashes`.
+        //    The 25 k-object drain in `holofs-stability` used to take
+        //    ~2.5 h because the scan ran per DELETE; on the reverse
+        //    index it drops to seconds.
+        //
+        //    `exclude_name` handles the PUT-replace case: the old
+        //    manifest is still under `name` in the catalog when this
+        //    runs, so the reverse index still points there; pass the
+        //    name so those refs are treated as "about to go away".
+        let mut owned: HashSet<[u8; 32]> = {
             let cat = self.catalog.read().await;
-            for (n, m) in cat.entries.iter() {
-                if m.kind == ObjectKind::Directory {
-                    continue;
-                }
-                if Some(n.as_str()) == exclude_name {
-                    continue;
-                }
-                for chan in &m.shard_hashes {
-                    for per_l in chan {
-                        for h in per_l {
-                            owned.remove(h);
-                            if owned.is_empty() {
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-            }
+            cat.orphan_hashes(owned_hashes.iter(), exclude_name)
+                .into_iter()
+                .collect()
+        };
+        if owned.is_empty() {
+            return Ok(());
         }
         // 3. Hashes still referenced by version archives on disk.
         let versions_dir = self
