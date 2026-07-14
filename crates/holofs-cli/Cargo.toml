@@ -66,5 +66,9 @@ path = "src/bin/holofs-soak.rs"
 name = "holofs-soak-report"
 path = "src/bin/holofs-soak-report.rs"
 
+[[bin]]
+name = "holofs-stability"
+path = "src/bin/holofs-stability.rs"
+
 [lints]
 workspace = true
