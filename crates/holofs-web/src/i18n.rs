@@ -256,6 +256,14 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("card.more_actions",
         ["more actions", "ещё действия", "weitere Aktionen",
          "plus d'actions", "más acciones"]),
+    // A10 · UI-UX: rename inline form on each ObjectCard. Was
+    // API-only (POST /api/mv), no UI to trigger.
+    ("card.rename",
+        ["rename", "переименовать", "umbenennen", "renommer", "renombrar"]),
+    ("card.rename_placeholder",
+        ["new path", "новый путь", "neuer Pfad", "nouveau chemin", "nueva ruta"]),
+    ("card.rename_save",
+        ["save", "сохранить", "speichern", "enregistrer", "guardar"]),
 
     // ---- catalog filter bar -------------------------------
     ("filter.name_label",
@@ -855,6 +863,16 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
          "admin-désactivé", "admin-desactivado"]),
     ("health.stat.live_sse",
         ["live · SSE", "live · SSE", "live · SSE", "live · SSE", "live · SSE"]),
+    // A11 hygiene: distinguish SSE-state visually. Was always "●" +
+    // "live · SSE" regardless of whether the socket was open — false
+    // freshness. Now the "●" swatch turns red / grey and the label
+    // narrates the actual state.
+    ("health.stat.sse_disconnected",
+        ["SSE disconnected", "SSE отключён", "SSE getrennt",
+         "SSE déconnecté", "SSE desconectado"]),
+    ("health.stat.sse_connecting",
+        ["SSE connecting…", "SSE подключение…", "SSE Verbindung…",
+         "SSE connexion…", "SSE conectando…"]),
     ("health.stat.k_threshold",
         ["k (threshold)", "k (порог)", "k (Schwelle)",
          "k (seuil)", "k (umbral)"]),
@@ -882,6 +900,69 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
          "Ausfall ganzer Zone (Anti-Affinity)",
          "panne d'une zone entière (anti-affinity)",
          "fallo de zona completa (anti-affinity)"]),
+    // A9 · UI-UX: plain-English intros above every dashboard table so
+    // a non-engineer opening /health/<name> can actually read them.
+    ("health.matrix_intro",
+        ["Each cell is (n_alive/K + margin) for one (channel, layer). \
+          Margin > 0 = safe surplus. Margin = 0 = decodable but no room \
+          for another loss. Margin < 0 = layer already lost.",
+         "Каждая ячейка — (n_живых/K + запас) для одной (канал, слой). \
+          Запас > 0 = безопасный излишек. Запас = 0 = декодируется, но без резерва. \
+          Запас < 0 = слой уже потерян.",
+         "Jede Zelle ist (n_alive/K + Margin) für ein (Kanal, Layer). \
+          Margin > 0 = sicherer Puffer. Margin = 0 = dekodierbar, ohne Reserve. \
+          Margin < 0 = Layer bereits verloren.",
+         "Chaque cellule est (n_alive/K + marge) pour un (canal, couche). \
+          Marge > 0 = surplus sûr. Marge = 0 = décodable, sans réserve. \
+          Marge < 0 = couche déjà perdue.",
+         "Cada celda es (n_vivos/K + margen) para un (canal, capa). \
+          Margen > 0 = excedente seguro. Margen = 0 = decodificable, sin reserva. \
+          Margen < 0 = capa ya perdida."]),
+    ("health.loss_intro",
+        ["Rows = % of nodes killed at random; columns = probability the \
+          object still decodes at each resolution (over N trials). Bar = \
+          full distribution across resolutions (red = dead, orange = \
+          preview only, green = full).",
+         "Строки = % случайно убитых нод; колонки = вероятность декодирования \
+          на каждом разрешении (по N испытаниям). Полоса = распределение \
+          по разрешениям (красный = не декодировано, оранжевый = только превью, \
+          зелёный = полное).",
+         "Zeilen = % zufällig getöteter Nodes; Spalten = Wahrscheinlichkeit, dass \
+          das Objekt in jeder Auflösung noch dekodiert (über N Trials). Balken = \
+          Verteilung über Auflösungen (rot = tot, orange = nur Vorschau, grün = voll).",
+         "Lignes = % de nœuds tués aléatoirement ; colonnes = probabilité que \
+          l'objet soit encore décodable à chaque résolution (sur N essais). Barre = \
+          répartition sur les résolutions (rouge = perdu, orange = aperçu, vert = complet).",
+         "Filas = % de nodos eliminados al azar; columnas = probabilidad de que \
+          el objeto aún decodifique en cada resolución (sobre N ensayos). Barra = \
+          distribución entre resoluciones (rojo = perdido, naranja = solo vista previa, \
+          verde = completo)."]),
+    ("health.zone_intro",
+        ["Simulates the loss of every node in one zone (rack/AZ). Best \
+          remaining decodable resolution is shown per zone-out.",
+         "Симулирует отказ всех нод одной зоны (стойка/AZ). Показано лучшее \
+          оставшееся декодируемое разрешение на выход зоны.",
+         "Simuliert den Ausfall aller Nodes einer Zone (Rack/AZ). Zeigt die beste \
+          verbleibende dekodierbare Auflösung pro Zonenausfall.",
+         "Simule la perte de tous les nœuds d'une zone (rack/AZ). La meilleure \
+          résolution décodable restante est affichée par zone tombée.",
+         "Simula la pérdida de todos los nodos de una zona (rack/AZ). Se muestra \
+          la mejor resolución decodificable restante por zona caída."]),
+    ("health.legend.ok",
+        ["margin > 0 (surplus)", "запас > 0 (излишек)",
+         "Margin > 0 (Überschuss)", "marge > 0 (surplus)",
+         "margen > 0 (excedente)"]),
+    ("health.legend.partial",
+        ["margin = 0 (at the edge)", "запас = 0 (на границе)",
+         "Margin = 0 (an der Grenze)", "marge = 0 (à la limite)",
+         "margen = 0 (al límite)"]),
+    ("health.legend.bad",
+        ["margin < 0 (layer lost)", "запас < 0 (слой потерян)",
+         "Margin < 0 (Layer verloren)", "marge < 0 (couche perdue)",
+         "margen < 0 (capa perdida)"]),
+    ("health.col.pmf_bar",
+        ["distribution", "распределение", "Verteilung",
+         "distribution", "distribución"]),
 
     // ---- /inspect page ------------------------------------
     ("inspect.loading",

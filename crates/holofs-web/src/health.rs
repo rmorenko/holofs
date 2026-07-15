@@ -356,6 +356,12 @@ fn HealthIndexBody(data: HealthIndex) -> impl IntoView {
 #[component]
 fn LiveClusterStats(initial: HealthSnapshot) -> impl IntoView {
     let snap = RwSignal::new(initial);
+    // Track SSE connection state so the "●" indicator (and its
+    // screen-reader label) reflect reality — pre-review it always
+    // pulsed green even after the browser dropped the socket, giving
+    // false confidence that the numbers were fresh.
+    // 0 = connecting, 1 = live, 2 = disconnected/retrying.
+    let sse_state = RwSignal::new(0u8);
 
     // Effect::new only runs client-side after hydrate. The body itself is
     // cfg-gated so the SSR build does not see web-sys types it cannot link
@@ -367,10 +373,13 @@ fn LiveClusterStats(initial: HealthSnapshot) -> impl IntoView {
             use wasm_bindgen::JsCast;
 
             let Ok(source) = web_sys::EventSource::new("/api/health/events") else {
+                sse_state.set(2);
                 return;
             };
-            let cb = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
+            let cb_msg = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
                 move |evt: web_sys::MessageEvent| {
+                    // First message → we're live.
+                    sse_state.set(1);
                     let Some(payload) = evt.data().as_string() else {
                         return;
                     };
@@ -379,10 +388,24 @@ fn LiveClusterStats(initial: HealthSnapshot) -> impl IntoView {
                     }
                 },
             );
-            source.set_onmessage(Some(cb.as_ref().unchecked_ref()));
+            let cb_open = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                sse_state.set(1);
+            });
+            // EventSource auto-reconnects with an increasing backoff on
+            // network drops — we just want to reflect that in the UI.
+            // Browser fires `error` on drop, keeps trying; state stays
+            // "disconnected" until the next `open` / `message` lands.
+            let cb_err = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                sse_state.set(2);
+            });
+            source.set_onopen(Some(cb_open.as_ref().unchecked_ref()));
+            source.set_onmessage(Some(cb_msg.as_ref().unchecked_ref()));
+            source.set_onerror(Some(cb_err.as_ref().unchecked_ref()));
             // Leak both the closure and the EventSource so they live for the
             // lifetime of the page. Closing the tab tears them down.
-            cb.forget();
+            cb_msg.forget();
+            cb_open.forget();
+            cb_err.forget();
             std::mem::forget(source);
         }
     });
@@ -404,9 +427,27 @@ fn LiveClusterStats(initial: HealthSnapshot) -> impl IntoView {
             "v partial"
         }
     };
+    let sse_class = move || match sse_state.get() {
+        1 => "v mono ok",
+        2 => "v mono bad",
+        _ => "v mono mut",
+    };
+    let sse_label = move || match sse_state.get() {
+        1 => t!("health.stat.live_sse"),
+        2 => t!("health.stat.sse_disconnected"),
+        _ => t!("health.stat.sse_connecting"),
+    };
+    let sse_aria = move || match sse_state.get() {
+        1 => "live",
+        2 => "disconnected",
+        _ => "connecting",
+    };
 
     view! {
-        <section class="cluster-stats">
+        // aria-live="polite" so screen readers announce updates
+        // without stealing focus. Only these stat cards actually
+        // change post-hydrate — the rest of the page is static.
+        <section class="cluster-stats" aria-live="polite">
             <div class="stat">
                 <div class=live_class>{live_label}</div>
                 <div class="l">{t!("health.stat.live_total")}</div>
@@ -420,8 +461,8 @@ fn LiveClusterStats(initial: HealthSnapshot) -> impl IntoView {
                 <div class="l">{t!("health.stat.admin_disabled")}</div>
             </div>
             <div class="stat live-hint">
-                <div class="v mono">"●"</div>
-                <div class="l">{t!("health.stat.live_sse")}</div>
+                <div class=sse_class role="img" aria-label=sse_aria>"●"</div>
+                <div class="l">{sse_label}</div>
             </div>
         </section>
     }
@@ -539,15 +580,28 @@ fn HealthDetailBody(data: ObjectHealthView) -> impl IntoView {
         </section>
 
         <h2>{t!("health.matrix_h")}</h2>
+        // A9: plain-English intro + colour-swatch legend for the
+        // ok/partial/bad cell classes. Was "wall of numbers" before —
+        // an engineer parses it, /about promises "readable by
+        // non-specialists". The legend uses the same tokens the
+        // cells use (--ok-bg / --warn-bg / --bad-bg from PR-1).
+        <p class="dashboard-intro">{t!("health.matrix_intro")}</p>
+        <div class="dashboard-legend">
+            <span><i class="swatch ok"></i>{t!("health.legend.ok")}</span>
+            <span><i class="swatch partial"></i>{t!("health.legend.partial")}</span>
+            <span><i class="swatch bad"></i>{t!("health.legend.bad")}</span>
+        </div>
         <LayerMatrix layers=layers channels=channels nlayers=nlayers k=k/>
 
         {(!scenarios.is_empty()).then(|| view! {
             <h2>{t!("health.loss_h")}</h2>
+            <p class="dashboard-intro">{t!("health.loss_intro")}</p>
             <LossTable scenarios=scenarios nlayers=nlayers/>
         })}
 
         {(!zone_failures.is_empty()).then(|| view! {
             <h2>{t!("health.zone_h")}</h2>
+            <p class="dashboard-intro">{t!("health.zone_intro")}</p>
             <ZoneTable rows=zone_failures/>
         })}
 
@@ -876,11 +930,19 @@ fn LossTable(scenarios: Vec<LossRow>, nlayers: u8) -> impl IntoView {
                     <th>{t!("health.col.kill_pct")}</th>
                     <th>{t!("health.col.trials")}</th>
                     {col_headers.into_iter().map(|h| view! { <th>{h}</th> }).collect_view()}
+                    // A9: extra "distribution" column that draws the row's
+                    // full pmf as a single horizontal stacked bar — red
+                    // = dead (index 0), orange = preview-only (1), green
+                    // = every fuller resolution. Lets a non-specialist
+                    // read the shape at a glance without parsing five
+                    // percent-columns.
+                    <th>{t!("health.col.pmf_bar")}</th>
                 </tr>
             </thead>
             <tbody>
                 {scenarios.into_iter().map(|s| {
                     let pmf = s.pmf.clone();
+                    let pmf_for_bar = s.pmf.clone();
                     view! {
                         <tr>
                             <td><code>{s.kill_pct}"%"</code></td>
@@ -899,12 +961,51 @@ fn LossTable(scenarios: Vec<LossRow>, nlayers: u8) -> impl IntoView {
                                 };
                                 view! { <td class=cls><code>{body}</code></td> }
                             }).collect_view()}
+                            <td>
+                                <div class="pmf-bar" role="img"
+                                     aria-label={pmf_bar_aria(&pmf_for_bar)}>
+                                    {pmf_for_bar.clone().into_iter().enumerate().map(|(i, p)| {
+                                        let pct = p * 100.0;
+                                        // Skip zero segments so the bar
+                                        // doesn't render invisible 0-width
+                                        // dividers (they'd still count as
+                                        // border-only slivers).
+                                        if pct < 0.05 { return None; }
+                                        let cls = if i == 0 { "dead" }
+                                                  else if i == 1 { "partial" }
+                                                  else { "ok" };
+                                        let title = format!("L{}: {pct:.1}%",
+                                            if i == 0 { "0 (lost)".to_string() } else { (i - 1).to_string() });
+                                        Some(view! {
+                                            <span class={format!("pmf-seg {cls}")}
+                                                  style=format!("flex-basis:{pct:.2}%")
+                                                  title=title></span>
+                                        })
+                                    }).collect_view()}
+                                </div>
+                            </td>
                         </tr>
                     }
                 }).collect_view()}
             </tbody>
         </table>
     }
+}
+
+fn pmf_bar_aria(pmf: &[f32]) -> String {
+    // Screen-reader label for the stacked bar. Reads out each
+    // resolution + its probability so blind users get the same info
+    // as the visual glance.
+    let mut s = String::from("distribution: ");
+    for (i, p) in pmf.iter().enumerate() {
+        let pct = p * 100.0;
+        if pct < 0.05 {
+            continue;
+        }
+        let name = if i == 0 { "dead".to_string() } else { format!("L0-L{}", i - 1) };
+        s.push_str(&format!("{name} {pct:.0}%, "));
+    }
+    s.trim_end_matches(", ").to_string()
 }
 
 #[component]

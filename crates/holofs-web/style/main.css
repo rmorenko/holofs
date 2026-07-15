@@ -424,6 +424,53 @@ button[data-holofs-was-busy="1"]::after {
   margin-left: 2px;
 }
 
+/* A10: rename `<details>` — same popover pattern as `.card-more`
+ * but the panel holds an inline form (from + to + submit) instead
+ * of a link list. */
+.card-rename {
+  display: inline;
+  position: relative;
+  margin-left: 4px;
+}
+.card-rename > summary {
+  display: inline-block;
+  cursor: pointer;
+  color: var(--accent);
+  list-style: none;
+  user-select: none;
+}
+.card-rename > summary::-webkit-details-marker { display: none; }
+.card-rename > summary::marker { content: ""; }
+.card-rename > summary:hover { color: var(--fg); }
+.card-rename[open] > summary { color: var(--fg); }
+.card-rename-form {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  background: var(--surf);
+  border: 1px solid var(--bord);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  min-width: 260px;
+}
+.card-rename-form input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  background: var(--surf2);
+  border: 1px solid var(--bord);
+  border-radius: 4px;
+  color: var(--fg);
+  font: 12px ui-monospace, monospace;
+}
+.card-rename-form input[type="text"]:focus {
+  border-color: var(--accent);
+}
+
 .empty-state {
   text-align: center;
   padding: 40px;
@@ -2407,6 +2454,117 @@ body.catalog-page .tree-scroll {
   font-weight: 600;
 }
 .versions-table tr:last-child td { border-bottom: none; }
+
+/* === A12: responsive tweaks ==============================================
+ * Two breakpoints:
+ * · ≤700 px: topbar wraps and drops to a smaller vertical rhythm so
+ *   the h1 + 6 nav links + locale + theme don't overflow narrow
+ *   phones. Container padding shrinks 24→16 px so the content still
+ *   has breathing room.
+ * · ≤900 px: wide-column tables (health-loss with nlayers+3 columns,
+ *   metrics-neighbours, versions-table) switch to `display: block +
+ *   overflow-x: auto` so the tail columns are reachable via
+ *   horizontal scroll instead of clipping to viewport width. Fixed-
+ *   width media inside inspect / mix / breakdown get a soft
+ *   `max-width: 100%` cap so a 380 px shard preview never overflows
+ *   a 375 px iPhone SE viewport.
+ * ========================================================================= */
+@media (max-width: 700px) {
+  .topbar {
+    flex-wrap: wrap;
+    gap: 12px;
+    padding-top: 14px;
+    padding-bottom: 12px;
+  }
+  .topbar nav {
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .locale-switcher { margin-left: 0; }
+  .container { padding: 16px; }
+  .theme-switcher { margin-left: 0; }
+}
+@media (max-width: 900px) {
+  table.health-loss,
+  table.health-layers,
+  table.health-zones,
+  table.metrics-neighbours,
+  .versions-table {
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
+    white-space: nowrap;
+  }
+  .zoom-img img {
+    max-width: 100%;
+    height: auto;
+  }
+  .mix-field-wide {
+    min-width: min(320px, 100%);
+    max-width: 100%;
+  }
+  .layer-breakdown {
+    max-width: 100%;
+  }
+}
+
+/* === A9: legend + intro chrome for dashboards ============================
+ * Little utility classes for the Monte-Carlo / margin-matrix / zone
+ * tables so a plain-English "here's what this table means" intro
+ * paragraph and a status-legend row can sit above the numbers
+ * without every dashboard page re-styling them. */
+.dashboard-intro {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--mut);
+  max-width: 720px;
+  margin: 8px 0 12px 0;
+}
+.dashboard-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  font-size: 12px;
+  margin: 4px 0 12px 0;
+  color: var(--mut);
+}
+.dashboard-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.dashboard-legend .swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--bord);
+}
+.dashboard-legend .swatch.ok { background: var(--ok-bg); border-color: var(--ok); }
+.dashboard-legend .swatch.partial { background: var(--warn-bg); border-color: var(--warn); }
+.dashboard-legend .swatch.bad { background: var(--bad-bg); border-color: var(--bad); }
+
+/* Monte-Carlo pmf → single-row stacked bar. Each segment is a
+ * `.pmf-seg` <span> whose flex-basis is the pmf % it represents.
+ * Sits inside a `<td>`, replacing the raw "12.4%" number for the
+ * rows the user cares about the shape of. */
+.pmf-bar {
+  display: flex;
+  height: 14px;
+  width: 100%;
+  min-width: 120px;
+  border: 1px solid var(--bord);
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--surf);
+}
+.pmf-seg {
+  height: 100%;
+  min-width: 1px;
+}
+.pmf-seg.dead { background: var(--bad); }
+.pmf-seg.partial { background: var(--warn); }
+.pmf-seg.ok { background: var(--ok); }
 
 /* === A1/A2: toast area for mutation form responses ======================
  * Injected by `assets/mutation-forms.js` — fixed at bottom-right,

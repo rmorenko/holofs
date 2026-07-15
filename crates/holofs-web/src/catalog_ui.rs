@@ -706,7 +706,7 @@ fn lazy_file_leaf_inner(entry: CatalogEntry) -> impl IntoView {
         .rsplit_once('/')
         .map(|(_, b)| b.to_string())
         .unwrap_or_else(|| entry.name.clone());
-    let size_str = format_shards(entry.n_shards);
+    let size_str = format_bytes(entry.bytes_stored);
     let date_str = format_unix_utc(entry.created_at_unix);
     let icon: &'static str = match kind.as_str() {
         "image" => "🖼",
@@ -1320,7 +1320,7 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
         let enc_full = url_encode(&entry.name);
         let kind = entry.kind.clone();
         let basename = node.basename.clone();
-        let size_str = format_shards(entry.n_shards);
+        let size_str = format_bytes(entry.bytes_stored);
         let date_str = format_unix_utc(entry.created_at_unix);
         let icon: &'static str = match kind.as_str() {
             "image" => "🖼",
@@ -1611,12 +1611,14 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
         content_type,
         width,
         height,
-        n_shards,
+        n_shards: _,
+        bytes_stored,
         cid_short,
         audio_sample_rate,
         channels,
         created_at_unix: _,
     } = entry;
+    let size_str = format_bytes(bytes_stored);
 
     let basename = if parent.is_empty() {
         name.clone()
@@ -1687,7 +1689,7 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
             <div class="meta">
                 <div class="name">{basename.clone()}</div>
                 <div class="row mut">{dims}</div>
-                <div class="row mut">{n_shards} " " {t!("card.shards")}</div>
+                <div class="row mut">{size_str}</div>
                 <div class="row mut cid"><code>{cid_short}</code></div>
             </div>
             <div class="actions">
@@ -1721,6 +1723,32 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
                         })}
                         <a href={format!("/versions/{}", enc_full.clone())} rel="external">{t!("versions.link_label")}</a>
                     </div>
+                </details>
+                // A10 · UI-UX: inline rename form. `POST /api/mv`
+                // already handled server-side, no UI existed — so
+                // users couldn't rename via the interface. Sits
+                // between the "⋯" popover and the delete form; the
+                // mutation-forms.js interceptor catches the submit
+                // and toasts / reloads on success. Placeholder-only
+                // client-side validation for now; server rejects
+                // reserved names.
+                <details class="card-rename js-dropdown">
+                    <summary title={t!("card.rename")}>{t!("card.rename")}</summary>
+                    <form
+                        method="POST"
+                        action="/api/mv"
+                        class="card-rename-form inline-form"
+                    >
+                        <input type="hidden" name="from" value=name.clone()/>
+                        <input
+                            type="text"
+                            name="to"
+                            required=true
+                            placeholder={t!("card.rename_placeholder")}
+                            value=name.clone()
+                        />
+                        <button type="submit" class="link-btn">{t!("card.rename_save")}</button>
+                    </form>
                 </details>
                 <span class="actions-sep" aria-hidden="true"></span>
                 <form
@@ -1795,6 +1823,28 @@ pub(crate) fn format_shards(n_shards: u32) -> String {
         "—".to_string()
     } else {
         format!("{n_shards} shards")
+    }
+}
+
+/// Human-readable storage size — the review flagged "N shards" as an
+/// opaque number for a user trying to eyeball file sizes. We route
+/// through this on every ObjectCard / tree leaf. `0` renders `—` so
+/// directory markers stay tidy.
+pub(crate) fn format_bytes(n: u64) -> String {
+    if n == 0 {
+        return "—".to_string();
+    }
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    if n < KIB {
+        format!("{n} B")
+    } else if n < MIB {
+        format!("{:.1} KiB", n as f64 / KIB as f64)
+    } else if n < GIB {
+        format!("{:.1} MiB", n as f64 / MIB as f64)
+    } else {
+        format!("{:.2} GiB", n as f64 / GIB as f64)
     }
 }
 

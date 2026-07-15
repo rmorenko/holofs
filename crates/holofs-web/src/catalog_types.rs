@@ -28,6 +28,11 @@ pub struct CatalogEntry {
     pub height: u32,
     /// Total planned shards across every channel × layer.
     pub n_shards: u32,
+    /// Approximate on-cluster storage in bytes (`Σ n_per_layer × (sym_len + K) × channels`).
+    /// A hygiene · UI-UX fix — the card used to show "N shards" which
+    /// nobody except the ops engineer could turn into an intuition of
+    /// "how big is this file". Format-as-KB/MB in the UI.
+    pub bytes_stored: u64,
     /// First 12 hex chars of `data_cid` — used as a short display id.
     pub cid_short: String,
     /// Audio sample rate; `0` for non-audio kinds.
@@ -56,6 +61,18 @@ impl CatalogEntry {
         }
         .to_string();
         let total_shards: u32 = m.n_per_layer.iter().sum::<u32>() * u32::from(m.channels);
+        // Same shape as api_stats::bytes_total: for each layer,
+        // n_shards × payload_bytes (sym_len + K coeff bytes) × channels.
+        let bytes_stored: u64 = m
+            .n_per_layer
+            .iter()
+            .enumerate()
+            .map(|(l, npl)| {
+                let sym = m.sym_len.get(l).copied().unwrap_or(0) as u64;
+                let per_shard = sym + m.k as u64;
+                u64::from(*npl) * per_shard * u64::from(m.channels)
+            })
+            .sum();
         let cid_full = hex(&m.data_cid);
         Self {
             name: name.to_string(),
@@ -64,6 +81,7 @@ impl CatalogEntry {
             width: m.width,
             height: m.height,
             n_shards: total_shards,
+            bytes_stored,
             cid_short: cid_full.chars().take(12).collect(),
             audio_sample_rate: m.audio_sample_rate,
             channels: m.channels,

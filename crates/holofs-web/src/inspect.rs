@@ -288,9 +288,18 @@ fn InspectBody(data: InspectView) -> impl IntoView {
                                 let href = format!("/inspect-zoom/{channel}_{layer}_{}/{enc}", s.idx);
                                 let img = format!("/api/shard/{channel}_{layer}_{}.png/{enc}", s.idx);
                                 let label = format!("n{}", s.node_idx);
+                                let kind = if s.is_systematic { "systematic" } else { "RLNC-mixed" };
+                                // A · UI-UX hygiene: the shard preview
+                                // IS the content — the visible label
+                                // only carries the node index. Blind
+                                // users get nothing without a real alt.
+                                let alt = format!(
+                                    "shard {} channel {channel} layer {layer} — {kind}, on node {}",
+                                    s.idx, s.node_idx,
+                                );
                                 view! {
                                     <a class=cls title=title href=href>
-                                        <img loading="lazy" src=img alt=""/>
+                                        <img loading="lazy" src=img alt=alt/>
                                         <span class="idx">{label}</span>
                                     </a>
                                 }
@@ -394,6 +403,8 @@ fn ZoomBody(data: ZoomView) -> impl IntoView {
     let img_src = format!("/api/shard/{channel}_{layer}_{idx}.png/{enc}");
     let back_href = format!("/inspect/{enc}");
 
+    let kind_word = if is_systematic { "systematic" } else { "RLNC-mixed" };
+    let img_alt = format!("shard {idx} channel {channel} layer {layer} of {} — {kind_word}", name);
     view! {
         <h2 style="margin-top:0">
             {t!("inspect.shard_of")} " "
@@ -401,7 +412,7 @@ fn ZoomBody(data: ZoomView) -> impl IntoView {
         </h2>
         <div class="zoom-wrap">
             <div class=img_class>
-                <img src=img_src alt=""/>
+                <img src=img_src alt=img_alt/>
             </div>
             <div class="zoom-meta">
                 <p><span class=tag_class>{kind_label}</span></p>
