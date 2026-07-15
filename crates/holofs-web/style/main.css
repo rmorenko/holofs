@@ -362,6 +362,68 @@ button[data-holofs-was-busy="1"]::after {
 
 .card .actions a { color: var(--accent); }
 
+/* === A6: "⋯" secondary-actions popover ================================
+ * Custom dropdown built on <details class="card-more js-dropdown"> —
+ * native browser toggle (works with no JS), popover styling here,
+ * click-outside/Escape close in `assets/mutation-forms.js`.
+ * Summary is a bare "⋯" trigger; the menu is a vertical list of
+ * <a> links positioned absolute below-and-right of the trigger. */
+.card-more {
+  display: inline;
+  position: relative;
+}
+.card-more > summary {
+  display: inline-block;
+  cursor: pointer;
+  padding: 0 4px;
+  color: var(--accent);
+  list-style: none;
+  user-select: none;
+}
+.card-more > summary::-webkit-details-marker { display: none; }
+.card-more > summary::marker { content: ""; }
+.card-more > summary:hover { color: var(--fg); }
+.card-more[open] > summary { color: var(--fg); }
+.card-more-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 160px;
+  padding: 6px 0;
+  background: var(--surf);
+  border: 1px solid var(--bord);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+}
+.card-more-menu a {
+  padding: 6px 12px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.card-more-menu a:hover {
+  background: var(--surf2);
+  color: var(--fg);
+  text-decoration: none;
+}
+/* Visual separator between the "⋯" popover and the destructive
+ * delete button — A6 explicitly calls out delete needing isolation
+ * from the secondary actions. */
+.actions-sep {
+  display: inline-block;
+  width: 1px;
+  height: 12px;
+  vertical-align: middle;
+  margin: 0 8px;
+  background: var(--bord);
+}
+.card .actions .card-delete {
+  display: inline;
+  margin-left: 2px;
+}
+
 .empty-state {
   text-align: center;
   padding: 40px;
@@ -2345,6 +2407,93 @@ body.catalog-page .tree-scroll {
   font-weight: 600;
 }
 .versions-table tr:last-child td { border-bottom: none; }
+
+/* === A1/A2: toast area for mutation form responses ======================
+ * Injected by `assets/mutation-forms.js` — fixed at bottom-right,
+ * stacks toasts vertically newest-on-bottom, each with an auto-
+ * dismiss timer and a manual close button. `role="status"` /
+ * `role="alert"` differ by kind for screen-reader announcements. */
+#holofs-toast-area {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 10000;
+  pointer-events: none;
+  max-width: min(420px, calc(100vw - 32px));
+}
+.holofs-toast {
+  pointer-events: auto;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--bord);
+  background: var(--surf);
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  animation: holofs-toast-in 0.16s ease-out;
+}
+.holofs-toast-ok {
+  border-color: var(--ok);
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+}
+.holofs-toast-err {
+  border-color: var(--bad);
+  background: var(--bad-bg);
+  color: var(--bad-fg);
+}
+.holofs-toast-msg {
+  grid-column: 1;
+  grid-row: 1;
+  word-break: break-word;
+}
+.holofs-toast-close {
+  grid-column: 2;
+  grid-row: 1;
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+  opacity: 0.6;
+}
+.holofs-toast-close:hover { opacity: 1; }
+.holofs-toast-progress {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surf2);
+  overflow: hidden;
+}
+.holofs-toast-progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.2s ease-out;
+}
+.holofs-toast-out {
+  animation: holofs-toast-out 0.2s ease-in forwards;
+}
+@keyframes holofs-toast-in {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0);   opacity: 1; }
+}
+@keyframes holofs-toast-out {
+  from { transform: translateY(0);   opacity: 1; }
+  to   { transform: translateY(8px); opacity: 0; }
+}
 
 /* === A7: keyboard focus ring =============================================
  * Global `:focus-visible` ring. Applies to keyboard-triggered focus only

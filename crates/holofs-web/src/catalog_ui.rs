@@ -109,12 +109,33 @@ fn CatalogFocusView(prefix: String) -> impl IntoView {
             {move || {
                 let prefix = prefix_for_show.clone();
                 entries.get().map(|res| match res {
-                    Ok(list) if list.is_empty() => view! {
-                        <p class="empty-state">
-                            {t!("catalog.empty")} " " {t!("catalog.empty_hint")} " "
-                            <code>{format!("curl -X PUT http://<host>/{prefix}/<name>")}</code>
-                        </p>
-                    }.into_any(),
+                    Ok(list) if list.is_empty() => {
+                        // A5: distinguish "empty directory" (true empty)
+                        // from "filter matched nothing" (user should know
+                        // to relax the filter, not curl-PUT).
+                        let (q, f, t) = filter_signal();
+                        let filter_on = !q.is_empty() || !f.is_empty() || !t.is_empty();
+                        let clear_href = if prefix.is_empty() {
+                            "/".to_string()
+                        } else {
+                            format!("/?p={prefix}")
+                        };
+                        if filter_on {
+                            view! {
+                                <p class="empty-state">
+                                    {t!("catalog.no_results_for_filter")} " "
+                                    <a href=clear_href>{t!("catalog.clear_filter")}</a>
+                                </p>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <p class="empty-state">
+                                    {t!("catalog.empty")} " " {t!("catalog.empty_hint")} " "
+                                    <code>{format!("curl -X PUT http://<host>/{prefix}/<name>")}</code>
+                                </p>
+                            }.into_any()
+                        }
+                    },
                     Ok(list) => {
                         let parent_for_cards = prefix.clone();
                         view! {
@@ -342,12 +363,30 @@ fn CatalogTreeEager(
             {move || {
                 let s = sort.get();
                 all.get().map(|res| match res {
-                    Ok(list) if list.is_empty() => view! {
-                        <p class="empty-state">
-                            {t!("catalog.empty")} " " {t!("catalog.empty_hint")} " "
-                            <code>"curl -X PUT http://<host>/<name>"</code>
-                        </p>
-                    }.into_any(),
+                    Ok(list) if list.is_empty() => {
+                        // A5: eager tree only opens when a filter is
+                        // active (see caller in `CatalogTreePage`), so
+                        // an empty result here always means "the
+                        // filter matched nothing", never "the catalog
+                        // is empty". Give the user a way out.
+                        let (q, f, t) = filter.get();
+                        let filter_on = !q.is_empty() || !f.is_empty() || !t.is_empty();
+                        if filter_on {
+                            view! {
+                                <p class="empty-state">
+                                    {t!("catalog.no_results_for_filter")} " "
+                                    <a href="/">{t!("catalog.clear_filter")}</a>
+                                </p>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <p class="empty-state">
+                                    {t!("catalog.empty")} " " {t!("catalog.empty_hint")} " "
+                                    <code>"curl -X PUT http://<host>/<name>"</code>
+                                </p>
+                            }.into_any()
+                        }
+                    },
                     Ok(list) => view! { <CatalogTreeBody entries=list sort=s/> }.into_any(),
                     Err(e) => view! {
                         <p class="bad">{t!("catalog.load_failed")} " " {e.to_string()}</p>
@@ -1652,30 +1691,42 @@ fn ObjectCard(entry: CatalogEntry, parent: String) -> impl IntoView {
                 <div class="row mut cid"><code>{cid_short}</code></div>
             </div>
             <div class="actions">
-                // rel=external bypasses Leptos Router
-                // interception. The primary link and preview hit
-                // axum-only routes (raw bytes / image preview); the
-                // rest are real Leptos pages but SPA navigation
-                // broke too — full-reload via rel=external is the
-                // reliable path until the SPA story gets sorted.
+                // A6 · UI-UX-review: was a flat "·"-separated list
+                // of up to 10 links with delete at the end, one
+                // class away from `holo`/`spotlight`. High misclick
+                // risk on the destructive action. Now: two primary
+                // links inline (open + preview), a `<details>` "⋯"
+                // popover for the six-to-seven secondary actions,
+                // then delete after a visual separator.
+                //
+                // Native `<details>` toggle is progressive: no-JS
+                // clients still see and use the menu; the hydrate-
+                // only click-outside handler in mutation-forms.js
+                // upgrades to popover-style dismissal.
                 <a href={format!("/{enc_full}")} rel="external">{primary_label(&kind)}</a>
                 {(kind == "image" || kind == "audio").then(|| view! {
                     " · " <a href={format!("/preview/{}", enc_full.clone())} rel="external">{preview_label(&kind)}</a>
                 })}
-                " · " <a href={format!("/inspect/{}", enc_full.clone())} rel="external">{t!("card.action.shards_link")}</a>
-                " · " <a href={format!("/similar/{}", enc_full.clone())} rel="external">{t!("card.action.similar")}</a>
-                " · " <a href={format!("/health/{}", enc_full.clone())} rel="external">{t!("card.action.health")}</a>
-                {(kind == "image").then(|| view! {
-                    " · " <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
-                    " · " <a href={format!("/holo/{}", enc_full.clone())} rel="external">{t!("holo.link_label")}</a>
-                    " · " <a href={format!("/spotlight?a={}", enc_full.clone())} rel="external">{t!("spotlight.link_label")}</a>
-                })}
-                " · " <a href={format!("/versions/{}", enc_full.clone())} rel="external">{t!("versions.link_label")}</a>
                 " · "
+                <details class="card-more js-dropdown">
+                    <summary aria-label={t!("card.more_actions")} title={t!("card.more_actions")}>"⋯"</summary>
+                    <div class="card-more-menu" role="menu">
+                        <a href={format!("/inspect/{}", enc_full.clone())} rel="external">{t!("card.action.shards_link")}</a>
+                        <a href={format!("/similar/{}", enc_full.clone())} rel="external">{t!("card.action.similar")}</a>
+                        <a href={format!("/health/{}", enc_full.clone())} rel="external">{t!("card.action.health")}</a>
+                        {(kind == "image").then(|| view! {
+                            <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
+                            <a href={format!("/holo/{}", enc_full.clone())} rel="external">{t!("holo.link_label")}</a>
+                            <a href={format!("/spotlight?a={}", enc_full.clone())} rel="external">{t!("spotlight.link_label")}</a>
+                        })}
+                        <a href={format!("/versions/{}", enc_full.clone())} rel="external">{t!("versions.link_label")}</a>
+                    </div>
+                </details>
+                <span class="actions-sep" aria-hidden="true"></span>
                 <form
                     method="POST"
                     action="/api/rm"
-                    class="inline-form"
+                    class="inline-form card-delete"
                     onsubmit=file_confirm_js
                 >
                     <input type="hidden" name="path" value=name.clone()/>

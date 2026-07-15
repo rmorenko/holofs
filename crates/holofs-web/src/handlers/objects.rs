@@ -295,11 +295,14 @@ pub async fn put_object(
         let n = chunk.len() as u64;
         if written.saturating_add(n) > max {
             let _ = tokio::fs::remove_file(&tmp_path).await;
+            // A1: keep the message user-facing — MiB, no env-var
+            // trivia (the operator error-log knob is documented on
+            // `upload_max_size` above). The toast JS also strips
+            // any HOLOFS_* patterns as a belt-and-suspenders.
+            let cap_mib = max / (1024 * 1024);
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "upload exceeds cap of {max} bytes (HOLOFS_UPLOAD_MAX_SIZE)"
-                ),
+                format!("upload exceeds {cap_mib} MiB cap"),
             )
                 .into_response();
         }

@@ -164,6 +164,13 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
                 // for free. See `assets/busy-indicator.js` for the
                 // counter-based gate + `<form>` auto-disable.
                 <script defer="defer" src="/assets/busy-indicator.js"></script>
+                // progressive-enhancement layer for mutation
+                // forms: intercept submit, POST via fetch/XHR, toast
+                // on success/error inside the current layout. See
+                // `assets/mutation-forms.js` for the opt-in
+                // `data-holofs-mutate="1"` protocol. Closes A1 / A2
+                // from UI-UX-review.md.
+                <script defer="defer" src="/assets/mutation-forms.js"></script>
                 <Stylesheet id="leptos" href="/pkg/holofs.css"/>
                 <Title text="holofs"/>
             </head>

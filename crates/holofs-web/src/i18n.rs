@@ -114,6 +114,19 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
          "Erstelle einen Unterordner über das Formular oder lade per curl -X PUT ein Objekt hoch.",
          "Utilisez le formulaire ci-dessus pour créer un sous-dossier, ou curl -X PUT pour téléverser.",
          "Use el formulario para crear una subcarpeta, o curl -X PUT para subir un objeto."]),
+    // A5 · UI-UX: distinct message when the current filter has zero
+    // hits — the plain `catalog.empty` used to nudge users to run curl
+    // even though the actual objects exist and just don't match the
+    // filter.
+    ("catalog.no_results_for_filter",
+        ["No entries match the current filter.",
+         "По текущему фильтру ничего не найдено.",
+         "Keine Einträge entsprechen dem aktuellen Filter.",
+         "Aucune entrée ne correspond au filtre actuel.",
+         "Ninguna entrada coincide con el filtro actual."]),
+    ("catalog.clear_filter",
+        ["Clear filter", "Сбросить фильтр", "Filter zurücksetzen",
+         "Effacer le filtre", "Limpiar filtro"]),
     ("catalog.loading",
         ["loading catalog…", "загружаем каталог…", "Katalog wird geladen…",
          "chargement du catalogue…", "cargando catálogo…"]),
@@ -239,6 +252,10 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
         ["health", "состояние", "Zustand", "santé", "estado"]),
     ("card.action.similar",
         ["similar", "похожие", "ähnlich", "similaires", "similares"]),
+    // A6: "⋯" popover trigger. Screen-reader label only (visible glyph is the ellipsis).
+    ("card.more_actions",
+        ["more actions", "ещё действия", "weitere Aktionen",
+         "plus d'actions", "más acciones"]),
 
     // ---- catalog filter bar -------------------------------
     ("filter.name_label",
