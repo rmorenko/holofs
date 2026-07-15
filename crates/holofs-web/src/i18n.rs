@@ -264,6 +264,14 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
         ["new path", "новый путь", "neuer Pfad", "nouveau chemin", "nueva ruta"]),
     ("card.rename_save",
         ["save", "сохранить", "speichern", "enregistrer", "guardar"]),
+    // Hygiene · UI-UX: replace hardcoded English tooltips + link
+    // labels on tree leaves so switching locale actually flips them.
+    ("tree.meta.size_title",
+        ["storage size", "объём хранения", "Speichergröße",
+         "taille de stockage", "tamaño de almacenamiento"]),
+    ("tree.meta.date_title",
+        ["created (UTC)", "создано (UTC)", "erstellt (UTC)",
+         "créé (UTC)", "creado (UTC)"]),
 
     // ---- catalog filter bar -------------------------------
     ("filter.name_label",

@@ -278,11 +278,68 @@
 
     // Bubbling submit listener so it fires for late-added forms too.
     // `capture: false` lets other handlers (busy-indicator) run first.
+    // Hygiene · UI-UX: reject reserved top-segment names before we
+    // even send the request. Server rejects the same set with a plain
+    // 400 (see `handlers/util.rs::RESERVED_TOP_SEGMENTS`) but the
+    // client-side check saves a round trip and gives a better toast.
+    // Kept in sync manually — additions are rare and the server-side
+    // check is authoritative anyway.
+    var RESERVED_SEGMENTS = [
+        "health", "escrow", "preview", "inspect", "similar", "diff",
+        "admin", "api", "metrics", "pkg", "help", "inspect-zoom",
+        "assets", "mix", "about", "search", "holo", "spotlight",
+        "versions",
+    ];
+    function reservedTopSegment(path) {
+        if (!path) return false;
+        var top = path.split("/", 1)[0];
+        return RESERVED_SEGMENTS.indexOf(top) !== -1;
+    }
+    function validateMutationForm(form) {
+        // mkdir form-flavour: parent + name → composed target is
+        // `parent/name` (or just `name` at root).
+        var parentInput = form.querySelector('input[name="parent"]');
+        var nameInput = form.querySelector('input[name="name"]');
+        if (nameInput) {
+            var parent = parentInput ? parentInput.value : "";
+            var name = nameInput.value;
+            var full = parent ? parent + "/" + name : name;
+            if (reservedTopSegment(full)) {
+                return "name '" + name + "' is reserved — pick another";
+            }
+        }
+        // mv form-flavour: from + to. Reject if `to`'s top segment is reserved.
+        var toInput = form.querySelector('input[name="to"]');
+        if (toInput && reservedTopSegment(toInput.value)) {
+            return "destination top segment is reserved — pick another";
+        }
+        return null;
+    }
+
     document.addEventListener("submit", function (ev) {
         var form = ev.target;
         if (!shouldIntercept(form)) return;
         ev.preventDefault();
         var okMsg = form.dataset.holofsMutateOk || "";
+
+        // Hygiene · UI-UX: if the form carries a `<input name="return_to">`
+        // whose value is empty, fill it with the current URL right
+        // before submit. That's how deeply-expanded tree deletes and
+        // root-toolbar mutations keep the current filter / expand
+        // state instead of getting bounced to "/". Server default
+        // (`?p=<parent>`) still applies for callers that omit the
+        // field entirely.
+        var retInput = form.querySelector('input[name="return_to"]');
+        if (retInput && !retInput.value) {
+            retInput.value = window.location.pathname + window.location.search;
+        }
+
+        // Fast-fail reserved-name check.
+        var validationErr = validateMutationForm(form);
+        if (validationErr) {
+            showToast("err", validationErr);
+            return;
+        }
 
         // Disable submitter to prevent double-fire; re-enable on
         // failure so the user can retry.

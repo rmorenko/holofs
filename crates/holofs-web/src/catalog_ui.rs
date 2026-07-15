@@ -469,16 +469,15 @@ fn CatalogTreeLazyShell(
     let s_kind = sort_link(TreeSort::Kind);
     let s_date = sort_link(TreeSort::Date);
     // The root mkdir + upload forms create entries inside the
-    // current tree root (catalog root when prefix is empty; the
-    // chosen subfolder otherwise). `return_to` brings the user back
-    // to the same root view so the new entry appears straight away.
+    // current tree root. Empty `return_to` means "reload the current
+    // URL after success" — mutation-forms.js fills it with
+    // window.location on submit so a mutation from a filtered /
+    // sorted / prefix'd view doesn't wipe those query params. The
+    // server keeps its `/?p=<parent>` fallback for no-JS clients that
+    // POST the empty field verbatim.
     let prefix_for_mkdir = prefix.clone();
     let prefix_for_upload = prefix.clone();
-    let return_to = if prefix.is_empty() {
-        "/".to_string()
-    } else {
-        format!("/?p={}", url_encode(&prefix))
-    };
+    let return_to = String::new();
     let return_to_mkdir = return_to.clone();
     let return_to_upload = return_to.clone();
     let prefix_for_lazy = prefix.clone();
@@ -672,7 +671,7 @@ fn LazyLevel(
                         node_ref=sentinel_ref
                         class="tree-sentinel mut"
                         on:click=on_sentinel_click.clone()
-                        title="load more"
+                        title={t!("tree.load_more")}
                     >
                         {move || if is_loading.get() {
                             t!("catalog.loading")
@@ -723,16 +722,16 @@ fn lazy_file_leaf_inner(entry: CatalogEntry) -> impl IntoView {
             <span class="tree-icon">{icon}</span>
             <a class="tree-name" href={format!("/{enc_full}")} rel="external">{basename}</a>
             <span class="tree-meta">
-                <span class="tree-meta-size" title="shard count">{size_str}</span>
-                <span class="tree-meta-date" title="created (UTC)">{date_str}</span>
+                <span class="tree-meta-size" title={t!("tree.meta.size_title")}>{size_str}</span>
+                <span class="tree-meta-date" title={t!("tree.meta.date_title")}>{date_str}</span>
             </span>
             <span class="tree-sep">"·"</span>
             <span class="tree-actions">
                 {(kind == "image" || kind == "audio").then(|| view! {
-                    <a href={format!("/preview/{}", enc_full.clone())} rel="external">"preview"</a>
+                    <a href={format!("/preview/{}", enc_full.clone())} rel="external">{t!("card.action.preview")}</a>
                     <span class="tree-sep">"·"</span>
                 })}
-                <a href={format!("/inspect/{}", enc_full.clone())} rel="external">"shards"</a>
+                <a href={format!("/inspect/{}", enc_full.clone())} rel="external">{t!("card.action.shards_link")}</a>
                 <span class="tree-sep">"·"</span>
                 <a href={format!("/similar/{}", enc_full.clone())} rel="external">{t!("card.action.similar")}</a>
                 <span class="tree-sep">"·"</span>
@@ -755,7 +754,12 @@ fn lazy_file_leaf_inner(entry: CatalogEntry) -> impl IntoView {
                     onsubmit=file_confirm_js
                 >
                     <input type="hidden" name="path" value=entry.name.clone()/>
-                    <input type="hidden" name="return_to" value="/"/>
+                    // Hygiene · UI-UX: no `return_to="/"` — the
+                    // mutation-forms.js interceptor detects the empty
+                    // hidden field and substitutes the current
+                    // location so a delete inside a deeply-expanded
+                    // tree doesn't send the user back to the root.
+                    <input type="hidden" name="return_to" value=""/>
                     <button
                         type="submit"
                         class="link-btn link-btn-danger"
@@ -929,7 +933,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                     <span class="tree-icon">"📁"</span>
                     <span class="tree-name">{basename}</span>
                     <span class="tree-meta">
-                        <span class="tree-meta-date" title="created (UTC)">{created_str}</span>
+                        <span class="tree-meta-date" title={t!("tree.meta.date_title")}>{created_str}</span>
                     </span>
                     <span class="tree-sep">"·"</span>
                     <span class="tree-actions">
@@ -1015,7 +1019,7 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                             onsubmit=confirm_js
                         >
                             <input type="hidden" name="path" value=path_for_rmdir/>
-                            <input type="hidden" name="return_to" value="/"/>
+                            <input type="hidden" name="return_to" value=""/>
                             <button type="submit" class="link-btn">{t!("folder.delete")}</button>
                         </form>
                     </span>
@@ -1106,7 +1110,7 @@ fn CatalogTreeBody(entries: Vec<CatalogEntry>, sort: TreeSort) -> impl IntoView 
             <TreeZoomButtons/>
             <form class="tree-mkdir" method="POST" action="/api/mkdir">
                 <input type="hidden" name="parent" value=""/>
-                <input type="hidden" name="return_to" value="/"/>
+                <input type="hidden" name="return_to" value=""/>
                 <input
                     type="text"
                     name="name"
@@ -1130,7 +1134,7 @@ fn CatalogTreeBody(entries: Vec<CatalogEntry>, sort: TreeSort) -> impl IntoView 
                 enctype="multipart/form-data"
             >
                 <input type="hidden" name="parent" value=""/>
-                <input type="hidden" name="return_to" value="/"/>
+                <input type="hidden" name="return_to" value=""/>
                 <input type="file" name="file" required=true/>
                 <button type="submit" class="tree-control-btn">
                     <span class="tree-control-icon">"↑"</span>
@@ -1340,16 +1344,16 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                 <span class="tree-icon">{icon}</span>
                 <a class="tree-name" href={format!("/{enc_full}")} rel="external">{basename}</a>
                 <span class="tree-meta">
-                    <span class="tree-meta-size" title="shard count">{size_str}</span>
-                    <span class="tree-meta-date" title="created (UTC)">{date_str}</span>
+                    <span class="tree-meta-size" title={t!("tree.meta.size_title")}>{size_str}</span>
+                    <span class="tree-meta-date" title={t!("tree.meta.date_title")}>{date_str}</span>
                 </span>
                 <span class="tree-sep">"·"</span>
                 <span class="tree-actions">
                     {(kind == "image" || kind == "audio").then(|| view! {
-                        <a href={format!("/preview/{}", enc_full.clone())} rel="external">"preview"</a>
+                        <a href={format!("/preview/{}", enc_full.clone())} rel="external">{t!("card.action.preview")}</a>
                         <span class="tree-sep">"·"</span>
                     })}
-                    <a href={format!("/inspect/{}", enc_full.clone())} rel="external">"shards"</a>
+                    <a href={format!("/inspect/{}", enc_full.clone())} rel="external">{t!("card.action.shards_link")}</a>
                     <span class="tree-sep">"·"</span>
                     <a href={format!("/similar/{}", enc_full.clone())} rel="external">{t!("card.action.similar")}</a>
                     <span class="tree-sep">"·"</span>
@@ -1366,7 +1370,7 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                         onsubmit=file_confirm_js
                     >
                         <input type="hidden" name="path" value=entry.name.clone()/>
-                        <input type="hidden" name="return_to" value="/"/>
+                        <input type="hidden" name="return_to" value=""/>
                         <button
                             type="submit"
                             class="link-btn link-btn-danger"
@@ -1404,7 +1408,7 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                         <span class="tree-name">{node.basename.clone()}</span>
                         <span class="tree-count">"(" {n_children} ")"</span>
                         <span class="tree-meta">
-                            <span class="tree-meta-date" title="created (UTC)">{created_str}</span>
+                            <span class="tree-meta-date" title={t!("tree.meta.date_title")}>{created_str}</span>
                         </span>
                         <span class="tree-sep">"·"</span>
                         <span class="tree-actions">
@@ -1482,7 +1486,7 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                                 onsubmit=confirm_js
                             >
                                 <input type="hidden" name="path" value=path.clone()/>
-                                <input type="hidden" name="return_to" value="/"/>
+                                <input type="hidden" name="return_to" value=""/>
                                 <button type="submit" class="link-btn">{t!("folder.delete")}</button>
                             </form>
                         </span>
