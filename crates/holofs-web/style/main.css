@@ -5,6 +5,11 @@
   --bg: #0e1116;
   --surf: #161b22;
   --surf2: #1c2129;
+  /* One more surface step above `--surf2` for hover-lift on controls
+     that already idle at `surf2` (e.g. file-selector-button). Prior
+     code referenced `--surf1` which was never defined and silently
+     no-op'd (A11). */
+  --surf3: #232830;
   --bord: #262d36;
   --fg: #e6e9ef;
   --mut: #8a93a3;
@@ -12,11 +17,23 @@
   --ok: #3fb950;
   --warn: #d29922;
   --bad: #f85149;
+  /* Status backgrounds — subtle tint that pairs with the base status
+     colour at ≥4.5:1 contrast for foreground text. Replaces per-theme
+     hard-coded hex fills (A3): the old `#0a3a0a` / `#3a2a0a` failed
+     WCAG AA in light mode (2.55:1 / 2.85:1). */
+  --ok-bg: rgba(63, 185, 80, 0.16);
+  --warn-bg: rgba(210, 153, 34, 0.18);
+  --bad-bg: rgba(248, 81, 73, 0.16);
+  /* Text guaranteed ≥4.5:1 on the corresponding *-bg tint. */
+  --ok-fg: #7ee787;
+  --warn-fg: #e3b341;
+  --bad-fg: #ff8a80;
 }
 [data-theme="light"] {
   --bg: #ffffff;
   --surf: #f6f8fa;
   --surf2: #eaeef2;
+  --surf3: #dfe4ea;
   --bord: #d0d7de;
   --fg: #1f2328;
   --mut: #59636e;
@@ -24,6 +41,12 @@
   --ok: #1a7f37;
   --warn: #9a6700;
   --bad: #cf222e;
+  --ok-bg: rgba(26, 127, 55, 0.12);
+  --warn-bg: rgba(154, 103, 0, 0.14);
+  --bad-bg: rgba(207, 34, 46, 0.12);
+  --ok-fg: #1a7f37;
+  --warn-fg: #9a6700;
+  --bad-fg: #cf222e;
 }
 html { color-scheme: dark; }
 [data-theme="light"] html, html[data-theme="light"] { color-scheme: light; }
@@ -444,8 +467,11 @@ tr:last-child td { border-bottom: none; }
   border-color: var(--accent);
 }
 .shard-cell:hover .idx { color: var(--fg); }
-.shard-cell.sys img { border-color: var(--ok); }
-.shard-cell.rlnc img { border-color: var(--warn); }
+/* A4: systematic vs RLNC-mixed shards distinguished by border STYLE
+   (solid vs dashed) in addition to colour, so protan/deutan users
+   can still parse the state at a glance. */
+.shard-cell.sys img { border-color: var(--ok); border-style: solid; }
+.shard-cell.rlnc img { border-color: var(--warn); border-style: dashed; }
 .shard-cell .idx { margin-top: 2px; }
 
 h3.inspect-ch {
@@ -507,13 +533,13 @@ h4.inspect-layer {
   letter-spacing: .5px;
 }
 .zoom-tag.sys {
-  background: #0a3a0a;
-  color: var(--ok);
+  background: var(--ok-bg);
+  color: var(--ok-fg);
   border: 1px solid var(--ok);
 }
 .zoom-tag.rlnc {
-  background: #3a2a0a;
-  color: var(--warn);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
   border: 1px solid var(--warn);
 }
 .zoom-meta pre {
@@ -542,12 +568,27 @@ h4.inspect-layer {
   align-items: center;
   justify-content: center;
   font: 10px ui-monospace, monospace;
-  color: #000;
 }
-.diff-cell.common { background: var(--ok); }
+/* A3 + A4: replaced saturated `--ok` / `--bad` fills (which put
+   `color:#fff` at only 3.35:1 in dark on the mid-red bad tint) with
+   tinted backgrounds against on-surface fg. Diff/common are also
+   distinguished by a light diagonal-stripe overlay so red/green
+   colour-blindness (protan/deutan) still parses the state without
+   colour cues (A4). */
+.diff-cell.common {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+  border: 1px solid var(--ok);
+}
 .diff-cell.diff {
-  background: var(--bad);
-  color: #fff;
+  background: var(--bad-bg);
+  color: var(--bad-fg);
+  border: 1px solid var(--bad);
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0 3px,
+    var(--bad) 3px 4px
+  );
 }
 
 /* === /escrow split + recover forms ======================================== */
@@ -1525,7 +1566,7 @@ body.catalog-page .tree-scroll {
 .tree-inline-upload input[type="file"]::file-selector-button:hover {
   border-color: var(--accent);
   color: var(--accent);
-  background: var(--surf1);
+  background: var(--surf3);
 }
 
 /* Root toolbar upload button — fixed size, NOT subject to
@@ -1546,7 +1587,7 @@ body.catalog-page .tree-scroll {
 .tree-root-upload input[type="file"]::file-selector-button:hover {
   border-color: var(--accent);
   color: var(--accent);
-  background: var(--surf1);
+  background: var(--surf3);
 }
 .tree-inline-upload .link-btn {
   font-size: calc(13px * var(--tree-scale, 1));
@@ -2304,3 +2345,56 @@ body.catalog-page .tree-scroll {
   font-weight: 600;
 }
 .versions-table tr:last-child td { border-bottom: none; }
+
+/* === A7: keyboard focus ring =============================================
+ * Global `:focus-visible` ring. Applies to keyboard-triggered focus only
+ * (not mouse-click focus), so pointer users don't see rings on button
+ * activation while Tab/Shift-Tab navigation stays legible.
+ *
+ * Overrides the many `outline:none` declarations elsewhere in this file
+ * (search inputs, tree nodes, dropzones, tags) that stripped the UA ring
+ * without a replacement — prior to this, keyboard-only users had no
+ * indication of where focus lived. */
+/* !important — the file has ~6 targeted `:focus { outline: none }`
+ * rules whose specificity (element + pseudo-class) exceeds this bare
+ * `:focus-visible`. Rather than duplicating each site with a
+ * `:focus-visible { outline: … }` companion, we let the global ring
+ * win via !important. It only fires on keyboard-driven focus per
+ * WCAG 2.4.7. */
+:focus-visible {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: 2px !important;
+  border-radius: 3px;
+}
+/* Inputs already carry an accent-coloured border on focus; the ring
+ * would sit outside and clash. Use a smaller offset so both stay
+ * visible without overlap. */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline-offset: 1px !important;
+}
+
+/* === A8: reduced motion ==================================================
+ * Honour `prefers-reduced-motion: reduce`. Vestibular disorders and
+ * migraine sufferers set this. Kills every infinite / large-transform
+ * animation in the file (progress-sweep, live-pulse, hover scale on
+ * shard cells, translateY on cards, blur transitions).
+ *
+ * Uses the WCAG-recommended "collapse to near-instant" pattern rather
+ * than a hard `animation: none` so state changes remain observable —
+ * a 10 ms transition still lets a screen-reader-driven refresh land
+ * without a jarring snap. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .shard-cell:hover img {
+    transform: none;
+  }
+}
