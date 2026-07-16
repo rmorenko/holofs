@@ -10,10 +10,10 @@ las preocupaciones de privacidad.
 
 1. [Alcance y activos](#1-alcance-y-activos)
 2. [Fronteras de confianza](#2-fronteras-de-confianza)
-3. [Catálogo de adversarios](#3-catalogo-de-adversarios)
-4. [Análisis STRIDE](#4-analisis-stride)
-5. [Análisis de privacidad (LINDDUN)](#5-analisis-de-privacidad-linddun)
-6. [No-objetivos y limitaciones explícitas](#6-no-objetivos-y-limitaciones-explicitas)
+3. [Catálogo de adversarios](#3-catálogo-de-adversarios)
+4. [Análisis STRIDE](#4-análisis-stride)
+5. [Análisis de privacidad (LINDDUN)](#5-análisis-de-privacidad-linddun)
+6. [No-objetivos y limitaciones explícitas](#6-no-objetivos-y-limitaciones-explícitas)
 7. [Registro de riesgo residual](#7-registro-de-riesgo-residual)
 
 ---
@@ -114,7 +114,7 @@ apuntan a él.
 
 | # | Amenaza                                                | Mitigación |
 |---|--------------------------------------------------------|------------|
-| S1 | El atacante suplanta a un nodo para recibir shards    | Reto Ed25519 (`AuthChallenge`) — el gateway verifica la firma con la pubkey de la whitelist antes de confiar en cualquier respuesta. Véase [api.md handshake](./api.md#handshake-de-autenticacion). |
+| S1 | El atacante suplanta a un nodo para recibir shards    | Reto Ed25519 (`AuthChallenge`) — el gateway verifica la firma con la pubkey de la whitelist antes de confiar en cualquier respuesta. Véase [api.md handshake](./api.md#handshake-de-autenticación). |
 | S2 | El atacante suplanta al gateway ante un nodo          | Ejecutar con `--mtls`: el nodo rechaza cualquier handshake TLS cuyo certificado de cliente no esté firmado por la CA compartida. Sin `--mtls`, recurrir a despliegue en VLAN privada. |
 | S3 | Actualización de whitelist forjada                    | La whitelist se firma con la clave Ed25519 del admin; los nodos rechazan actualizaciones sin firmar o con firma incorrecta. |
 | S4 | Replay de una respuesta capturada                     | El nonce por petición en `AuthChallenge` asegura que las firmas se enlazan a un reto fresco. Las tramas de cable aún no llevan nonce de replay para mensajes fuera del handshake — véase [§7](#7-registro-de-riesgo-residual). |
@@ -153,7 +153,7 @@ apuntan a él.
 |---|--------------------------------------------------------|------------|
 | D1 | Inundar el gateway con uploads                        | El gateway debe ejecutarse detrás de un reverse proxy con rate-limiting. El tamaño de trama de cable está limitado a `MAX_FRAME = 64 MiB` en cada nodo. |
 | D2 | Un único nodo rechaza peticiones                      | RLNC tiene redundancia ≥ K-de-N por capa. La auto-reparación al leer (3) + scrub en segundo plano (x) detectan y resucitan shards en nodos vivos. |
-| D3 | Interrupción coordinada de media unidad de clúster    | El margen está dimensionado para **cualquier zona + fallos aislados dispersos** (véase [theory.md §3](./theory.md#3-capas-de-prioridad-y-degradacion-holografica)). Interrupciones mayores degradan con gracia: L3 (detalle cosmético) se pierde primero, luego L2, L1. |
+| D3 | Interrupción coordinada de media unidad de clúster    | El margen está dimensionado para **cualquier zona + fallos aislados dispersos** (véase [theory.md §4](./theory.md#4-capas-de-prioridad-y-degradación-holográfica)). Interrupciones mayores degradan con gracia: L3 (detalle cosmético) se pierde primero, luego L2, L1. |
 | D4 | Nodo "durmiente" acepta puts pero nunca devuelve gets | La tarea de auditoría emite sondas aleatorias `Audit(shard_hash)` — un nodo no receptivo o que responde mal pierde reputación y deja de ser elegido para placement. Cambio x: `MissingShard` se trata como neutral (sin impacto en reputación), para evitar un bucle de retroalimentación de colisión de dedup que previamente sacaba nodos sanos del conjunto vivo. |
 | D5 | Slow-loris sobre TCP                                  | Presupuesto por RPC `tokio::time::timeout` (`HOLOFS_RPC_TIMEOUT_MS`, por defecto 8 s, `0` desactiva). Una RPC agotada envenena el stream del pool y reintenta una vez sobre un socket fresco vía `is_likely_transient`. Limita la latencia visible al usuario a 8 s + un reintento en lugar del timeout TCP a nivel de SO de 60-75 s. |
 | D6 | Agotamiento de memoria mediante trama enorme          | Las tramas > `MAX_FRAME` son rechazadas antes de la asignación. |

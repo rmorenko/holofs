@@ -9,7 +9,7 @@ références à la littérature.
 
 ## Sommaire
 
-1. [Corps de Galois GF(2⁸)](#1-corps-de-galois-gf28)
+1. [Corps de Galois GF(2⁸)](#1-corps-de-galois-gf2)
 2. [Random Linear Network Coding (RLNC)](#2-random-linear-network-coding-rlnc)
 3. [Transformée en ondelettes discrète de Haar](#3-transformée-en-ondelettes-discrète-de-haar)
 4. [Couches de priorité et dégradation holographique](#4-couches-de-priorité-et-dégradation-holographique)

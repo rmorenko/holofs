@@ -8,17 +8,17 @@ formales, fórmulas relevantes, intuición y referencias a la literatura.
 
 ## Contenido
 
-1. [Campo de Galois GF(2⁸)](#1-campo-de-galois-gf28)
-2. [Codificación aleatoria lineal de red (RLNC)](#2-codificacion-aleatoria-lineal-de-red-rlnc)
+1. [Campo de Galois GF(2⁸)](#1-campo-de-galois-gf2)
+2. [Codificación aleatoria lineal de red (RLNC)](#2-codificación-aleatoria-lineal-de-red-rlnc)
 3. [Transformada wavelet discreta de Haar](#3-transformada-wavelet-discreta-de-haar)
-4. [Capas de prioridad y degradación holográfica](#4-capas-de-prioridad-y-degradacion-holografica)
-5. [Hashing por peso aleatorio más alto (rendezvous)](#5-hashing-por-peso-aleatorio-mas-alto-rendezvous)
+4. [Capas de prioridad y degradación holográfica](#4-capas-de-prioridad-y-degradación-holográfica)
+5. [Hashing por peso aleatorio más alto (rendezvous)](#5-hashing-por-peso-aleatorio-más-alto-rendezvous)
 6. [Placement con conciencia de zona](#6-placement-con-conciencia-de-zona)
-7. [Direccionamiento por contenido y árboles Merkle](#7-direccionamiento-por-contenido-y-arboles-merkle)
+7. [Direccionamiento por contenido y árboles Merkle](#7-direccionamiento-por-contenido-y-árboles-merkle)
 8. [Secreto compartido de Shamir ↔ RLNC](#8-secreto-compartido-de-shamir--rlnc)
 9. [MinHash Bottom-K](#9-minhash-bottom-k)
 10. [Hashing perceptual sobre DWT-LL](#10-hashing-perceptual-sobre-dwt-ll)
-11. [Códigos de reparación / regenerativos](#11-codigos-de-reparacion--regenerativos)
+11. [Códigos de reparación / regenerativos](#11-códigos-de-reparación--regenerativos)
 
 ---
 

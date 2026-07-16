@@ -7,7 +7,7 @@ HTTP- / Wire-Protokoll-Details siehe [api.md](./api.md).
 ## Inhalt
 
 1. [Crate-Abhängigkeitsgraph](#1-crate-abhängigkeitsgraph)
-2. [Prozess- / Deployment-Topologien](#2-prozess--deployment-topologien)
+2. [Prozess- / Deployment-Topologien](#2-prozess---deployment-topologien)
 3. [Objektlebenszyklus (PUT → GET)](#3-objektlebenszyklus-put--get)
 4. [Persistenzmodell](#4-persistenzmodell)
 5. [Vertrauensmodell](#5-vertrauensmodell)

@@ -6,16 +6,16 @@ producción.
 
 ## Contenido
 
-1. [Topologías de despliegue](#1-topologias-de-despliegue)
-2. [Instalación bare-metal](#2-instalacion-bare-metal)
+1. [Topologías de despliegue](#1-topologías-de-despliegue)
+2. [Instalación bare-metal](#2-instalación-bare-metal)
 3. [Docker / Compose](#3-docker--compose)
-4. [Kubernetes vía Helm](#4-kubernetes-via-helm)
-5. [Referencia de configuración](#5-referencia-de-configuracion)
-6. [Monitorización y alertas](#6-monitorizacion-y-alertas)
-7. [Planificación de capacidad](#7-planificacion-de-capacidad)
-8. [Backup y restauración](#8-backup-y-restauracion)
-9. [Recuperación ante desastres](#9-recuperacion-ante-desastres)
-10. [Procedimientos día-2](#10-procedimientos-dia-2)
+4. [Kubernetes vía Helm](#4-kubernetes-vía-helm)
+5. [Referencia de configuración](#5-referencia-de-configuración)
+6. [Monitorización y alertas](#6-monitorización-y-alertas)
+7. [Planificación de capacidad](#7-planificación-de-capacidad)
+8. [Backup y restauración](#8-backup-y-restauración)
+9. [Recuperación ante desastres](#9-recuperación-ante-desastres)
+10. [Procedimientos día-2](#10-procedimientos-día-2)
 
 ---
 
@@ -31,7 +31,7 @@ producción.
 **Objetivo recomendado para producción:** ≥ 5 zonas × ≥ 4 hosts × 1–2
 nodos por host. Esto sobrevive a **cualquier caída de una zona completa**
 más fallos simultáneos de nodos individuales en las zonas restantes
-(véase [theory.md §3](./theory.md#4-capas-de-prioridad-y-degradacion-holografica)).
+(véase [theory.md §4](./theory.md#4-capas-de-prioridad-y-degradación-holográfica)).
 
 ---
 
@@ -663,7 +663,7 @@ overhead promedio es aproximadamente **9,25×** (contando metadatos,
 
 **Ajustar para almacenamiento más barato:** bajar `R_0` (redundancia
 de pérdida catastrófica) a `2.0` y `R_1..3` a `[1.5, 1.2, 1.05]` — el
-overhead cae a ~5,75×. Véase [theory.md §3](./theory.md#4-capas-de-prioridad-y-degradacion-holografica)
+overhead cae a ~5,75×. Véase [theory.md §4](./theory.md#4-capas-de-prioridad-y-degradación-holográfica)
 para el trade-off del margen de supervivencia.
 
 ### 7.2. Planificación de CPU

@@ -7,7 +7,7 @@ para los detalles del protocolo HTTP / de cable véase [api.md](./api.md).
 ## Contenido
 
 1. [Grafo de dependencias entre crates](#1-grafo-de-dependencias-entre-crates)
-2. [Topologías de proceso / despliegue](#2-topologias-de-proceso--despliegue)
+2. [Topologías de proceso / despliegue](#2-topologías-de-proceso--despliegue)
 3. [Ciclo de vida del objeto (PUT → GET)](#3-ciclo-de-vida-del-objeto-put--get)
 4. [Modelo de persistencia](#4-modelo-de-persistencia)
 5. [Modelo de confianza](#5-modelo-de-confianza)

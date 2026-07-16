@@ -31,7 +31,7 @@ production.
 **Cible de production recommandée :** ≥ 5 zones × ≥ 4 hôtes × 1–2
 nœuds par hôte. Cela survit à **toute panne d'une zone complète** plus
 des défaillances simultanées de nœuds uniques dans les zones restantes
-(voir [theory.md §3](./theory.md#4-couches-de-priorité-et-dégradation-holographique)).
+(voir [theory.md §4](./theory.md#4-couches-de-priorité-et-dégradation-holographique)).
 
 ---
 
@@ -667,7 +667,7 @@ surcoût moyen est d'environ **9,25×** (en comptant les métadonnées,
 **Ajuster pour un stockage moins cher :** baisser `R_0` (redondance de
 perte catastrophique) à `2.0` et `R_1..3` à `[1.5, 1.2, 1.05]` — le
 surcoût tombe à ~5,75×. Voir
-[theory.md §3](./theory.md#4-couches-de-priorité-et-dégradation-holographique)
+[theory.md §4](./theory.md#4-couches-de-priorité-et-dégradation-holographique)
 pour le compromis marge de survie.
 
 ### 7.2. Planification CPU

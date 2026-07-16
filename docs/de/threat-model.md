@@ -147,7 +147,7 @@ zielen auf ihn ab.
 | I3 | Metadaten-Leak: Name + Art + Größe                            | Das Manifest speichert Objektname und Content-Type im Klartext. Sensible Deployments sollten Namen vor dem Upload hashen oder pseudonymisieren. |
 | I4 | Seitenkanäle (Cache, Netzwerk-Timing)                         | In 0.1 nicht gemindert — dedizierte CPUs / dediziertes Netzwerk für sensible Deployments. |
 | I5 | Backup-Leak                                                   | Backups erben dieselbe Bedrohung: sie müssen at rest verschlüsselt gespeichert werden (`restic --pass-file`, S3 SSE-KMS). |
-| I6 | Holoshare-Leak                                                | Eine einzelne `.holoshare`-Datei ist ein Anteil eines `(k,n)` Shamir-via-RLNC-Splits. Der Besitz von weniger als `k` ist informationstheoretisch sicher (siehe [theory.md §8](./theory.md#8-shamir-via-rlnc-schlüsselhinterlegung)). |
+| I6 | Holoshare-Leak                                                | Eine einzelne `.holoshare`-Datei ist ein Anteil eines `(k,n)` Shamir-via-RLNC-Splits. Der Besitz von weniger als `k` ist informationstheoretisch sicher (siehe [theory.md §8](./theory.md#8-shamir-secret-sharing--rlnc)). |
 
 ### 4.5. Denial of Service
 
@@ -155,7 +155,7 @@ zielen auf ihn ab.
 |-----|--------------------------------------------------------------------------|---------------|
 | D1  | Gateway mit Uploads fluten                                               | Das Gateway muss hinter einem ratenbegrenzenden Reverse-Proxy laufen. Die Wire-Frame-Größe ist auf jedem Node auf `MAX_FRAME = 64 MiB` begrenzt. |
 | D2  | Ein einzelner Node verweigert Anfragen                                   | RLNC besitzt ≥ K-of-N Redundanz pro Schicht. Auto-Repair-on-Read (3) + Hintergrund-Scrub (x) erkennen fehlende Shards und stellen sie auf lebenden Nodes wieder her. |
-| D3  | Koordinierter Halb-Cluster-Ausfall                                       | Die Marge ist für **jede einzelne Zone + verstreute Einzelausfälle** dimensioniert (siehe [theory.md §3](./theory.md#3-prioritätsschichten)). Größere Ausfälle degradieren graziös: L3 (kosmetisches Detail) geht zuerst verloren, dann L2, L1. |
+| D3  | Koordinierter Halb-Cluster-Ausfall                                       | Die Marge ist für **jede einzelne Zone + verstreute Einzelausfälle** dimensioniert (siehe [theory.md §4](./theory.md#4-prioritätsschichten-und-holografische-degradation)). Größere Ausfälle degradieren graziös: L3 (kosmetisches Detail) geht zuerst verloren, dann L2, L1. |
 | D4  | „Schläfer"-Node nimmt Puts entgegen, gibt aber nie Gets zurück           | Die Audit-Task sendet zufällige `Audit(shard_hash)`-Sonden — ein nicht reagierender oder falsch antwortender Node verliert Reputation und wird nicht mehr für Platzierungen ausgewählt. x change: `MissingShard` wird als neutral behandelt (kein Reputationsabzug), um eine Dedup-Kollisions-Feedback-Schleife zu vermeiden, die zuvor gesunde Nodes aus dem Live-Set verdrängen konnte. |
 | D5  | Slow-Loris auf TCP                                                       | Per-RPC-`tokio::time::timeout`-Budget (`HOLOFS_RPC_TIMEOUT_MS`, Default 8 s, `0` deaktiviert). Ein RPC mit Timeout vergiftet den gepoolten Stream und wird einmal auf einem frischen Socket via `is_likely_transient` erneut versucht. Begrenzt die vom Nutzer sichtbare Latenz auf 8 s + einen Retry statt des OS-Level-TCP-Timeouts von 60–75 s. |
 | D6  | Speichererschöpfung durch riesigen Frame                                 | Frames > `MAX_FRAME` werden vor der Allokation abgelehnt. |

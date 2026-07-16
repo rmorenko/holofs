@@ -118,7 +118,7 @@ graph BT
 
 Примитивы надёжности живут в `holofs-web`, потому что они компонуют
 HTTP-поверхность, а не состояние gateway. Полный справочник env-var
-см. в [operations.md § 5.6](operations.md#56-reliability-layer).
+см. в [operations.md § 5.6](operations.md#56-слой-надёжности).
 
 | Модуль | Назначение |
 |---|---|

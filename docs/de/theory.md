@@ -9,7 +9,7 @@ Literatur.
 
 ## Inhalt
 
-1. [Galois-Körper GF(2⁸)](#1-galois-körper-gf28)
+1. [Galois-Körper GF(2⁸)](#1-galois-körper-gf2)
 2. [Random Linear Network Coding (RLNC)](#2-random-linear-network-coding-rlnc)
 3. [Haar-Diskrete-Wavelet-Transformation](#3-haar-diskrete-wavelet-transformation)
 4. [Prioritätsschichten und holografische Degradation](#4-prioritätsschichten-und-holografische-degradation)
@@ -19,7 +19,7 @@ Literatur.
 8. [Shamir-Secret-Sharing ↔ RLNC](#8-shamir-secret-sharing--rlnc)
 9. [Bottom-K MinHash](#9-bottom-k-minhash)
 10. [Perzeptuelles Hashing auf DWT-LL](#10-perzeptuelles-hashing-auf-dwt-ll)
-11. [Repair- / Regenerating-Codes](#11-repair--regenerating-codes)
+11. [Repair- / Regenerating-Codes](#11-repair---regenerating-codes)
 
 ---
 

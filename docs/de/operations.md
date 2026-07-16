@@ -31,7 +31,7 @@ seiner **Kapazität geplant** wird.
 **Empfohlenes Produktionsziel:** ≥ 5 Zonen × ≥ 4 Hosts × 1–2 Nodes pro
 Host. Das überlebt **einen beliebigen kompletten Zonenausfall** plus
 gleichzeitige Einzelnode-Ausfälle in den übrigen Zonen (siehe
-[theory.md §3](./theory.md#4-prioritätsschichten-und-holografische-degradation)).
+[theory.md §4](./theory.md#4-prioritätsschichten-und-holografische-degradation)).
 
 ---
 
@@ -655,7 +655,7 @@ Berücksichtigung von Metadaten ~9,4×).
 **Tune für günstigeren Speicher:** senke `R_0`
 (Katastrophal-Verlust-Redundanz) auf `2.0` und `R_1..3` auf
 `[1.5, 1.2, 1.05]` — Overhead fällt auf ~5,75×. Siehe
-[theory.md §3](./theory.md#4-prioritätsschichten-und-holografische-degradation)
+[theory.md §4](./theory.md#4-prioritätsschichten-und-holografische-degradation)
 für den Survival-Margin-Trade-Off.
 
 ### 7.2. CPU-Planung

@@ -138,7 +138,7 @@ alerta del operador.
 
 Cuerpo `text/plain; version=0.0.4` — cada gauge / counter emite líneas
 `# HELP` + `# TYPE`. Véase
-[`docs/es/operations.md § 6.1`](./operations.md#61-endpoint-de-metricas)
+[`docs/es/operations.md § 6.1`](./operations.md#61-endpoint-de-métricas)
 para el catálogo completo de métricas, etiquetas e interpretación.
 Contadores de fiabilidad que vale la pena señalar:
 

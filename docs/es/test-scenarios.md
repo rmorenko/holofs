@@ -14,21 +14,21 @@ de éxito.
 
 ## Contenido
 
-1. [Levantar el clúster](#1-levantar-el-cluster)
-2. [CRUD básico de objetos](#2-crud-basico-de-objetos)
-3. [Catálogo jerárquico](#3-catalogo-jerarquico)
+1. [Levantar el clúster](#1-levantar-el-clúster)
+2. [CRUD básico de objetos](#2-crud-básico-de-objetos)
+3. [Catálogo jerárquico](#3-catálogo-jerárquico)
 4. [HTTP Range en GET (1)](#4-http-range-en-get)
-5. [Degradación holográfica](#5-degradacion-holografica)
-6. [Búsqueda perceptual y diff](#6-busqueda-perceptual-y-diff)
-7. [Inspeccionar: auditoría visual de shards](#7-inspeccionar-auditoria-visual-de-shards)
-8. [Escrow holográfico de claves](#8-escrow-holografico-de-claves)
+5. [Degradación holográfica](#5-degradación-holográfica)
+6. [Búsqueda perceptual y diff](#6-búsqueda-perceptual-y-diff)
+7. [Inspeccionar: auditoría visual de shards](#7-inspeccionar-auditoría-visual-de-shards)
+8. [Escrow holográfico de claves](#8-escrow-holográfico-de-claves)
 9. [Visor de docs en la app](#9-visor-de-docs-en-la-app)
 10. [i18n: cambio de idioma](#10-i18n-cambio-de-idioma)
 11. [Persistencia y reinicio](#11-persistencia-y-reinicio)
-12. [Clúster multi-proceso](#12-cluster-multi-proceso)
+12. [Clúster multi-proceso](#12-clúster-multi-proceso)
 13. [TLS / mTLS en el cable](#13-tls--mtls-en-el-cable)
-14. [Métricas, logs, SSE](#14-metricas-logs-sse)
-15. [Comprobaciones de regresión](#15-comprobaciones-de-regresion)
+14. [Métricas, logs, SSE](#14-métricas-logs-sse)
+15. [Comprobaciones de regresión](#15-comprobaciones-de-regresión)
 
 ---
 

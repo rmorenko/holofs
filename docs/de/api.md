@@ -16,7 +16,7 @@ Holoshare).
 8. [Neue HTTP-Endpunkte](#8-neue-http-endpunkte)
 9. [Wire-Protokoll-Ergänzungen](#9-wire-protokoll-ergänzungen)
 10. [Manifest-Format-Ergänzungen](#10-manifest-format-ergänzungen)
-11. [CLI- / Operator-Flags](#11-cli--operator-flags)
+11. [CLI- / Operator-Flags](#11-cli---operator-flags)
 12. [Statisches-Asset-Workaround](#12-statisches-asset-workaround)
 13. [Wire-Verbindungspool](#13-wire-verbindungspool)
 
