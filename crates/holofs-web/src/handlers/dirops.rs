@@ -147,8 +147,15 @@ pub async fn rmdir_form(
 }
 
 /// `POST /api/mv` — rename / move an entry. Body is form-urlencoded
-/// `from=...&to=...` so the dropzone HTML form can submit it without
-/// JS. Directories carry every descendant along.
+/// `from=...&to=...` (plus optional `return_to=...`) so the tree /
+/// card rename form can submit it without JS. Directories carry
+/// every descendant along.
+///
+/// A10 v2 fix: on success, prefer a 303-redirect to `return_to` when
+/// the field is present. The old JSON-200 response leaked as raw
+/// text to no-JS clients (the review flagged it explicitly). JS
+/// clients still get sensible behaviour because
+/// `mutation-forms.js` follows the 303 or reloads the current URL.
 pub async fn mv(
     Extension(gw): Extension<Arc<Gateway>>,
     body: Bytes,
@@ -166,8 +173,19 @@ pub async fn mv(
     if !is_valid_put_name(&from) || !is_valid_put_name(&to) {
         return bad_request("reserved or empty top segment");
     }
+    let return_to = parse_urlencoded_field(body_str, "return_to").unwrap_or_default();
     match gw.rename(&from, &to).await {
-        Ok(res) => rename_to_response(res),
+        Ok(res) => {
+            if return_to.is_empty() {
+                rename_to_response(res)
+            } else {
+                let parent = to
+                    .rsplit_once('/')
+                    .map(|(p, _)| p.to_string())
+                    .unwrap_or_default();
+                redirect_to(&pick_return_to(&return_to, &parent))
+            }
+        }
         Err(e) => error_to_response(e),
     }
 }

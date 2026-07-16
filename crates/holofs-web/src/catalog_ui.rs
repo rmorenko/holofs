@@ -727,38 +727,59 @@ fn lazy_file_leaf_inner(entry: CatalogEntry) -> impl IntoView {
             </span>
             <span class="tree-sep">"·"</span>
             <span class="tree-actions">
+                // A6/A10 v2: dropped the flat 8-link "·"-separated
+                // list. Now two primary links inline (open + preview),
+                // a `<details class="card-more">` popover for the six
+                // secondary actions, an inline rename form, then a
+                // visual separator and the delete button. Ported over
+                // from the dead `ObjectCard` where PR-2 first landed
+                // this — the v1 review missed that `ObjectCard` never
+                // renders, so users saw the old flat row.
                 {(kind == "image" || kind == "audio").then(|| view! {
                     <a href={format!("/preview/{}", enc_full.clone())} rel="external">{t!("card.action.preview")}</a>
                     <span class="tree-sep">"·"</span>
                 })}
-                <a href={format!("/inspect/{}", enc_full.clone())} rel="external">{t!("card.action.shards_link")}</a>
-                <span class="tree-sep">"·"</span>
-                <a href={format!("/similar/{}", enc_full.clone())} rel="external">{t!("card.action.similar")}</a>
-                <span class="tree-sep">"·"</span>
-                <a href={format!("/health/{}", enc_full.clone())} rel="external">{t!("card.action.health")}</a>
-                {(kind == "image").then(|| view! {
-                    <span class="tree-sep">"·"</span>
-                    <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
-                    <span class="tree-sep">"·"</span>
-                    <a href={format!("/holo/{}", enc_full.clone())} rel="external">{t!("holo.link_label")}</a>
-                    <span class="tree-sep">"·"</span>
-                    <a href={format!("/spotlight?a={}", enc_full.clone())} rel="external">{t!("spotlight.link_label")}</a>
-                })}
-                <span class="tree-sep">"·"</span>
-                <a href={format!("/versions/{}", enc_full.clone())} rel="external">{t!("versions.link_label")}</a>
-                <span class="tree-sep">"·"</span>
+                <details class="card-more js-dropdown">
+                    <summary aria-label={t!("card.more_actions")} title={t!("card.more_actions")}>"⋯"</summary>
+                    <div class="card-more-menu" role="menu">
+                        <a href={format!("/inspect/{}", enc_full.clone())} rel="external">{t!("card.action.shards_link")}</a>
+                        <a href={format!("/similar/{}", enc_full.clone())} rel="external">{t!("card.action.similar")}</a>
+                        <a href={format!("/health/{}", enc_full.clone())} rel="external">{t!("card.action.health")}</a>
+                        {(kind == "image").then(|| view! {
+                            <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
+                            <a href={format!("/holo/{}", enc_full.clone())} rel="external">{t!("holo.link_label")}</a>
+                            <a href={format!("/spotlight?a={}", enc_full.clone())} rel="external">{t!("spotlight.link_label")}</a>
+                        })}
+                        <a href={format!("/versions/{}", enc_full.clone())} rel="external">{t!("versions.link_label")}</a>
+                    </div>
+                </details>
+                <details class="card-rename js-dropdown">
+                    <summary title={t!("card.rename")}>{t!("card.rename")}</summary>
+                    <form
+                        method="POST"
+                        action="/api/mv"
+                        class="card-rename-form inline-form"
+                    >
+                        <input type="hidden" name="from" value=entry.name.clone()/>
+                        <input type="hidden" name="return_to" value=""/>
+                        <input
+                            type="text"
+                            name="to"
+                            required=true
+                            placeholder={t!("card.rename_placeholder")}
+                            value=entry.name.clone()
+                        />
+                        <button type="submit" class="link-btn">{t!("card.rename_save")}</button>
+                    </form>
+                </details>
+                <span class="actions-sep" aria-hidden="true"></span>
                 <form
                     method="POST"
                     action="/api/rm"
-                    class="inline-form"
+                    class="inline-form card-delete"
                     onsubmit=file_confirm_js
                 >
                     <input type="hidden" name="path" value=entry.name.clone()/>
-                    // Hygiene · UI-UX: no `return_to="/"` — the
-                    // mutation-forms.js interceptor detects the empty
-                    // hidden field and substitutes the current
-                    // location so a delete inside a deeply-expanded
-                    // tree doesn't send the user back to the root.
                     <input type="hidden" name="return_to" value=""/>
                     <button
                         type="submit"
@@ -1349,24 +1370,50 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                 </span>
                 <span class="tree-sep">"·"</span>
                 <span class="tree-actions">
+                    // A6/A10 v2 (eager tree branch — same shape as
+                    // the lazy leaf above).
                     {(kind == "image" || kind == "audio").then(|| view! {
                         <a href={format!("/preview/{}", enc_full.clone())} rel="external">{t!("card.action.preview")}</a>
                         <span class="tree-sep">"·"</span>
                     })}
-                    <a href={format!("/inspect/{}", enc_full.clone())} rel="external">{t!("card.action.shards_link")}</a>
-                    <span class="tree-sep">"·"</span>
-                    <a href={format!("/similar/{}", enc_full.clone())} rel="external">{t!("card.action.similar")}</a>
-                    <span class="tree-sep">"·"</span>
-                    <a href={format!("/health/{}", enc_full.clone())} rel="external">{t!("card.action.health")}</a>
-                    {(kind == "image").then(|| view! {
-                        <span class="tree-sep">"·"</span>
-                        <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
-                    })}
-                    <span class="tree-sep">"·"</span>
+                    <details class="card-more js-dropdown">
+                        <summary aria-label={t!("card.more_actions")} title={t!("card.more_actions")}>"⋯"</summary>
+                        <div class="card-more-menu" role="menu">
+                            <a href={format!("/inspect/{}", enc_full.clone())} rel="external">{t!("card.action.shards_link")}</a>
+                            <a href={format!("/similar/{}", enc_full.clone())} rel="external">{t!("card.action.similar")}</a>
+                            <a href={format!("/health/{}", enc_full.clone())} rel="external">{t!("card.action.health")}</a>
+                            {(kind == "image").then(|| view! {
+                                <a href={format!("/mix?a={}", enc_full.clone())} rel="external">{t!("mix.link_label")}</a>
+                                <a href={format!("/holo/{}", enc_full.clone())} rel="external">{t!("holo.link_label")}</a>
+                                <a href={format!("/spotlight?a={}", enc_full.clone())} rel="external">{t!("spotlight.link_label")}</a>
+                            })}
+                            <a href={format!("/versions/{}", enc_full.clone())} rel="external">{t!("versions.link_label")}</a>
+                        </div>
+                    </details>
+                    <details class="card-rename js-dropdown">
+                        <summary title={t!("card.rename")}>{t!("card.rename")}</summary>
+                        <form
+                            method="POST"
+                            action="/api/mv"
+                            class="card-rename-form inline-form"
+                        >
+                            <input type="hidden" name="from" value=entry.name.clone()/>
+                            <input type="hidden" name="return_to" value=""/>
+                            <input
+                                type="text"
+                                name="to"
+                                required=true
+                                placeholder={t!("card.rename_placeholder")}
+                                value=entry.name.clone()
+                            />
+                            <button type="submit" class="link-btn">{t!("card.rename_save")}</button>
+                        </form>
+                    </details>
+                    <span class="actions-sep" aria-hidden="true"></span>
                     <form
                         method="POST"
                         action="/api/rm"
-                        class="inline-form"
+                        class="inline-form card-delete"
                         onsubmit=file_confirm_js
                     >
                         <input type="hidden" name="path" value=entry.name.clone()/>

@@ -28,6 +28,18 @@
   --ok-fg: #7ee787;
   --warn-fg: #e3b341;
   --bad-fg: #ff8a80;
+  /* Accent overlay tints — replaces per-site `rgba(106, 167, 255, X)`
+   * literals that don't invert under the light theme.
+   *
+   * PR-5 regression fix (v2 review): PR-5 left these self-referenced
+   * (`--accent-06: var(--accent-06)`) in the dark block and defined
+   * only inside `[data-theme="light"]`. In the default dark theme
+   * they resolved to `unset` and broke `.tree-control-btn:hover/:active`
+   * and `.tree-sort-link.active` hover-fills. Real dark-mode rgbas
+   * live here; light overrides in the light block below. */
+  --accent-06: rgba(106, 167, 255, 0.06);
+  --accent-10: rgba(106, 167, 255, 0.10);
+  --accent-12: rgba(106, 167, 255, 0.12);
 }
 [data-theme="light"] {
   --bg: #ffffff;
@@ -44,18 +56,17 @@
   --ok-bg: rgba(26, 127, 55, 0.12);
   --warn-bg: rgba(154, 103, 0, 0.14);
   --bad-bg: rgba(207, 34, 46, 0.12);
-  --ok-fg: #1a7f37;
-  --warn-fg: #9a6700;
-  --bad-fg: #cf222e;
-  /* Accent overlay tints — replaces per-site `rgba(106, 167, 255, X)`
-   * literals that don't invert under the light theme. */
-  --accent-06: var(--accent-06);
-  --accent-10: rgba(106, 167, 255, 0.10);
-  --accent-12: var(--accent-12);
-}
-[data-theme="light"] {
-  /* Same accent, but keyed to the light-mode --accent so the tint
-   * stays perceptually similar without carrying dark-mode saturation. */
+  /* A3 v2 fix — darkened `--*-fg` in light theme so the small-text
+   * pair (`.zoom-tag` 11 px, `.diff-cell` 10 px) hits WCAG AA
+   * (≥4.5:1) on the tinted bgs. PR-1 kept them at the base status
+   * colours which gave 4.07/3.83/4.16 — worst was warn = 3.83. New
+   * values give ~7:1 for all three. */
+  --ok-fg: #14532d;
+  --warn-fg: #713f12;
+  --bad-fg: #7f1d1d;
+  /* Accent tint keyed to the light-mode `--accent` (#0969da) so the
+   * hover-fill perceptually matches instead of carrying dark-mode
+   * saturation into a bright palette. */
   --accent-06: rgba(9, 105, 218, 0.06);
   --accent-10: rgba(9, 105, 218, 0.10);
   --accent-12: rgba(9, 105, 218, 0.12);
@@ -558,9 +569,21 @@ button[data-holofs-was-busy="1"]::after {
 }
 
 .mut { color: var(--mut); }
+/* A4 v2 · non-colour status signal for text-status classes.
+ * `::before` glyph so red/green colour-blind users parse the state
+ * without relying on the hue. Excluded via `:not()`:
+ * · `.v` — stat-card values ("40/40") where a leading ✓ before the
+ *   number would look strange
+ * · `.swatch` — legend colour chips (the swatch IS the signal)
+ * · `.pmf-seg` — segments in stacked pmf bars (glyph in a 4-pixel
+ *   slice is illegible; segments already carry a title tooltip and
+ *   the row's aria-label narrates them). */
 .bad { color: var(--bad); font-weight: 600; }
+.bad:not(.v):not(.swatch):not(.pmf-seg)::before { content: "✗\00a0"; font-size: 0.85em; }
 .ok { color: var(--ok); font-weight: 600; }
+.ok:not(.v):not(.swatch):not(.pmf-seg)::before { content: "✓\00a0"; font-size: 0.85em; }
 .partial { color: var(--warn); font-weight: 600; }
+.partial:not(.v):not(.swatch):not(.pmf-seg)::before { content: "!\00a0"; font-size: 0.85em; }
 
 h2 {
   font-size: 15px;
