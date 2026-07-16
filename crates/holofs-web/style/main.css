@@ -47,6 +47,60 @@
   --ok-fg: #1a7f37;
   --warn-fg: #9a6700;
   --bad-fg: #cf222e;
+  /* Accent overlay tints — replaces per-site `rgba(106, 167, 255, X)`
+   * literals that don't invert under the light theme. */
+  --accent-06: var(--accent-06);
+  --accent-10: rgba(106, 167, 255, 0.10);
+  --accent-12: var(--accent-12);
+}
+[data-theme="light"] {
+  /* Same accent, but keyed to the light-mode --accent so the tint
+   * stays perceptually similar without carrying dark-mode saturation. */
+  --accent-06: rgba(9, 105, 218, 0.06);
+  --accent-10: rgba(9, 105, 218, 0.10);
+  --accent-12: rgba(9, 105, 218, 0.12);
+}
+
+/* === Design-system tokens ================================================
+ * Additive layer. The pre-existing values across the sheet still work as
+ * literals; use these vars in NEW rules and swap old ones opportunistically
+ * so the sheet doesn't drift further off the 4-px grid. Only committing
+ * the tokens themselves in this pass — component-side migration is a
+ * separate low-risk pass per section.
+ * ========================================================================= */
+:root, [data-theme="dark"] {
+  /* 4-px spacing scale — sums / paddings should pick from these. */
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* Type scale — 6 steps covers the 92 % of the sheet that uses 11-18px.
+   * Outliers (h1 22-38, emblem 48-64) stay literal — they're one-offs. */
+  --fs-xs:   11px;
+  --fs-sm:   12px;
+  --fs-base: 13px;
+  --fs-md:   14px;
+  --fs-lg:   16px;
+  --fs-h3:   18px;
+
+  /* Radius scale — 4 steps + pill.
+   * Pre-token histogram: 6(20) · 999(13) · 8(12) · 10(10) · 4(9) · 3(9)
+   * · 5(2) · 2(1) · 12(1). The 2 and 5 outliers are being cleaned up
+   * in this same commit. */
+  --r-sm:   3px;
+  --r-md:   6px;
+  --r-lg:  10px;
+  --r-xl:  12px;
+  --r-pill: 999px;
+
+  /* Shadow used by every popover / toast — was a hard-coded literal
+   * in five places (toast, dropdown, popover, versions-note, escrow). */
+  --shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 html { color-scheme: dark; }
 [data-theme="light"] html, html[data-theme="light"] { color-scheme: light; }
@@ -311,7 +365,7 @@ button[data-holofs-was-busy="1"]::after {
 .upload-form button, .dropzone button {
   font: inherit;
   background: var(--accent);
-  color: #0a1220;
+  color: var(--bg);
   border: 0;
   border-radius: 6px;
   padding: 8px 20px;
@@ -417,7 +471,7 @@ button[data-holofs-was-busy="1"]::after {
   background: var(--surf);
   border: 1px solid var(--bord);
   border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-popover);
   display: flex;
   flex-direction: column;
 }
@@ -477,7 +531,7 @@ button[data-holofs-was-busy="1"]::after {
   background: var(--surf);
   border: 1px solid var(--bord);
   border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-popover);
   min-width: 260px;
 }
 .card-rename-form input[type="text"] {
@@ -559,7 +613,7 @@ tr:last-child td { border-bottom: none; }
   background: var(--surf);
   color: var(--fg);
   border: 1px solid var(--bord);
-  border-radius: 5px;
+  border-radius: var(--r-md);
   padding: 4px 10px;
   cursor: pointer;
 }
@@ -812,7 +866,7 @@ h4.inspect-layer {
 .escrow-form button {
   font: inherit;
   background: var(--accent);
-  color: #0a1220;
+  color: var(--bg);
   border: 0;
   border-radius: 6px;
   padding: 8px 18px;
@@ -864,7 +918,7 @@ h4.inspect-layer {
 .mkdir-form button {
   font: inherit;
   background: var(--accent);
-  color: #0a1220;
+  color: var(--bg);
   border: 0;
   border-radius: 6px;
   padding: 6px 14px;
@@ -1226,9 +1280,9 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
 .tree-control-btn:hover {
   border-color: var(--accent);
   color: var(--accent);
-  background: rgba(106, 167, 255, 0.06);
+  background: var(--accent-06);
 }
-.tree-control-btn:active { background: rgba(106, 167, 255, 0.12); }
+.tree-control-btn:active { background: var(--accent-12); }
 .tree-control-icon {
   font-size: 15px;
   line-height: 1;
@@ -1286,7 +1340,7 @@ a.scope-pill:hover { background: var(--surf2); border-color: var(--accent); }
   transition: color .12s ease, background .12s ease;
 }
 .tree-sort-link:hover { color: var(--accent); }
-.tree-sort-link.active { color: var(--accent); background: rgba(106, 167, 255, 0.1); font-weight: 600; }
+.tree-sort-link.active { color: var(--accent); background: var(--accent-10); font-weight: 600; }
 
 /* Scrollable viewport for the tree. Bounded height keeps the page from
  * stretching forever; the inner <ul> handles long lists.
@@ -1839,7 +1893,7 @@ body.catalog-page .tree-scroll {
   flex: 1 1 auto;
   height: 10px;
   background: var(--surf2);
-  border-radius: 5px;
+  border-radius: var(--r-md);
   overflow: hidden;
 }
 .layer-bar .lb-fill {
@@ -2619,7 +2673,7 @@ body.catalog-page .tree-scroll {
   color: var(--fg);
   font-size: 13px;
   line-height: 1.4;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-popover);
   animation: holofs-toast-in 0.16s ease-out;
 }
 .holofs-toast-ok {
@@ -2654,7 +2708,7 @@ body.catalog-page .tree-scroll {
   grid-column: 1 / -1;
   grid-row: 2;
   height: 4px;
-  border-radius: 2px;
+  border-radius: var(--r-sm);
   background: var(--surf2);
   overflow: hidden;
 }
