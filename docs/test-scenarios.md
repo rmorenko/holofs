@@ -1079,7 +1079,8 @@ body and the browser-side `/holo/<name>` page works.
 
 ```sh
 curl -sI 'http://127.0.0.1:8787/preview/stream/photos/abstract/mandala-a.png'
-# Content-Type should be: multipart/x-mixed-replace; boundary=hololayer-```
+# Content-Type should be: multipart/x-mixed-replace; boundary=hololayer-<date>
+```
 
 **Browser**:
 

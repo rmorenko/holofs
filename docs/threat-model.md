@@ -61,7 +61,7 @@ Legend: ● critical, ◐ moderate.
 flowchart LR
     user[End user / Client] -->|HTTPS| edge[Edge proxy / TLS termination]
     edge -->|HTTP| gw[Gateway]
-    gw -->|"TCP (--tls: rustls TLS; --mtls: mutually authed)"| nodes[(Nodes)]
+    gw -->|"TCP + Ed25519 challenge (embedded: rustls; standalone: private-VLAN)"| nodes[(Nodes)]
     admin[Operator / admin key holder] -.->|signed whitelist| nodes
     admin -.->|signed whitelist| gw
     subgraph TB1["Untrusted (internet)"]
@@ -83,8 +83,28 @@ flowchart LR
 |--------------------|---------------------------------|-----------------|-----------------|
 | User → Edge        | Application-level (cookies, JWT) | TLS 1.3         | Out of scope    |
 | Edge → Gateway     | None today (planned: mTLS)      | None / mTLS     | Bind gateway to private VLAN |
-| Gateway ↔ Node     | Ed25519 challenge-response (+ optional mTLS) | Plain TCP, or rustls TLS via `--tls` | Wire-protocol nonce + signed handshake; `--mtls` adds X.509 cert verification |
+| Gateway ↔ Node     | Ed25519 challenge-response (gateway → node only) | Plain TCP; rustls TLS available **in embedded mode only** (see caveat) | Wire-protocol nonce + signed handshake; auth is one-way — the node serves any TCP peer that speaks the wire protocol |
 | Operator → Cluster | Admin Ed25519 signs whitelist   | Out-of-band     | Keep admin key offline / HSM |
+
+> **TLS caveat (current implementation).** rustls TLS on the wire
+> protocol is only plumbed for the *embedded* topology, where
+> `holofs-web` spawns the whole 40-node cluster in-process and can
+> hand each node a rustls server config directly. The standalone
+> `holofs-node` daemon has no `--tls`/`--mtls` flags today —
+> `holofs-cli/src/bin/holofs-node.rs` calls `spawn_node_persistent`
+> (plain TCP), and `holofs-web` acting as gateway for external nodes
+> cannot negotiate TLS with them either. For a real distributed
+> deployment, **the S2 / T5 mitigations below require you to bind the
+> gateway↔node hops to a private VLAN or run over WireGuard / a
+> service mesh**. The `--tls` / `--mtls` wording elsewhere in this
+> document is aspirational until the daemon grows the flags.
+>
+> **One-way auth.** The Ed25519 challenge-response is initiated by the
+> gateway; the node signs a fresh nonce so the gateway can verify it
+> against the whitelist. The node itself accepts any TCP peer that
+> speaks the wire protocol — it does not authenticate the caller.
+> That's fine when the gateway↔node hop is on a trusted segment (per
+> above); it is not "mutual authentication".
 
 ---
 
@@ -114,7 +134,7 @@ mitigations in this document target it.
 | # | Threat                                              | Mitigation |
 |---|-----------------------------------------------------|------------|
 | S1 | Attacker impersonates a node to receive shards     | Ed25519 challenge (`AuthChallenge`) — gateway verifies signature with whitelist pubkey before trusting any response. See [api.md §2 handshake](./api.md#authentication-handshake). |
-| S2 | Attacker impersonates the gateway to a node        | Run with `--mtls`: the node refuses any TLS handshake whose client certificate is not signed by the shared CA. Without `--mtls`, fall back to private-VLAN deployment. |
+| S2 | Attacker impersonates the gateway to a node        | Embedded mode only: rustls with client-cert verification via the self-signed CA `bootstrap.rs` generates. Standalone `holofs-node` has no `--mtls` flag today (see TLS caveat above) — **for external nodes, private-VLAN or WireGuard is the current mitigation**. |
 | S3 | Forged whitelist update                            | Whitelist is signed with admin Ed25519 key; nodes refuse unsigned or wrong-signature updates. |
 | S4 | Replay of a captured response                      | Per-request nonce in `AuthChallenge` ensures signatures bind to a fresh challenge. Wire frames carry no replay nonce yet for non-handshake messages — see [§7](#7-residual-risk-register). |
 
@@ -126,7 +146,7 @@ mitigations in this document target it.
 | T2 | Node returns a different shard than requested      | Manifest lists `shard_hashes[c][l][idx]`; gateway verifies hash matches the expected entry. |
 | T3 | On-disk corruption (bitrot)                        | Shard filenames *are* their hashes — startup scan and the background `Audit` task detect mismatches and trigger RLNC repair. |
 | T4 | Modification of catalog file                       | Catalog writes are `write-tmp+fsync+rename`. The Merkle root in each manifest cross-checks all shards; flipped catalog entries surface as decode failures. |
-| T5 | MITM modifies wire bytes                           | Run with `--tls`: rustls (TLS 1.2/1.3 via the `ring` provider) authenticates the server and encrypts every frame. Shard-hash verification remains a defence-in-depth check inside the TLS tunnel. |
+| T5 | MITM modifies wire bytes                           | Embedded mode: rustls (TLS 1.2/1.3 via the `ring` provider) authenticates the server and encrypts every frame. Standalone daemon: no TLS flag today — the shard-hash + Ed25519-handshake check catches malicious modifications inside the frame body, but a MITM can still snoop and drop. **Bind the hop to a trusted segment** until the daemon grows the flag. |
 
 ### 4.3. Repudiation
 
@@ -197,9 +217,15 @@ operators must consider.
 The following are **not** offered by holofs 0.1 and require external
 controls if needed:
 
-1. **End-to-end encryption.** Payloads are stored encoded but not
-   encrypted. A node with ≥ K shards of one object can reconstruct it.
-   Operators must classify holofs as "data-in-clear" at rest.
+1. **End-to-end encryption.** Payloads are stored encoded (RLNC over
+   GF(2⁸) is a code, not a cipher). A node with ≥ K shards of one
+   object can always reconstruct it.
+   **At-rest encryption of individual shards on disk *is* available**
+   via `HOLOFS_AT_REST_ENC=1` on the node (AES-256-GCM, HKDF-derived
+   from the node's identity seed, `HOLOFSS2` magic — see
+   `architecture.md §4.9`). It protects against filesystem-level reads
+   on one node host (insider read, backup leak), not against a node
+   process itself holding K shards.
 2. **Tenant isolation.** There is no per-user namespace; all objects
    share a single catalog. Multi-tenant deployments must front holofs
    with an authorising proxy.
@@ -215,7 +241,7 @@ controls if needed:
 
 | Risk                                                | Severity | Likelihood | Compensating control |
 |-----------------------------------------------------|:--------:|:----------:|----------------------|
-| Wire traffic in cleartext on shared LAN             | Low      | Low        | Mitigated by `--tls` (rustls TLS 1.2/1.3). Operators that do not set `--tls` should restrict to a private VLAN. |
+| Wire traffic in cleartext on shared LAN             | Med      | Low        | Only embedded mode currently negotiates `--tls`. Standalone-daemon deployments must restrict the gateway↔node hop to a private VLAN, WireGuard tunnel, or service mesh until the daemon grows a TLS flag. |
 | Compromise of admin key                             | Critical | Low        | Offline storage; quarterly rotation drill |
 | Wire-frame replay (non-handshake)                   | Medium   | Low        | Hash binding limits damage to integrity, not confidentiality |
 | Side-channel attacks on shared CPU                  | Medium   | Low        | Dedicated nodes for sensitive workloads |

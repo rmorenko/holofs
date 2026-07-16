@@ -1131,7 +1131,8 @@ corps multipart et que la page côté navigateur `/holo/<name>` marche.
 
 ```sh
 curl -sI 'http://127.0.0.1:8787/preview/stream/photos/abstract/mandala-a.png'
-# Content-Type devrait être : multipart/x-mixed-replace; boundary=hololayer-```
+# Content-Type devrait être : multipart/x-mixed-replace; boundary=hololayer-<date>
+```
 
 **Navigateur** :
 

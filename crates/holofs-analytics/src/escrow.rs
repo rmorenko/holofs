@@ -22,13 +22,24 @@
 //!
 //! ## Security
 //!
-//! - K-1 shares **leak no information** about the contents (information-
-//!   theoretic security, in the same class as Shamir). This holds because
-//!   every share is a fresh random linear combination over GF(256) — none
-//!   is a systematic `e_i` share that would raw-copy a plaintext chunk.
-//! - Shares contain only linear projections over GF(256) — no partial bit
-//!   leakage even under information-theoretic analysis.
-//! - Files may be stored with untrusted parties — cloud, IM, email — safely.
+//! This is a **threshold erasure code, not Shamir**. The coefficient
+//! vector for each share lives inside the `.holoshare` file itself
+//! (see the `coeffs` field below), so an adversary with K-1 shares gets
+//! K-1 linear equations over GF(256) with K unknowns — the solution
+//! shrinks to a one-dimensional subspace instead of the full
+//! `GF(256)^K`. That is roughly `(K-1)/K` of the plaintext's
+//! information; the remaining ~1/K is the only true secret. For
+//! plaintexts with self-checking structure (seed phrases, dictionary
+//! words, checksummed IDs) the adversary brute-forces that last
+//! dimension and recovers everything.
+//!
+//! - Good obfuscation, good availability primitive (any K shares
+//!   reconstruct byte-perfectly, no systematic share leaks a raw
+//!   chunk).
+//! - **Not** information-theoretically secure. **Not** Shamir.
+//! - **Do not** hand `.holoshare` files to untrusted parties. Wrap the
+//!   plaintext in an authenticated cipher first (encrypt-then-share,
+//!   the Krawczyk pattern) if you need real secrecy.
 //!
 //! ## `.holoshare` format
 //!

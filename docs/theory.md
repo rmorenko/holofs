@@ -427,10 +427,23 @@ makes each Shamir share a special RLNC shard. The reconstruction
 matrix is a Vandermonde determinant, always non-zero for distinct $x_j$.
 
 In holofs we don't use Vandermonde-Shamir directly; we use **random**
-coefficient vectors. The security guarantee is slightly weaker (any
-$K - 1$ shards leak a uniform pdf over the secret space — same as
-Shamir in the worst case, but not for all coefficient choices). For
-key-escrow use cases this is acceptable.
+coefficient vectors. This is a **threshold erasure code, not Shamir**:
+the coefficients ride along inside each `.holoshare` file (the `coeffs`
+field), so any $K-1$ shares give an adversary $K-1$ linear equations
+over $\mathrm{GF}(2^8)$ with $K$ unknowns — the solution collapses to a
+one-dimensional subspace instead of the whole $\mathrm{GF}(2^8)^K$.
+That's roughly $(K-1)/K$ of the plaintext's information; the remaining
+1/K is the only true secret. For plaintext with self-checking structure
+(seed phrases, dictionary words, checksummed IDs) the adversary
+brute-forces that last dimension trivially and recovers the whole
+secret.
+
+**Consequence:** this construction is a good obfuscation and a good
+availability primitive (any $K$ shares reconstruct byte-perfectly), but
+it is **not** information-theoretically secure and **not** Shamir. Do
+not treat `.holoshare` files as safe to hand to untrusted parties.
+Wrap the plaintext in an authenticated cipher first (Krawczyk's
+"encrypted-then-shared" pattern below) if you need real secrecy.
 
 ### holofs escrow
 
@@ -439,11 +452,12 @@ key-escrow use cases this is acceptable.
 Every one of the $N$ shares is a fresh random linear combination of the
 $K$ plaintext chunks — the systematic path from the general RLNC encoder
 (which would emit $\min(K, N)$ shares that raw-copy a plaintext chunk) is
-deliberately skipped for escrow. Without any systematic share the
-information-theoretic bound above holds: no proper subset of size $< K$
-distinguishes any two plaintexts. Shares are serialised as `.holoshare`
-files distributable to humans / devices. The escrow workflow is
-*pure-client*: nothing is stored on the cluster.
+deliberately skipped for escrow so no share is a literal plaintext copy.
+The threshold-erasure property from above still applies: $K$ shares
+reconstruct exactly, $K-1$ leak roughly $(K-1)/K$ of the plaintext.
+Shares are serialised as `.holoshare` files distributable to humans /
+devices. The escrow workflow is *pure-client*: nothing is stored on the
+cluster.
 
 **References.**
 

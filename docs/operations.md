@@ -752,9 +752,16 @@ triggers RLNC repair from siblings. Backup matters for:
 | Catalog snapshot     | Hourly          | `cp catalog/HOLOFSD1 → …` | S3 / NFS / tape     |
 | Shard dir            | Optional        | `restic` or zfs snapshots | Cold storage        |
 
-A periodic `holofs-admin export <name>` reconstructs an object into a
-single canonical file and writes it to an external bucket. This is the
-recommended way to back up **specific high-value objects**.
+> **Object-level export is not built in.** The prior paragraph in
+> this section described a `holofs-admin export <name>` /
+> `holofs-admin import` command pair. **Those commands do not exist**
+> in the CLI (`holofs-admin.rs` ships `gen-key`, `pubkey`,
+> `sign-whitelist`, `verify-whitelist`, `show-whitelist` only). To
+> back up "specific high-value objects" today, either
+> (a) `curl -o` the object out over the gateway HTTP API and push the
+> resulting blob to an off-site bucket, or (b) rely on the shard-dir
+> + catalog snapshot below. A first-class export command is on the
+> roadmap.
 
 ### 8.4. Restore procedures
 
@@ -763,7 +770,7 @@ recommended way to back up **specific high-value objects**.
 | Single node disk lost                 | Wipe disk; restart node; cluster auto-repairs shards. |
 | Multiple nodes lost, < margin         | No action needed — RLNC decode tolerates it. |
 | Catalog corrupt on gateway            | Copy `catalog/HOLOFSD1` from a peer gateway or the latest hourly backup; restart. |
-| Whole cluster lost                    | Provision new cluster; `holofs-admin import` each off-site export. |
+| Whole cluster lost                    | Provision new cluster; re-PUT each object over HTTP from the off-site bucket, or restore the shard-dir + catalog snapshot from cold storage. No `holofs-admin import` yet — see the caveat above. |
 | Whitelist key compromise              | Generate new admin key; re-sign whitelist; hot-reload (see [§10.4](#104-hot-reload-whitelist)). |
 
 ---
@@ -787,7 +794,7 @@ flowchart TD
     B -- Yes --> C[No action — let repair drain]
     B -- No  --> D{Catalog reachable?}
     D -- Yes --> E[Restore lost zones from manifest hints]
-    D -- No  --> F[Bootstrap new cluster + import from off-site]
+    D -- No  --> F[Bootstrap new cluster + re-PUT objects from off-site bucket]
 ```
 
 ### 9.3. Drills

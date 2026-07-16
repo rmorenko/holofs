@@ -1081,7 +1081,8 @@ curl -s 'http://127.0.0.1:8787/similar/photos/brand-pairs/logo-1.png' \
 
 ```sh
 curl -sI 'http://127.0.0.1:8787/preview/stream/photos/abstract/mandala-a.png'
-# Content-Type должен быть: multipart/x-mixed-replace; boundary=hololayer-```
+# Content-Type должен быть: multipart/x-mixed-replace; boundary=hololayer-<date>
+```
 
 **Браузер**:
 
