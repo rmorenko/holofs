@@ -12,6 +12,13 @@ whitelist, holoshare).
 4. [Convenciones de cabeceras de respuesta](#4-convenciones-de-cabeceras-de-respuesta)
 5. [Servidor MCP](#5-servidor-mcp)
 6. [Operaciones wavelet](#6-operaciones-wavelet)
+7. [Páginas UI](#7-páginas-ui)
+8. [Nuevos endpoints HTTP](#8-nuevos-endpoints-http)
+9. [Adiciones al protocolo de cable](#9-adiciones-al-protocolo-de-cable)
+10. [Adiciones al formato de manifiesto](#10-adiciones-al-formato-de-manifiesto)
+11. [Flags CLI / operador](#11-flags-cli--operador)
+12. [Workaround de activos estáticos](#12-workaround-de-activos-estáticos)
+13. [Pool de conexiones de cable](#13-pool-de-conexiones-de-cable)
 
 ---
 

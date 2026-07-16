@@ -12,6 +12,13 @@ shard, liste blanche, holoshare).
 4. [Conventions d'en-têtes de réponse](#4-conventions-den-têtes-de-réponse)
 5. [Serveur MCP](#5-serveur-mcp)
 6. [Opérations en ondelettes](#6-opérations-en-ondelettes)
+7. [Pages UI](#7-pages-ui)
+8. [Nouveaux endpoints HTTP](#8-nouveaux-endpoints-http)
+9. [Additions du protocole filaire](#9-additions-du-protocole-filaire)
+10. [Additions au format de manifeste](#10-additions-au-format-de-manifeste)
+11. [Drapeaux CLI / opérateur](#11-drapeaux-cli--opérateur)
+12. [Contournement d'asset statique](#12-contournement-dasset-statique)
+13. [Pool de connexions filaires](#13-pool-de-connexions-filaires)
 
 ---
 

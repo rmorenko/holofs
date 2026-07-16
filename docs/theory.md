@@ -31,7 +31,10 @@ $$
 $$
 
 i.e. polynomials over $\mathbb{F}_2$ with degree $< 8$, reduced modulo the
-Rijndael / AES polynomial $p(x) = \texttt{0x11d}$. Addition is bitwise XOR:
+irreducible polynomial $p(x) = x^8 + x^4 + x^3 + x^2 + 1 = \texttt{0x11d}$
+(distinct from AES's $\texttt{0x11b} = x^8 + x^4 + x^3 + x + 1$; both are
+valid degree-8 irreducibles, we pick the same one as `zfec`/`raptorq` so
+tables stay compatible). Addition is bitwise XOR:
 
 $$
 a \oplus b = (a_7 \oplus b_7,\, a_6 \oplus b_6,\, \dots,\, a_0 \oplus b_0).
@@ -394,6 +397,23 @@ free.
   against the manifest as it arrives, rejecting corrupt shards before
   decoding.
 
+### Second-preimage hardening
+
+A naïve Merkle tree — hash-of-hash-pairs with no domain separation — is
+vulnerable to second-preimage attacks: an attacker who can pick a leaf
+$L$ such that $H(L)$ equals an interior-node hash $H(a \| b)$ can
+substitute $L$ for the whole subtree without changing the root. holofs
+blocks this two ways:
+
+1. **Domain tags.** Leaves are hashed as
+   $H(\texttt{holofs-merkle-leaf-v1} \| \text{shard\_hash})$; interior
+   nodes as $H(\texttt{holofs-merkle-node-v1} \| a \| b)$. The two
+   domains cannot collide.
+2. **Leaf-count mixing.** The root is finalised as
+   $H(\texttt{holofs-merkle-root-v1} \| \text{leaf\_count} \| \text{tree\_root})$,
+   so duplicating the last leaf to pad to a power of two (a classic
+   canonicalisation ambiguity) is caught by the count.
+
 **Implementations.** [`holofs-core::hash`](../crates/holofs-core/src/hash.rs) (FIPS
 180-4 SHA-256, NIST-vector verified) and
 [`holofs-core::merkle`](../crates/holofs-core/src/merkle.rs).
@@ -483,11 +503,15 @@ an unbiased estimator with fixed memory $k$:
 
 1. Hash every shingle with a fixed hash $h$.
 2. Keep the $k$ smallest distinct hash values: $A_k = \{h(s) : s \in A\}_{(1..k)}$.
-3. Estimate Jaccard as
+3. Merge $A_k \cup B_k$, keep the $k$ smallest, and count how many appear
+   in **both** input sets. Estimate Jaccard as
 
 $$
-\hat J(A, B) \;=\; \frac{|A_k \cap B_k|}{k}.
+\hat J(A, B) \;=\; \frac{\bigl|\{\,x \in \operatorname{bottom}_k(A_k \cup B_k) : x \in A \wedge x \in B\,\}\bigr|}{k}.
 $$
+
+(Not $|A_k \cap B_k| / k$ — that estimator is biased when $|A|$, $|B|$
+differ. The union form matches `holofs_analytics::shingle::jaccard_similarity`.)
 
 This estimator has variance
 
@@ -552,7 +576,9 @@ only the first 16.
   \in [0,\, 48 \cdot 255]$, useful for exact-equality checks.
 - `/similar/<name>` derives dHash bits — one bit per adjacent-tile
   comparison within each channel strip, giving $3 \times 15 = 45$
-  bits — and reports similarity as $1 - \mathrm{hamming} / 45$. dHash
+  bits — and reports similarity as $\max\bigl(0,\ 1 - \mathrm{hamming} / 22.5\bigr)$
+  (re-anchored to the noise floor: two uncorrelated 45-bit hashes share
+  ~22.5 bits already, so anything at or beyond that clamps to 0). dHash
   degrades gracefully under geometric flips and chroma divergence,
   where raw L₁ saturates.
 

@@ -33,7 +33,7 @@ graph BT
     analytics["holofs-analytics<br/>fingerprint, escrow, MinHash re-export"]
     gateway["holofs-gateway<br/>catalog, decode, auto-repair, scrub<br/>(18-module fan-out)"]
     mcp["holofs-mcp<br/>Streamable-HTTP MCP server"]
-    web["holofs-web<br/>axum + Leptos 0.7 SSR + WASM hydrate<br/>(21-module fan-out)"]
+    web["holofs-web<br/>axum + Leptos 0.7 SSR + WASM hydrate<br/>(31-module fan-out)"]
     cli["holofs-cli<br/>holofs-admin, -bench, -inspect, ..."]
     testutils["holofs-testutils<br/>test-only helpers (dev-dep)"]
     e2e["holofs-e2e<br/>thirtyfour + chromedriver test harness"]
@@ -90,11 +90,13 @@ graph BT
 ```
 
 **Corrections from prior drafts:** earlier revisions listed three
-edges the code doesn't have — `core → embed` (embed is a
-dependency-free crate that only re-exports its `LayerBand` enum),
-`wire → gateway` (gateway pulls its wire-facing bits through
-`client`, not `wire` directly), and `web → mcp` (mcp is a
-downstream consumer of `web`, not the other way around). The graph
+edges the code doesn't have — `core → embed` (embed pulls the CLIP
+weights + a pure-Rust `candle` / `tokenizers` / `hf-hub` stack — not
+core-blocked, just a heavyweight downstream leaf that only exports its
+`Embedder` and `LayerBand` enum), `wire → gateway` (gateway pulls its
+wire-facing bits through `client`, not `wire` directly), and `mcp → web`
+(web is the downstream consumer of `mcp`, not the other way around —
+`holofs-web` embeds an MCP server the gateway serves over HTTP). The graph
 above is regenerated from `crates/*/Cargo.toml`. The `codec →
 analytics` edge is new post-S4-2 — `compute_minhash` moved from
 `analytics::shingle` into `codec::text_codec` so `client → analytics`
@@ -111,7 +113,7 @@ in the wrong crate.
 The `holofs-gateway` crate ships one type — `Gateway` — but its
 implementation is split across 18 sibling modules, each owning one
 `impl Gateway { ... }` block. Everything remaining in
-`http_gateway.rs` (288 lines) is state + accessors + the two shared
+`http_gateway.rs` (833 lines) is state + accessors + the two shared
 helpers `persist_catalog` and `invalidate_cache`. Public API is
 preserved via crate-root `pub use`; consumers still write
 `holofs_gateway::GatewayError`, `holofs_gateway::SimilarReport`,

@@ -11,6 +11,13 @@ Three external interfaces: **HTTP gateway**, **node wire protocol**, and
 4. [Response header conventions](#4-response-header-conventions)
 5. [MCP server](#5-mcp-server)
 6. [Wavelet operations](#6-wavelet-operations)
+7. [UI pages](#7-ui-pages)
+8. [New HTTP endpoints](#8-new-http-endpoints)
+9. [Wire protocol additions](#9-wire-protocol-additions)
+10. [Manifest format additions](#10-manifest-format-additions)
+11. [CLI / operator flags](#11-cli--operator-flags)
+12. [Static asset workaround](#12-static-asset-workaround)
+13. [Wire connection pool](#13-wire-connection-pool)
 
 ---
 

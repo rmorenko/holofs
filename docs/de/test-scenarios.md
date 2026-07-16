@@ -27,7 +27,7 @@ Szenario listet Kommandos, erwartetes Ergebnis und Erfolgsmarker.
 13. [TLS / mTLS auf dem Draht](#13-tls--mtls-auf-dem-draht)
 14. [Metriken, Logs, SSE](#14-metriken-logs-sse)
 15. [Regressionsprüfungen](#15-regressionsprüfungen)
-16. [Weitere Regressionsprüfungen](#16-weitere-regressionsprüfungen)
+16. [Regressionsprüfungen aus Stage 12](#16-regressionsprüfungen-aus-stage-12)
 17. [Wavelet-Operationen](#17-wavelet-operationen)
 18. [Quickstart mit dem Sample-Tree](#18-quickstart-mit-dem-sample-tree)
 19. [Per-Datei-Metrik-Seite](#19-per-datei-metrik-seite)
@@ -38,6 +38,7 @@ Szenario listet Kommandos, erwartetes Ergebnis und Erfolgsmarker.
 24. [Per-Objekt-Versionierung](#24-per-objekt-versionierung)
 25. [Orphan-Shard-GC + Embedding-GC](#25-orphan-shard-gc--embedding-gc)
 26. [Reliability-Szenarien](#26-reliability-szenarien)
+27. [Abschluss](#abschluss)
 
 ---
 
@@ -329,8 +330,8 @@ für
    - L2 — 26 Shards (16 + 10)
    - L3 — 18 Shards (16 + 2)
 3. **Alle 444 Thumbnails müssen rendern** (keine kaputten
-   `<img>`-Platzhalter). Vor 2 würden ~8 % unter gleichzeitiger Last
-   ausfallen.
+   `<img>`-Platzhalter). Vor dem Fix würden ~8 % unter gleichzeitiger
+   Last ausfallen.
 4. Beliebiges Thumbnail anklicken → landen auf
    `/inspect-zoom/<c_l_idx>/<name>` mit dem großen PNG, Hex-Coeffs,
    Payload.
@@ -603,7 +604,7 @@ Live-`/health`-Dashboard antreibt.
 Drei schnelle Sonden, die auf kürzlich behobene Issues zielen. Nach
 jeder Änderung am Gateway oder der Ingest-Pipeline ausführen.
 
-### 11.1 Range auf Medien
+### 15.1 Range auf Medien
 
 ```sh
 curl -i -H "Range: bytes=0-99" http://127.0.0.1:8787/photo.png \
@@ -613,7 +614,7 @@ curl -i -H "Range: bytes=0-99" http://127.0.0.1:8787/photo.png \
 Erwarte `206 Partial Content`, `Content-Range: bytes 0-99/<total>`,
 `Content-Length: 100`. Nicht 200, nicht 416.
 
-### 11.2 Inspect verwirft keine Shards
+### 15.2 Inspect verwirft keine Shards
 
 `http://127.0.0.1:8787/inspect/mandala.png` in einem Browser öffnen.
 Alle 444 Thumbnails müssen rendern. Im Log:
@@ -622,9 +623,9 @@ Alle 444 Thumbnails müssen rendern. Im Log:
 grep -E "/api/shard/" /tmp/holofs-cluster.log | grep -v "status=200" | wc -l
 ```
 
-Erwartet **0**. Vor 2 war das ~41.
+Erwartet **0**. Vor dem Fix war das ~41.
 
-### 11.3 Große Multipart-Uploads
+### 15.3 Große Multipart-Uploads
 
 ```sh
 # 3 MB file via escrow
@@ -643,7 +644,7 @@ Beide müssen `200`/`201` zurückgeben, nicht
 
 ---
 
-## 16. Weitere Regressionsprüfungen
+## 16. Regressionsprüfungen aus Stage 12
 
 ### 16.1 Similar Scope
 

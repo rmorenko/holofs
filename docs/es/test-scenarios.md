@@ -29,6 +29,18 @@ de éxito.
 13. [TLS / mTLS en el cable](#13-tls--mtls-en-el-cable)
 14. [Métricas, logs, SSE](#14-métricas-logs-sse)
 15. [Comprobaciones de regresión](#15-comprobaciones-de-regresión)
+16. [Comprobaciones de regresión de Etapa 12](#16-comprobaciones-de-regresión-de-etapa-12)
+17. [Operaciones wavelet](#17-operaciones-wavelet)
+18. [Quickstart con el árbol de muestra](#18-quickstart-con-el-árbol-de-muestra)
+19. [Página de métricas por archivo](#19-página-de-métricas-por-archivo)
+20. [Búsqueda semántica CLIP + bandas (Etapas 12.8 / 12.9 / 13.3)](#20-búsqueda-semántica-clip--bandas-etapas-128--129--133)
+21. [Columna robust-copy en `/similar`](#21-columna-robust-copy-en-similar)
+22. [Holograma en streaming](#22-holograma-en-streaming)
+23. [Modos de spotlight holográfico](#23-modos-de-spotlight-holográfico)
+24. [Versionado por objeto](#24-versionado-por-objeto)
+25. [GC de shard huérfano + GC de embedding (Etapas 14.0 / 14.3 / 14.4)](#25-gc-de-shard-huérfano--gc-de-embedding-etapas-140--143--144)
+26. [Escenarios de fiabilidad .x](#26-escenarios-de-fiabilidad-x)
+27. [Cierre](#cierre)
 
 ---
 
@@ -312,7 +324,7 @@ regresión para
    - L2 — 26 shards (16 + 10)
    - L3 — 18 shards (16 + 2)
 3. **Las 444 miniaturas deben renderizarse** (sin marcadores `<img>`
-   rotos). Antes de 2 ~8 % caían bajo carga concurrente.
+   rotos). Antes del fix ~8 % caían bajo carga concurrente.
 4. Hacer click en cualquier miniatura → aterrizar en
    `/inspect-zoom/<c_l_idx>/<name>` con el PNG grande, coeffs hex,
    payload.
@@ -586,7 +598,7 @@ impulsa el dashboard `/health` en vivo.
 Tres sondas rápidas que apuntan a issues recientemente arreglados.
 Ejecutarlas tras cualquier cambio al gateway o al pipeline de ingesta.
 
-### 11.1 Range en medios
+### 15.1 Range en medios
 
 ```sh
 curl -i -H "Range: bytes=0-99" http://127.0.0.1:8787/photo.png \
@@ -596,7 +608,7 @@ curl -i -H "Range: bytes=0-99" http://127.0.0.1:8787/photo.png \
 Esperado `206 Partial Content`, `Content-Range: bytes 0-99/<total>`,
 `Content-Length: 100`. No 200, no 416.
 
-### 11.2 Inspect no descarta shards
+### 15.2 Inspect no descarta shards
 
 Abrir `http://127.0.0.1:8787/inspect/mandala.png` en un navegador.
 Las 444 miniaturas deben renderizarse. En el log:
@@ -605,9 +617,9 @@ Las 444 miniaturas deben renderizarse. En el log:
 grep -E "/api/shard/" /tmp/holofs-cluster.log | grep -v "status=200" | wc -l
 ```
 
-Esperado **0**. Antes de 2 esto era ~41.
+Esperado **0**. Antes del fix esto era ~41.
 
-### 11.3 Uploads multipart grandes
+### 15.3 Uploads multipart grandes
 
 ```sh
 # archivo de 3 MB vía escrow
@@ -625,7 +637,7 @@ Ambos deben devolver `200`/`201`, no `400 multipart read: Error parsing`.
 
 ---
 
-## 16. – 12 comprobaciones de regresión
+## 16. Comprobaciones de regresión de Etapa 12
 
 ### 16.1 Similar scope
 

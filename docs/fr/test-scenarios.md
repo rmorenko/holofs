@@ -29,6 +29,18 @@ attendu et les marqueurs de succès.
 13. [TLS / mTLS sur le fil](#13-tls--mtls-sur-le-fil)
 14. [Métriques, logs, SSE](#14-métriques-logs-sse)
 15. [Contrôles de régression](#15-contrôles-de-régression)
+16. [Contrôles de régression de l'Étape 12](#16-contrôles-de-régression-de-létape-12)
+17. [Opérations en ondelettes](#17-opérations-en-ondelettes)
+18. [Démarrage rapide avec l'arborescence d'échantillons](#18-démarrage-rapide-avec-larborescence-déchantillons)
+19. [Page de métriques par fichier](#19-page-de-métriques-par-fichier)
+20. [Recherche sémantique CLIP + bandes (Stages 12.8 / 12.9 / 13.3)](#20-recherche-sémantique-clip--bandes-stages-128--129--133)
+21. [Colonne robust-copy sur `/similar`](#21-colonne-robust-copy-sur-similar)
+22. [Hologramme streamé](#22-hologramme-streamé)
+23. [Modes de spotlight holographique](#23-modes-de-spotlight-holographique)
+24. [Versionnement par objet](#24-versionnement-par-objet)
+25. [GC de shards orphelins + GC d'embeddings (Stages 14.0 / 14.3 / 14.4)](#25-gc-de-shards-orphelins--gc-dembeddings-stages-140--143--144)
+26. [Scénarios de fiabilité .x](#26-scénarios-de-fiabilité-x)
+27. [Conclusion](#conclusion)
 
 ---
 
@@ -317,7 +329,7 @@ régression pour
    - L2 — 26 shards (16 + 10)
    - L3 — 18 shards (16 + 2)
 3. **Toutes les 444 vignettes doivent se rendre** (pas de placeholders
-   `<img>` cassés). Avant 2, ~8 % chutaient sous charge concurrente.
+   `<img>` cassés). Avant le correctif, ~8 % chutaient sous charge concurrente.
 4. Cliquer sur une vignette → atterrir sur
    `/inspect-zoom/<c_l_idx>/<name>` avec le grand PNG, les coeffs hex,
    le payload.
@@ -595,7 +607,7 @@ Trois sondes rapides ciblant des problèmes récemment corrigés. Les
 exécuter après tout changement à la passerelle ou au pipeline
 d'ingestion.
 
-### 11.1 Range sur média
+### 15.1 Range sur média
 
 ```sh
 curl -i -H "Range: bytes=0-99" http://127.0.0.1:8787/photo.png \
@@ -605,7 +617,7 @@ curl -i -H "Range: bytes=0-99" http://127.0.0.1:8787/photo.png \
 Attendre `206 Partial Content`, `Content-Range: bytes 0-99/<total>`,
 `Content-Length: 100`. Pas 200, pas 416.
 
-### 11.2 Inspect ne perd pas de shards
+### 15.2 Inspect ne perd pas de shards
 
 Ouvrir `http://127.0.0.1:8787/inspect/mandala.png` dans un navigateur.
 Toutes les 444 vignettes doivent se rendre. Dans le log :
@@ -614,9 +626,9 @@ Toutes les 444 vignettes doivent se rendre. Dans le log :
 grep -E "/api/shard/" /tmp/holofs-cluster.log | grep -v "status=200" | wc -l
 ```
 
-Attendu **0**. Avant 2, c'était ~41.
+Attendu **0**. Avant le correctif, c'était ~41.
 
-### 11.3 Uploads multipart importants
+### 15.3 Uploads multipart importants
 
 ```sh
 # fichier de 3 Mo via séquestre
@@ -635,7 +647,7 @@ Les deux doivent retourner `200`/`201`, non
 
 ---
 
-## 16. – 12 contrôles de régression
+## 16. Contrôles de régression de l'Étape 12
 
 ### 16.1 Scope de similaires
 

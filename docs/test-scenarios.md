@@ -27,6 +27,18 @@ commands, expected result, and success markers.
 13. [TLS / mTLS on the wire](#13-tls--mtls-on-the-wire)
 14. [Metrics, logs, SSE](#14-metrics-logs-sse)
 15. [Regression checks](#15-regression-checks)
+16. [Stage-12 regression checks](#16-stage-12-regression-checks)
+17. [Wavelet operations](#17-wavelet-operations)
+18. [Quickstart with the sample tree](#18-quickstart-with-the-sample-tree)
+19. [Per-file metrics page](#19-per-file-metrics-page)
+20. [CLIP semantic search + bands (Stages 12.8 / 12.9 / 13.3)](#20-clip-semantic-search--bands-stages-128--129--133)
+21. [Robust-copy column on `/similar`](#21-robust-copy-column-on-similar)
+22. [Streaming hologram](#22-streaming-hologram)
+23. [Holographic spotlight modes](#23-holographic-spotlight-modes)
+24. [Per-object versioning](#24-per-object-versioning)
+25. [Orphan-shard GC + embedding GC (Stages 14.0 / 14.3 / 14.4)](#25-orphan-shard-gc--embedding-gc-stages-140--143--144)
+26. [.x reliability scenarios](#26-x-reliability-scenarios)
+27. [Wrap-up](#wrap-up)
 
 ---
 
@@ -307,7 +319,7 @@ generation math.
    - L2 — 26 shards (16 + 10)
    - L3 — 18 shards (16 + 2)
 3. **All 444 thumbnails must render** (no broken `<img>` placeholders).
-   Before 2 ~8% would drop under concurrent load.
+   Before the fix, ~8% would drop under concurrent load.
 4. Click any thumbnail → land on `/inspect-zoom/<c_l_idx>/<name>` with
    the large PNG, hex coeffs, payload.
 
@@ -565,12 +577,12 @@ with a JSON snapshot — this is what drives the live `/health` dashboard.
 
 ---
 
-## 15. regression checks
+## 15. Regression checks
 
 Three quick probes targeting recently-fixed issues. Run them after any
 change to the gateway or the ingest pipeline.
 
-### 11.1 Range on media
+### 15.1 Range on media
 
 ```sh
 curl -i -H "Range: bytes=0-99" http://127.0.0.1:8787/photo.png \
@@ -580,7 +592,7 @@ curl -i -H "Range: bytes=0-99" http://127.0.0.1:8787/photo.png \
 Expect `206 Partial Content`, `Content-Range: bytes 0-99/<total>`,
 `Content-Length: 100`. Not 200, not 416.
 
-### 11.2 Inspect doesn't drop shards
+### 15.2 Inspect doesn't drop shards
 
 Open `http://127.0.0.1:8787/inspect/mandala.png` in a browser. All 444
 thumbnails must render. In the log:
@@ -589,9 +601,9 @@ thumbnails must render. In the log:
 grep -E "/api/shard/" /tmp/holofs-cluster.log | grep -v "status=200" | wc -l
 ```
 
-Expected **0**. Before 2 this was ~41.
+Expected **0**. Before the fix this was ~41.
 
-### 11.3 Large multipart uploads
+### 15.3 Large multipart uploads
 
 ```sh
 # 3 MB file via escrow
@@ -609,7 +621,7 @@ Both must return `200`/`201`, not `400 multipart read: Error parsing`.
 
 ---
 
-## 16. – 12 regression checks
+## 16. Stage-12 regression checks
 
 ### 16.1 Similar scope
 
