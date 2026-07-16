@@ -443,6 +443,55 @@ fn LiveClusterStats(initial: HealthSnapshot) -> impl IntoView {
         _ => "connecting",
     };
 
+    // "updated N s ago" — the SSE snapshot carries a server-side
+    // ts_ms and the client ticks a 1 s counter so users notice a
+    // stalled feed even when the state indicator still says
+    // "connected" (some browser back-grounding paths keep the socket
+    // open but stall messages for tens of seconds). Tick lives inside
+    // a hydrate-only Effect so SSR doesn't spawn a phantom loop.
+    let age_secs = RwSignal::new(0i64);
+    Effect::new(move |_| {
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::closure::Closure;
+            use wasm_bindgen::JsCast;
+
+            let cb = Closure::<dyn FnMut()>::new(move || {
+                let ts = snap.get().ts_ms;
+                if ts == 0 {
+                    age_secs.set(-1);
+                    return;
+                }
+                let now = js_sys::Date::now() as i64;
+                age_secs.set(((now - ts as i64).max(0)) / 1000);
+            });
+            let win = web_sys::window();
+            if let Some(win) = win {
+                // 1 s tick — cheap; only touches one signal that
+                // three DOM nodes below subscribe to.
+                let _ = win.set_interval_with_callback_and_timeout_and_arguments_0(
+                    cb.as_ref().unchecked_ref(),
+                    1000,
+                );
+                cb.forget();
+            }
+        }
+    });
+    let age_label = move || {
+        let a = age_secs.get();
+        if a < 0 {
+            String::new()
+        } else if a < 5 {
+            "just now".to_string()
+        } else if a < 60 {
+            format!("{a} s ago")
+        } else if a < 3600 {
+            format!("{} min ago", a / 60)
+        } else {
+            format!("{} h ago", a / 3600)
+        }
+    };
+
     view! {
         // aria-live="polite" so screen readers announce updates
         // without stealing focus. Only these stat cards actually
@@ -463,6 +512,7 @@ fn LiveClusterStats(initial: HealthSnapshot) -> impl IntoView {
             <div class="stat live-hint">
                 <div class=sse_class role="img" aria-label=sse_aria>"●"</div>
                 <div class="l">{sse_label}</div>
+                <div class="sse-age mut">{age_label}</div>
             </div>
         </section>
     }
@@ -583,13 +633,16 @@ fn HealthDetailBody(data: ObjectHealthView) -> impl IntoView {
         // A9: plain-English intro + colour-swatch legend for the
         // ok/partial/bad cell classes. Was "wall of numbers" before —
         // an engineer parses it, /about promises "readable by
-        // non-specialists". The legend uses the same tokens the
-        // cells use (--ok-bg / --warn-bg / --bad-bg from PR-1).
+        // non-specialists". v2 tweak: use the same .ok/.partial/.bad
+        // classes the CELLS wear, so the legend's visual language
+        // (glyph + coloured bold text) matches what the user sees
+        // inside the matrix rather than a coloured background swatch
+        // that reads as an unrelated symbol.
         <p class="dashboard-intro">{t!("health.matrix_intro")}</p>
         <div class="dashboard-legend">
-            <span><i class="swatch ok"></i>{t!("health.legend.ok")}</span>
-            <span><i class="swatch partial"></i>{t!("health.legend.partial")}</span>
-            <span><i class="swatch bad"></i>{t!("health.legend.bad")}</span>
+            <span class="ok">{t!("health.legend.ok")}</span>
+            <span class="partial">{t!("health.legend.partial")}</span>
+            <span class="bad">{t!("health.legend.bad")}</span>
         </div>
         <LayerMatrix layers=layers channels=channels nlayers=nlayers k=k/>
 

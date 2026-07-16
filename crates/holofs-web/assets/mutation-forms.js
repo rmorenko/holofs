@@ -222,7 +222,30 @@
         });
     }
 
+    // Multipart upload cap. Mirrors the server-side
+    // `handlers::main::UPLOAD_BODY_LIMIT` (256 MiB) so we can reject
+    // over-size files locally with a friendly MiB message instead of
+    // relying on axum's `DefaultBodyLimit` rejection text. The PUT
+    // path (`/*name`) has a much higher cap (1 GiB) enforced inside
+    // `handlers/objects.rs` — different flow, not affected.
+    var UPLOAD_CAP_MIB = 256;
+
     function submitViaXhr(form, okMsg) {
+        // Client-side size guard for multipart uploads. Saves the
+        // round-trip and gives an actionable message that mentions
+        // MiB instead of `PayloadTooLarge` /
+        // `Request body larger than …`.
+        var fileInput = form.querySelector('input[type="file"]');
+        if (fileInput && fileInput.files && fileInput.files.length > 0) {
+            var f = fileInput.files[0];
+            var mib = f.size / (1024 * 1024);
+            if (mib > UPLOAD_CAP_MIB) {
+                showToast("err",
+                    "file too large: " + mib.toFixed(1) + " MiB (cap " +
+                    UPLOAD_CAP_MIB + " MiB)");
+                return;
+            }
+        }
         // XHR path exists so we can surface upload.onprogress %.
         var fd = new FormData(form);
         var xhr = new XMLHttpRequest();
@@ -321,6 +344,34 @@
         if (!shouldIntercept(form)) return;
         ev.preventDefault();
         var okMsg = form.dataset.holofsMutateOk || "";
+
+        // Undo busy-indicator's submit-capture bump. busy-indicator
+        // sits on `capture: true` and unconditionally bumps
+        // `holofsBusy(true)` on every submit — assuming a full
+        // navigation will follow. Our bubble-phase preventDefault
+        // aborts that navigation, so without this decrement the
+        // counter stays at 1 for ~30 s (busy-indicator's safety
+        // timeout) — a spinning top-of-viewport progress bar on every
+        // 4xx failure. Fetch / XHR are wrapped separately by
+        // busy-indicator, so they bump / release their own counters
+        // for the actual round-trip.
+        if (typeof window.holofsBusy === "function") {
+            window.holofsBusy(false);
+        }
+        // Same story for the submitter button — busy-indicator
+        // disabled it and pinned `data-holofs-was-busy="1"`. We
+        // manage the enable/disable ourselves below, so clear
+        // busy-indicator's flag now (otherwise its 30-s safety
+        // timeout decrements the counter a second time when it
+        // finally fires).
+        var busyBtn = ev.submitter ||
+            form.querySelector("button[type='submit'], input[type='submit']");
+        if (busyBtn) {
+            if (busyBtn.dataset && busyBtn.dataset.holofsWasBusy === "1") {
+                delete busyBtn.dataset.holofsWasBusy;
+                busyBtn.disabled = false;
+            }
+        }
 
         // Hygiene · UI-UX: if the form carries a `<input name="return_to">`
         // whose value is empty, fill it with the current URL right

@@ -2644,6 +2644,15 @@ body.catalog-page .tree-scroll {
 .dashboard-legend .swatch.partial { background: var(--warn-bg); border-color: var(--warn); }
 .dashboard-legend .swatch.bad { background: var(--bad-bg); border-color: var(--bad); }
 
+/* "updated N s ago" line inside the SSE live-hint stat card. Small,
+ * muted, sits below the SSE status label. Empty (via `display:none`
+ * would break Leptos view logic — the empty string just collapses). */
+.sse-age {
+  font-size: 10px;
+  margin-top: 2px;
+  color: var(--mut);
+}
+
 /* Monte-Carlo pmf → single-row stacked bar. Each segment is a
  * `.pmf-seg` <span> whose flex-basis is the pmf % it represents.
  * Sits inside a `<td>`, replacing the raw "12.4%" number for the
