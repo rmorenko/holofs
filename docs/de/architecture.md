@@ -354,6 +354,50 @@ rename <name>.shard.tmp → <name>.shard
 Ein Absturz hinterlässt entweder nichts oder einen vollständigen Shard —
 niemals eine zerrissene Datei.
 
+### WAL + Group-Commit
+
+Jeder `Store::put_appended` (aufgerufen vom Node-Service-Handler für
+`Request::Put` / `Request::PutBatch`) schreibt einen
+length-prefixed Record mit SHA-256-Digest in ein append-only
+WAL-Segment (`wal-<N>.log`, Magic `HOLOFSW1`). Ein Hintergrund-
+Flusher wacht alle `HOLOFS_NODE_FLUSH_INTERVAL_MS` auf (Default
+5 ms, still geklemmt auf ≥ 1 ms nach dem B3-Fix), flusht den
+`BufWriter`, gibt den Store-Lock frei und ruft `fsync` auf die
+darunterliegende Datei via `spawn_blocking`. Wenn fsync zurückkehrt,
+wird `wal_synced_seq` inkrementiert und jeder Waiter für eine
+Sequenz ≤ diesem Wert benachrichtigt. Unter einem 24-Encoder-Burst
+verwandelt das 24 × 12 ≈ 288 gleichzeitige Per-Shard-fsyncs in
+~200 gebündelte fsync/s, wobei jeder Batch N pending Appends
+amortisiert. Der Handler gibt `Ack` erst zurück, wenn sein
+zugewiesener WAL-Seq auf der Platte gelandet ist — die
+Durabilitätsgrenze bleibt gegenüber der pre-WAL-Ära unverändert.
+
+### At-Rest-Verschlüsselung (AES-256-GCM)
+
+`HOLOFS_AT_REST_ENC=1` auf dem Node setzen — der Schalter ist
+boolean, kein Hex-Key. Der 32-Byte-Schlüssel wird HKDF-SHA256-
+abgeleitet aus dem eigenen Ed25519-Identity-Seed des Nodes
+(dieselbe `identity.key`, die für den Wire-Handshake benutzt wird),
+mit `salt = "holofs-shard-salt-v1"` und
+`info = "holofs-shard-key-v1"`. Bei Aktivierung wechselt der
+Node-Service das Shard-File-Magic von `HOLOFSS1` auf `HOLOFSS2` und
+versiegelt den `coeffs || payload`-Blob mit AES-256-GCM; die
+12-Byte-Nonce wird direkt nach dem AAD-Header inline abgelegt.
+Shard-Hashes werden auf dem *Plaintext*-Payload berechnet, Hash-
+Inventar und Content-Addressing bleiben also unverändert — ein Node,
+der das Flag mid-life umschaltet, gibt beim nächsten Scan dieselbe
+Hash-Liste aus. Siehe
+`crates/holofs-storage/src/crypto.rs::derive_shard_key` für die
+Ableitung und das On-Disk-Format.
+
+**Bedrohungsdeckung.** Schützt vor Filesystem-Level-Reads auf dem
+Node-Host (Insider-Read, Backup-Tape-Leak). Schützt **nicht** vor
+dem Node-Prozess selbst, der K Shards eines Objekts hält — der
+Plaintext wird bei jedem Read entschlüsselt. Und weil der Schlüssel
+am Identity-Seed hängt, bedeutet ein verlorener Identity-Key
+unrettbare Shards; die `identity.key` vor Aktivierung offline
+sichern.
+
 ### Index-Wiederherstellung
 
 Bei `Store::open(dir)` läuft der Node durch seinen Baum und

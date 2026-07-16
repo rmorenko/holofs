@@ -54,16 +54,18 @@ cargo build --release --workspace
 
 Бинарники появляются в `target/release/`:
 
-| Бинарь           | Назначение                                     |
-|------------------|------------------------------------------------|
-| `holofs`         | Основной multi-command CLI                     |
-| `holofs-node`    | Демон одной ноды                               |
-| `holofs-web`     | HTTP-шлюз (axum + Leptos SSR)                  |
-| `holofs-admin`   | Admin-операции кластера (whitelist, ban)       |
-| `holofs-bench`   | Бенчмарки                                      |
-| `holofs-inspect` | Инспекция манифестов / шардов                  |
-| `holofs-cluster` | All-in-one (встроенные N нод + gateway)        |
-| `holofs-fs`      | Помощники для локальной файловой системы       |
+| Бинарь               | Назначение                                     |
+|----------------------|------------------------------------------------|
+| `holofs-web`         | HTTP-шлюз + встроенный кластер (axum + Leptos SSR) |
+| `holofs-node`        | Демон одной ноды (`ADDR --storage DIR`)        |
+| `holofs-admin`       | Whitelist keygen + подписание                  |
+| `holofs-cluster`     | Локальный dev-harness: N in-process нод + gateway |
+| `holofs-fs`          | Playground для локальной файловой системы      |
+| `holofs-inspect`     | Инспекция манифестов / шардов                  |
+| `holofs-bench`       | Бенчмарки                                      |
+| `holofs-soak`        | Долгий генератор случайных операций против живого gateway |
+| `holofs-soak-report` | Рендер HTML + Markdown отчёта из soak-каталога |
+| `holofs`             | Legacy single-command CLI                      |
 
 ### 2.3. Whitelist (обязателен в проде)
 
@@ -379,6 +381,7 @@ RLNC/DWT-кодек ждёт `&[u8]`; полностью streaming-ingest вне
 |-----------------------------|--------------|------------------------------------------------------|
 | `HOLOFS_ENABLE_VERSIONS`    | `false`      | Зеркало `--enable-versions`. Архивирует каждый PUT-replace как side-файл под `<storage>/versions/<sanitized>/v…bin`. |
 | `HOLOFS_ENABLE_EMBED`       | `false`      | Зеркало `--enable-embed`. Загружает CLIP-multilingual модель на первый PUT или первый `/api/search`, затем поддерживает `embeddings.bin`. |
+| `HOLOFS_ASYNC_ENCODE`       | `false`      | Переключает дефолтный RLNC PUT-путь с sync на async. Handler возвращает `202 Accepted` сразу после коммита placeholder-манифеста; encode + shard fan-out уходят на detached tokio task. Read-handler'ы гейтятся по `ManifestState` — см. §10.7 по замерам throughput и когда это уместно. |
 | `HOLOFS_MCP_TOKEN`          | —            | Если задано, `/mcp`-эндпоинт требует `Authorization: Bearer <token>` И включает write-tools. Без переменной эндпоинт остаётся открытым + read-only. |
 
 ### 5.8. TOML-файл конфигурации
@@ -872,3 +875,222 @@ curl -s http://gw:8787/inspect/photo.png
 ```
 
 Полный inventory маршрутов см. в [api.md](./api.md).
+
+### 10.7. Soak-тестирование
+
+`holofs-soak` гоняет рандомизированный HTTP-трафик по живому gateway'у
+часами, пишет всё, что произошло, и на выходе даёт `summary.json` —
+рабочий сценарий такой: «загейтить подозрительное изменение
+overnight-soak'ом, утром разобрать `errors.jsonl`».
+
+Через `--topology` доступны три топологии:
+
+| `--topology`     | Что делает раннер                                                            |
+|------------------|-------------------------------------------------------------------------------|
+| `external`       | Подключается к уже работающему gateway'ю по `--base` (дефолт). Ничего не спавнит. |
+| `embedded`       | Спавнит один процесс `holofs-web` с встроенным 40-нодовым кластером.          |
+| `multi-process`  | Спавнит `--nodes` процессов `holofs-node` + whitelist-запущенный `holofs-web`. |
+
+Для двух спавн-топологий storage-корень — временный каталог под
+`$TMPDIR` (удаляется на выходе, если не указан `--cluster-storage <dir>`);
+пост-boot seed — `deploy/dev-seed.sh`, если не переопределён через
+`--seed-script <path>`. Бинарники ищутся рядом с `holofs-soak`; для
+явного пути — `--binary-dir <dir>` (например `target/release`).
+
+**Опциональные фичи спавн-gateway'я:**
+
+- `--enable-embed` — включает CLIP semantic search на спавнутом
+  `holofs-web` и триггерит `POST /api/embed_all` после сида, чтобы
+  индекс был готов до старта воркеров. Без флага раннер пробует
+  `/api/search` на бут-таймере и убирает op `search` из микса — без
+  этого был бы 500-storm на невключённой фиче.
+- `--enable-versions` — включает per-object version history. Если off,
+  `versions_list` тоже выпадает из микса.
+
+Оба флага по умолчанию `false` (совпадает с `make dev`), чтобы быстрые
+smoke-прогоны стартовали шустро. Включайте их для реалистичных 8-часовых
+soak'ов.
+
+**Ручки throttling.** По дефолту 50 воркеров × ~0.5s think-time дают
+~100 ops/сек — достаточно, чтобы нагрузить embedded 40-нодовый
+кластер, но легко, чтобы не устроить self-inflicted retry storm.
+Четыре флага для тонкой настройки:
+
+| Флаг                        | Дефолт | Эффект                                                                 |
+|------------------------------|--------|------------------------------------------------------------------------|
+| `--thinktime <dur>`          | `500ms` | Верхняя граница случайной паузы воркера между операциями.              |
+| `--error-backoff <dur>`      | `500ms` | База sleep'а после 5xx / транспортной ошибки. Удваивается на каждую подряд. |
+| `--error-backoff-max <dur>`  | `30s`  | Потолок экспоненциального backoff'а.                                    |
+| `--rate-limit <ops/s>`       | `0`    | Глобальный token bucket на всех воркеров. `0` = выключено.              |
+| `--op-mix "op=w,..."`        | `""`   | Переопределить вес любой операции; `w=0` убирает операцию из микса.     |
+
+Включённый **`--rate-limit`** даёт жёсткий потолок независимо от числа
+воркеров — удобно для воспроизводимых гистограмм латентности. `--op-mix`
+позволяет вырезать read-heavy или write-heavy сценарии без правки
+кода (например `--op-mix "put_new=3,put_replace=2"` для mostly-read;
+`--op-mix "search=0,similar=0"` — исключить аналитику).
+
+Эффективные веса и throttle-настройки также пишутся в `config.json`,
+чтобы пост-анализ прогона точно знал, какой микс дал эти цифры.
+
+**Baseline-профили на этой машине.** 3-минутный soak на
+`--topology multi-process --nodes 4` (Macbook M-серии, release-build):
+
+| Профиль                     | Воркеры | Op-mix                     | Timeout | RPS   | Err % |
+|-----------------------------|--------:|----------------------------|--------:|------:|------:|
+| smoke-only                  | 10      | default                    | 30 с    | 1.7   | 3.9 % |
+| default (не рабочий)        | 50      | default                    | 30 с    | 4.4   | 45 %  |
+| write-light                 | 50      | `put_new=3,put_replace=2`  | 30 с    | 23.4  | 7.5 % |
+| **realistic sweet spot**    | **50**  | **`put_new=3,put_replace=1`** | **60 с** | **8.4** | **4.0 %** |
+| longer client patience      | 50      | `put_new=3,put_replace=1`  | 120 с   | 10.9  | 10.7 % |
+
+**Async ingest (`HOLOFS_ASYNC_ENCODE=1`).** Опциональный server-side
+флаг, который переключает дефолтный RLNC PUT-путь с sync (`201 Created`
+после завершения encode + fanout) на async: placeholder-манифест
+коммитится синхронно в `ManifestState::Encoding`, encode + shard fan-out
+уходят на detached tokio task, handler возвращает `202 Accepted` с
+заголовком `Location: /path` и JSON `{state:"encoding", …}`.
+Read-handler'ы гейтятся по state: GET/HEAD по `Encoding` → `503
+Retry-After: 5`, по `Failed` → `404`. DELETE по `Encoding` → `409
+Conflict`. Startup-recovery принижает уцелевшие после сбоя `Encoding`
+до `Failed`, чтобы неаккуратный shutdown не оставлял tombstone'ов.
+
+Замеры на 4-нодовой multi-process топологии, тот же профиль
+(`--workers 50 --op-mix "put_new=3,put_replace=1" --thinktime 500ms`):
+
+| Путь              | PUT p50    | Общий RPS | Примечания |
+|-------------------|-----------:|----------:|------------|
+| Sync (baseline)   | 49 969 мс  | 8.4       | Клиент ждёт весь encode. |
+| Sync + fan-out    | 34 822 мс  | 5.3       | Параллельный wire; encode всё ещё на горячем пути. |
+| **Async 202**     | **113 мс** | **24.1**  | Encode полностью снят с горячего пути. |
+
+Раннер в текущей форме не понимает `202` + `Retry-After` polling —
+трактует `Encoding` GET как обычный 503, — поэтому async-прогон выше
+показывает завышенные ~45 % ошибок. Polling-aware клиент (или будущее
+изменение раннера) свернёт их обратно в нормальные 200-е.
+
+**Когда включать `HOLOFS_ASYNC_ENCODE=1`:** burst-heavy пайплайны, где
+клиент может отработать «please poll me back» — bulk-загрузки,
+sync/replication-джобы, batch ingest. Sync остаётся дефолтом для
+интерактивных PUT, где клиенту нужен прямой `201` и финальный
+data_cid.
+
+Два контр-интуитивных вывода из исследования:
+
+- Повышение `--request-timeout` с 60 до 120 с сделало **хуже**, а не
+  лучше: клиенты, что ждут дольше, держат больше конкурентных PUT
+  в-полёте, MEDIUM-permits (дефолт 64) заполняются, каскад 5xx.
+  60 с — sweet spot для 4-нодового кластера.
+- Повышение gateway-side `HOLOFS_MEDIUM_CONCURRENCY` с 64 до 128 тоже
+  сделало **хуже** — лишние permit'ы позволяют больше PUT'ов
+  крутиться параллельно, но PUT CPU-heavy (JPEG decode + DWT + RLNC
+  fanout) и голодит одновременный GET на том же хосте. GET p50
+  подскочил с 1 мс до 79 мс, суммарный error rate вырос. 64 остаётся
+  дефолтом; поднимайте только когда workload доказательно
+  read-dominant.
+
+```sh
+# 1) External: кластер уже запущен, например через `make dev`.
+./target/release/holofs-soak \
+    --topology external \
+    --base http://127.0.0.1:8787 \
+    --workers 50 --duration 8h --out .soak
+
+# 2) Embedded: 40 in-process нод; проще всего, совпадает с `make dev`.
+./target/release/holofs-soak \
+    --topology embedded \
+    --gateway-port 8787 \
+    --enable-embed --enable-versions \
+    --workers 50 --duration 8h \
+    --binary-dir target/release --out .soak
+
+# 3) Multi-process: N нод-демонов + gateway с подписанным whitelist'ом.
+./target/release/holofs-soak \
+    --topology multi-process \
+    --nodes 8 --node-base-port 5100 --gateway-port 8787 \
+    --enable-embed --enable-versions \
+    --workers 50 --duration 8h \
+    --binary-dir target/release --out .soak
+```
+
+Каждый прогон пишет в `.soak/<utc-timestamp>/`:
+
+| Файл                    | Содержимое                                                       |
+|-------------------------|-------------------------------------------------------------------|
+| `config.json`           | Параметры (seed, длительность, воркеры, base URL, таймауты).      |
+| `ops.jsonl`             | Одна строка на HTTP-вызов: `{t, worker, op, target, http, ms, err?}`. |
+| `errors.jsonl`          | Тот же формат, отфильтрованный до `http >= 500` или транспортных ошибок. |
+| `metrics.jsonl`         | Снапшоты `/metrics` + `/api/stats` каждые `--metrics-interval`.   |
+| `health-events.jsonl`   | Сырой SSE-поток `/api/health/events`.                             |
+| `summary.json`          | Per-op counts, p50/p95/p99 латентность, гистограмма HTTP-статусов. |
+
+Op-selection взвешен в сторону чтения (`get_random` ≈ 30 %,
+`put_new` ≈ 15 %, `put_replace` ≈ 10 %, `search` ≈ 8 %,
+catalog-мутации ≈ 12 %), чтобы раннер сильнее нагружал read + version
+пути, чем админ-поверхность. Ctrl-C корректно останавливает и всё
+равно пишет summary. Веса и набор ops зашиты в код — правьте
+`crates/holofs-cli/src/bin/holofs-soak.rs`, если нужен другой микс под
+конкретное расследование.
+
+Раннер намеренно **read-mostly на админ-поверхности**: не вызывает
+`/api/gc`, `/admin/node`, escrow-endpoint'ы — его можно нацелить на
+живой staging-gateway без побочных эффектов на состояние кластера
+помимо обычных PUT/DELETE.
+
+Shutdown корректный во всех трёх топологиях:
+
+- Ctrl-C или дедлайн `--duration` дёргает `CancellationToken`;
+  воркеры, writer, metrics-collector, SSE-consumer выходят по
+  порядку, потом пишется `summary.json`.
+- Для `embedded`/`multi-process` спавн-дочки получают SIGTERM (через
+  `Child::start_kill`) после того, как `summary.json` на диске,
+  каждый с 5-секундным grace-period. Scratch-tempdir'ы удаляются на
+  выходе.
+- Если прогон паникует до `summary.json`, `kill_on_drop(true)` на
+  каждом спавн-`Child` всё равно гарантирует, что gateway или ноды не
+  протекут в следующий тест.
+
+### 10.7.a. Отчёты
+
+`holofs-soak-report` превращает каталог прогона в самодостаточный
+отчёт. HTML — дефолт (inline CSS + inline SVG-графики, ни CDN, ни JS
+— открывается в любом браузере и остаётся читаемым годы спустя);
+Markdown — для git-коммит-friendly summary или комментов к
+GitHub-issue. Оба формата за один вызов через `--format both`.
+
+```sh
+# Последний прогон под .soak/, HTML → .soak/<run>/report.html
+holofs-soak-report
+
+# Явный прогон, оба формата, 30-секундные бакеты для короткого soak'а
+holofs-soak-report .soak/2026-07-07T15-34-41Z --format both --bucket 30s
+
+# Кастомный путь вывода (расширение подставится для `both`)
+holofs-soak-report --format both --output ~/soak-nightly
+# → ~/soak-nightly.html + ~/soak-nightly.md
+```
+
+Отчёт содержит:
+
+1. **Обзор** — всего операций, error rate, средний RPS, elapsed vs
+   заявленная длительность, размер бакета.
+2. **Тайминги по операции** — count, ошибки, скипы, p50/p95/p99 мс,
+   max мс.
+3. **Таймлайны throughput и ошибок** — RPS по бакетам + stacked
+   `{4xx, 5xx, transport}` ошибки по бакетам, плюс overlay p95-латентности
+   для top-5 операций по объёму.
+4. **Per-worker нагрузка** — бар-чарты ops и errors.
+5. **Топ ошибок** — самые частые `(op, target, http)` тройки плюс
+   дедуплицированные транспортные сообщения.
+6. **Cluster-телеметрия** — таймлайны `objects_total`, `shards_total`,
+   `bytes_total`, `nodes_live` и repair-счётчиков прямо из
+   `/api/stats`; плюс Prometheus-метрики
+   `holofs_backpressure_rejected_total`,
+   `holofs_handler_timeouts_total`,
+   `holofs_rate_limit_rejected_total`,
+   `holofs_backpressure_permits_available{bucket}`, распарсенные из
+   `metrics.jsonl`.
+7. **Sample health-events** — первые 20 SSE-фреймов дословно (хвост
+   вырезается с указанием количества).
+8. **Воспроизводимость** — полный `config.json` вставлен в конец для
+   точного повтора.

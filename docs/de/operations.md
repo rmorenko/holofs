@@ -56,16 +56,18 @@ cargo build --release --workspace
 
 Erzeugte Binaries unter `target/release/`:
 
-| Binary           | Zweck                                          |
-|------------------|------------------------------------------------|
-| `holofs`         | Haupt-Multi-Command-CLI                        |
-| `holofs-node`    | Einzelner Node-Daemon                          |
-| `holofs-web`     | HTTP-Gateway (axum + Leptos SSR)               |
-| `holofs-admin`   | Cluster-Admin-Operationen (Whitelist, Ban)     |
-| `holofs-bench`   | Benchmarks                                     |
-| `holofs-inspect` | Manifest- / Shard-Inspektion                   |
-| `holofs-cluster` | Alles-in-einem (eingebettete N Nodes + Gateway) |
-| `holofs-fs`      | Lokale Dateisystem-Helfer                      |
+| Binary               | Zweck                                          |
+|----------------------|------------------------------------------------|
+| `holofs-web`         | HTTP-Gateway + eingebetteter Cluster (axum + Leptos SSR) |
+| `holofs-node`        | Standalone-Node-Daemon (`ADDR --storage DIR`) |
+| `holofs-admin`       | Whitelist-Keygen + Signieren                   |
+| `holofs-cluster`     | Lokales Dev-Harness: N in-process Nodes + Gateway |
+| `holofs-fs`          | Lokales Filesystem-Playground                  |
+| `holofs-inspect`     | Manifest- / Shard-Inspektion                   |
+| `holofs-bench`       | Benchmarks                                     |
+| `holofs-soak`        | Langlaufender Random-Op-Driver gegen ein laufendes Gateway |
+| `holofs-soak-report` | HTML- + Markdown-Report aus einem Soak-Run-Verzeichnis rendern |
+| `holofs`             | Legacy-Single-Command-CLI                      |
 
 ### 2.3. Whitelist (in der Produktion erforderlich)
 
@@ -376,6 +378,7 @@ Timeouts sind bewusst pro Bucket hart kodiert (SHORT 10 s, MEDIUM
 |-----------------------------|---------|----------------------------------------------------------|
 | `HOLOFS_ENABLE_VERSIONS`    | `false` | Spiegel von `--enable-versions`. Archiviert jedes PUT-Replace als Seitendatei unter `<storage>/versions/<sanitized>/v…bin`. |
 | `HOLOFS_ENABLE_EMBED`       | `false` | Spiegel von `--enable-embed`. Lädt das CLIP-multilingual-Modell beim ersten PUT oder ersten `/api/search`, pflegt anschließend `embeddings.bin`. |
+| `HOLOFS_ASYNC_ENCODE`       | `false` | Schaltet den Default-RLNC-PUT-Pfad von sync auf async um. Handler antwortet `202 Accepted`, sobald der Placeholder-Manifest committed ist; Encode + Shard-Fan-out laufen auf einem detached tokio-Task. Read-Handler gaten auf `ManifestState` — siehe §10.7 für Durchsatz-Messungen und wann das sinnvoll ist. |
 | `HOLOFS_MCP_TOKEN`          | —       | Wenn gesetzt, erfordert der `/mcp`-Endpunkt `Authorization: Bearer <token>` UND aktiviert die Write-Tools. Ohne die Variable bleibt der Endpunkt offen und read-only. |
 
 ### 5.8. TOML-Konfigurationsdatei
@@ -885,3 +888,231 @@ curl -s http://gw:8787/inspect/photo.png
 ```
 
 Siehe [api.md](./api.md) für das vollständige Routen-Inventar.
+
+### 10.7. Soak-Testing
+
+`holofs-soak` fährt stundenlang randomisierten HTTP-Traffic gegen ein
+laufendes Gateway, zeichnet jeden Aufruf auf und exit't mit einer
+`summary.json` — der Zweck ist „ein verdächtiges Change über Nacht
+mit einem Soak absichern, morgens `errors.jsonl` triagieren".
+
+Drei Cluster-Topologien via `--topology`:
+
+| `--topology`     | Was der Runner tut                                                          |
+|------------------|-----------------------------------------------------------------------------|
+| `external`       | Verbindet sich zu einem bereits laufenden Gateway auf `--base` (Default). Kein Lifecycle. |
+| `embedded`       | Startet einen `holofs-web`-Prozess mit dem in-process 40-Node-Cluster.       |
+| `multi-process`  | Startet `--nodes` `holofs-node`-Prozesse + ein whitelist-freigegebenes `holofs-web`. |
+
+Für die zwei Spawn-Topologien liegt der Storage-Root in einem Scratch-
+tempdir unter `$TMPDIR` (auf Exit gelöscht, außer `--cluster-storage
+<dir>` ist gesetzt), und der Post-Boot-Seed ist `deploy/dev-seed.sh`,
+falls nicht `--seed-script <path>` überschreibt. Binaries werden neben
+`holofs-soak` selbst gesucht, oder `--binary-dir <dir>` verweist
+woanders hin (z.B. `target/release`).
+
+**Optionale Feature-Flags für das gespawnte Gateway:**
+
+- `--enable-embed` — aktiviert die CLIP-Semantic-Search auf dem
+  gespawnten `holofs-web` und triggert ein `POST /api/embed_all` nach
+  dem Seed, damit der Index vor dem Worker-Start populiert ist. Ohne
+  das Flag prüft der Runner `/api/search` beim Boot und lässt den Op
+  `search` aus dem Mix fallen — kein 500-Storm auf einem nicht
+  verdrahteten Feature.
+- `--enable-versions` — aktiviert per-Objekt Version-History.
+  Ausgeschaltet fällt `versions_list` gleichermaßen aus dem Mix.
+
+Beide Flags sind default `false` (passt zu `make dev`), damit kurze
+Smoke-Runs schnell starten. Für realistische 8-Stunden-Soaks
+einschalten.
+
+**Throttling-Regler.** 50 Worker × ~0,5 s Think-Time geben per Default
+~100 Ops/Sek — genug, um einen embedded 40-Node-Cluster zu belasten,
+leicht genug, um keinen selbstverursachten Retry-Sturm auszulösen.
+Vier Flags feintunen:
+
+| Flag                        | Default | Effekt                                                                    |
+|------------------------------|---------|---------------------------------------------------------------------------|
+| `--thinktime <dur>`          | `500ms` | Obere Grenze der Zufalls-Pause, die jeder Worker zwischen Ops nimmt.       |
+| `--error-backoff <dur>`      | `500ms` | Basis-Sleep nach 5xx / Transport-Fehler. Verdoppelt pro Folge-Fehler.      |
+| `--error-backoff-max <dur>`  | `30s`   | Deckel für den exponentiellen Backoff.                                      |
+| `--rate-limit <ops/s>`       | `0`     | Globaler Token-Bucket über alle Worker. `0` = deaktiviert.                  |
+| `--op-mix "op=w,..."`        | `""`    | Überschreibt jedes Op-Gewicht; `w=0` entfernt das Op komplett aus dem Mix. |
+
+**`--rate-limit`** an gibt einen harten Deckel unabhängig von der
+Worker-Zahl — praktisch für reproduzierbare Latenz-Histogramme.
+`--op-mix` schneidet read-heavy / write-heavy Szenarien ohne
+Quellcode-Änderung heraus (z.B. `--op-mix "put_new=3,put_replace=2"`
+für ein overwhelmingly-read-Profil, `--op-mix "search=0,similar=0"`
+um Analytics-Endpunkte zu überspringen).
+
+Effektive Gewichte und Throttle-Settings landen auch in `config.json`,
+damit die Post-Run-Analyse exakt weiß, welcher Mix die Zahlen erzeugt hat.
+
+**Baseline-Profile auf dieser Maschine.** 3-Minuten-Soak auf
+`--topology multi-process --nodes 4` (Macbook M-Serie, Release-Build):
+
+| Profil                       | Worker | Op-Mix                       | Timeout | RPS   | Err % |
+|-------------------------------|-------:|-------------------------------|--------:|------:|------:|
+| Smoke-only                    | 10     | default                       | 30 s    | 1,7   | 3,9 % |
+| Default (unbrauchbar)         | 50     | default                       | 30 s    | 4,4   | 45 %  |
+| Write-light                   | 50     | `put_new=3,put_replace=2`     | 30 s    | 23,4  | 7,5 % |
+| **Realistischer Sweet-Spot**  | **50** | **`put_new=3,put_replace=1`** | **60 s** | **8,4** | **4,0 %** |
+| Längere Client-Geduld         | 50     | `put_new=3,put_replace=1`     | 120 s   | 10,9  | 10,7 % |
+
+**Async-Ingest (`HOLOFS_ASYNC_ENCODE=1`).** Optionales Server-Flag,
+das den Default-RLNC-PUT-Pfad von sync (`201 Created` nach Encode +
+Fanout) auf async umschaltet: das Placeholder-Manifest wird synchron
+in `ManifestState::Encoding` committed, Encode + Shard-Fan-out laufen
+auf einem detached tokio-Task, der Handler antwortet mit `202
+Accepted`, `Location: /path` Header + JSON `{state:"encoding", …}`.
+Read-Handler gaten auf den State — GET/HEAD auf `Encoding` gibt `503
+Retry-After: 5`, auf `Failed` gibt `404`. DELETE auf `Encoding` gibt
+`409 Conflict`. Startup-Recovery stuft übriggebliebene `Encoding`-
+Manifeste auf `Failed` herunter, damit ein unsauberes Shutdown keine
+Tombstones hinterlässt.
+
+Messungen auf der 4-Node-multi-process Soak-Topologie, gleiches
+Profil (`--workers 50 --op-mix "put_new=3,put_replace=1" --thinktime
+500ms`):
+
+| Pfad              | PUT p50    | Total RPS | Notes |
+|-------------------|-----------:|----------:|-------|
+| Sync (Baseline)   | 49 969 ms  | 8,4       | Client wartet auf den vollen Encode. |
+| Sync + Fan-out    | 34 822 ms  | 5,3       | Paralleler Wire; Encode noch auf dem Hot-Path. |
+| **Async 202**     | **113 ms** | **24,1**  | Encode komplett aus dem Hot-Path raus. |
+
+Der Runner in seiner heutigen Form versteht `202` + `Retry-After`-
+Polling nicht — behandelt ein `Encoding`-GET als plain 503, deshalb
+zeigt der Async-Run oben eine überzogene Fehlerrate von ~45 %. Ein
+polling-fähiger Client (oder ein zukünftiger Runner-Umbau) klappt das
+zurück auf normale 200er.
+
+**Wann `HOLOFS_ASYNC_ENCODE=1` verwenden:** burst-heavy Pipelines, in
+denen der Caller einen „poll mich später zurück"-Flow verträgt — Bulk-
+Uploads, Sync/Replikations-Jobs, Batch-Ingest. Sync bleibt Default für
+interaktive PUTs, wo der Client eine glatte `201` und einen finalen
+data_cid will.
+
+Zwei kontraintuitive Findings aus der Studie:
+
+- `--request-timeout` von 60 s auf 120 s heraufsetzen macht es
+  **schlechter**, nicht besser: Clients, die länger warten, halten
+  mehr gleichzeitige PUTs in-flight, MEDIUM-Permits (default 64)
+  füllen sich, 5xx-Kaskade. 60 s ist der Sweet-Spot für einen 4-Node-
+  Cluster.
+- `HOLOFS_MEDIUM_CONCURRENCY` gateway-seitig von 64 auf 128
+  heraufsetzen macht es ebenfalls **schlechter** — die Extra-Permits
+  lassen mehr PUTs laufen, aber PUT ist CPU-heavy (JPEG-Decode + DWT
+  + RLNC-Fanout) und hungert parallele GETs auf demselben Host aus.
+  GET p50 sprang von 1 ms auf 79 ms, Netto-Error-Rate stieg. 64
+  bleibt Default; nur hochdrehen, wenn der Workload nachweislich
+  read-dominant ist.
+
+```sh
+# 1) External: Cluster läuft schon, z.B. per `make dev`.
+./target/release/holofs-soak \
+    --topology external \
+    --base http://127.0.0.1:8787 \
+    --workers 50 --duration 8h --out .soak
+
+# 2) Embedded: 40 in-process Nodes; einfachster Weg, passt zu `make dev`.
+./target/release/holofs-soak \
+    --topology embedded \
+    --gateway-port 8787 \
+    --enable-embed --enable-versions \
+    --workers 50 --duration 8h \
+    --binary-dir target/release --out .soak
+
+# 3) Multi-process: N Node-Daemons + Gateway mit signierter Whitelist.
+./target/release/holofs-soak \
+    --topology multi-process \
+    --nodes 8 --node-base-port 5100 --gateway-port 8787 \
+    --enable-embed --enable-versions \
+    --workers 50 --duration 8h \
+    --binary-dir target/release --out .soak
+```
+
+Jeder Run schreibt nach `.soak/<utc-timestamp>/`:
+
+| Datei                  | Inhalt                                                              |
+|------------------------|----------------------------------------------------------------------|
+| `config.json`          | Parameter (Seed, Dauer, Worker, Base URL, Timeouts).                 |
+| `ops.jsonl`            | Eine Zeile pro HTTP-Call: `{t, worker, op, target, http, ms, err?}`. |
+| `errors.jsonl`         | Gleiches Schema, gefiltert auf `http >= 500` oder Transport-Errors.  |
+| `metrics.jsonl`        | Snapshot von `/metrics` + `/api/stats` alle `--metrics-interval`.     |
+| `health-events.jsonl`  | Roher `/api/health/events` SSE-Stream.                                |
+| `summary.json`         | Per-Op-Counts, p50/p95/p99-Latenz, HTTP-Status-Histogramm.            |
+
+Op-Selection ist read-gewichtet (`get_random` ≈ 30 %,
+`put_new` ≈ 15 %, `put_replace` ≈ 10 %, `search` ≈ 8 %,
+Catalog-Mutations ≈ 12 %), damit der Runner Read- und Version-Pfade
+stärker belastet als die Admin-Fläche. Ctrl-C fährt sauber runter und
+schreibt trotzdem das Summary. Gewichte und Op-Set sind kompiliert —
+`crates/holofs-cli/src/bin/holofs-soak.rs` patchen, falls für eine
+konkrete Untersuchung ein anderer Mix gebraucht wird.
+
+Der Runner ist bewusst **read-mostly auf der Admin-Fläche**: er ruft
+nicht `/api/gc`, `/admin/node` oder die Escrow-Endpunkte auf — man
+kann ihn also auf ein live Staging-Gateway richten ohne
+Cluster-State-Seiteneffekte über normales PUT/DELETE hinaus.
+
+Shutdown ist in allen drei Topologien graceful:
+
+- Ctrl-C oder die `--duration`-Deadline flippt einen
+  `CancellationToken`; Worker, Writer, Metrics-Collector und
+  SSE-Consumer drainen in Reihenfolge, dann wird `summary.json`
+  geschrieben.
+- Für `embedded`/`multi-process` bekommen die gespawnten Kinder
+  SIGTERM (via `Child::start_kill`) nachdem `summary.json` auf der
+  Platte ist, jeweils mit 5 s Grace-Period. Scratch-Tempdirs werden
+  beim Rausgehen gelöscht.
+- Wenn der Run vor `summary.json` paniced, sorgt `kill_on_drop(true)`
+  an jedem gespawnten `Child` trotzdem dafür, dass keine Gateway-
+  oder Node-Prozesse in den nächsten Testlauf durchsickern.
+
+### 10.7.a. Reports
+
+`holofs-soak-report` verwandelt ein Run-Verzeichnis in einen
+self-contained Report. HTML ist Default (Inline-CSS + Inline-SVG-
+Charts, kein CDN, kein JS — öffnet sich in jedem Browser und bleibt
+Jahre später noch lesbar); Markdown gibt es für git-committable
+Summaries oder GitHub-Issue-Anhänge. Beide Formate mit `--format both`
+in einem Aufruf.
+
+```sh
+# Letzter Run unter .soak/, HTML → .soak/<run>/report.html
+holofs-soak-report
+
+# Expliziter Run, beide Formate, 30-Sekunden-Buckets für kurzen Soak
+holofs-soak-report .soak/2026-07-07T15-34-41Z --format both --bucket 30s
+
+# Custom Output-Pfad (Extension wird für `both` automatisch gehängt)
+holofs-soak-report --format both --output ~/soak-nightly
+# → ~/soak-nightly.html + ~/soak-nightly.md
+```
+
+Der Report enthält:
+
+1. **Überblick** — Total-Ops, Fehlerrate, mittlere RPS, elapsed vs
+   konfigurierte Dauer, Bucket-Größe.
+2. **Timings pro Operation** — Count, Errors, Skipped, p50/p95/p99
+   ms, max ms.
+3. **Throughput- und Fehler-Timelines** — RPS pro Bucket + gestapelte
+   `{4xx, 5xx, transport}` Errors pro Bucket, plus p95-Latenz-Overlay
+   für die Top-5-Ops nach Volumen.
+4. **Per-Worker-Last** — Ops- und Errors-Bar-Charts.
+5. **Top-Fehler** — häufigste `(op, target, http)`-Tripel plus
+   deduplizierte Transport-Fehler-Messages.
+6. **Cluster-Telemetrie** — Timelines von `objects_total`,
+   `shards_total`, `bytes_total`, `nodes_live` und den
+   Repair-Countern direkt aus `/api/stats`; plus die Prometheus-
+   Metriken `holofs_backpressure_rejected_total`,
+   `holofs_handler_timeouts_total`,
+   `holofs_rate_limit_rejected_total` und
+   `holofs_backpressure_permits_available{bucket}` aus der
+   `metrics.jsonl` geparst.
+7. **Health-Events-Sample** — die ersten 20 SSE-Frames wörtlich (der
+   Rest wird mit Count elidiert).
+8. **Reproduzierbarkeit** — vollständige `config.json` am Ende
+   eingebettet für exakten Rerun.

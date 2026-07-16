@@ -357,6 +357,49 @@ rename <name>.shard.tmp → <name>.shard
 Un crash laisse soit rien, soit un shard complet — jamais un fichier
 déchiré.
 
+### WAL + group-commit
+
+Chaque `Store::put_appended` (appelé depuis le handler du
+node-service pour `Request::Put` / `Request::PutBatch`) écrit un
+enregistrement length-prefixed avec digest SHA-256 dans un segment
+WAL append-only (`wal-<N>.log`, magic `HOLOFSW1`). Un flusher en
+tâche de fond se réveille toutes les
+`HOLOFS_NODE_FLUSH_INTERVAL_MS` (défaut 5 ms, silencieusement clampé
+à ≥ 1 ms après le fix B3), flush le `BufWriter`, libère le lock du
+store et appelle `fsync` sur le fichier sous-jacent via
+`spawn_blocking`. Quand fsync revient, `wal_synced_seq` est
+incrémenté et chaque waiter pour une séquence ≤ cette valeur est
+notifié. Sous un burst de 24 encodeurs, ça transforme 24 × 12 ≈ 288
+fsyncs per-shard concurrents en ~200 fsyncs/s batchés, chaque batch
+amortissant N appends en attente. Le handler ne retourne `Ack`
+qu'après que sa WAL-seq assignée soit posée sur disque — la
+frontière de durabilité reste inchangée depuis l'ère pre-WAL.
+
+### Chiffrement at-rest (AES-256-GCM)
+
+Mettre `HOLOFS_AT_REST_ENC=1` sur le nœud pour activer — le switch
+est booléen, pas une clé hex. La clé de 32 octets est HKDF-SHA256-
+dérivée du seed d'identité Ed25519 propre au nœud (la même
+`identity.key` utilisée pour le handshake wire), avec
+`salt = "holofs-shard-salt-v1"` et `info = "holofs-shard-key-v1"`.
+Une fois activé, le node-service bascule le magic du fichier shard
+de `HOLOFSS1` à `HOLOFSS2` et scelle le blob
+`coeffs || payload` avec AES-256-GCM ; le nonce de 12 octets est
+stocké inline juste après le header AAD. Les hashes de shards sont
+calculés sur le payload *plaintext*, donc l'inventaire des hashes et
+l'adressage par contenu ne bougent pas — un nœud qui bascule le
+flag en cours de vie réémet la même liste de hashes au prochain
+scan. Voir `crates/holofs-storage/src/crypto.rs::derive_shard_key`
+pour la dérivation et le format on-disk.
+
+**Couverture des menaces.** Protège contre les lectures niveau
+filesystem sur l'hôte du nœud (insider read, fuite de bande de
+backup). Ne protège **pas** contre le processus nœud lui-même qui
+détient K shards d'un objet — le plaintext est déchiffré à chaque
+lecture. Et comme la clé est liée au seed d'identité, une clé
+d'identité perdue signifie des shards irrécupérables ; sauvegarder
+`identity.key` hors-ligne avant activation.
+
 ### Récupération de l'index
 
 À `Store::open(dir)`, le nœud parcourt son arbre et reconstruit

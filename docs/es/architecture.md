@@ -353,6 +353,49 @@ rename <name>.shard.tmp → <name>.shard
 Un crash deja o bien nada o bien un shard completo — nunca un archivo
 troceado.
 
+### WAL + group-commit
+
+Cada `Store::put_appended` (invocado desde el handler del node-service
+para `Request::Put` / `Request::PutBatch`) escribe un registro
+length-prefixed con digest SHA-256 en un segmento WAL append-only
+(`wal-<N>.log`, magic `HOLOFSW1`). Un flusher en segundo plano se
+despierta cada `HOLOFS_NODE_FLUSH_INTERVAL_MS` (defecto 5 ms,
+silenciosamente clampado a ≥ 1 ms tras el fix B3), flushea el
+`BufWriter`, libera el lock del store y llama `fsync` sobre el
+fichero subyacente vía `spawn_blocking`. Cuando fsync vuelve,
+`wal_synced_seq` se incrementa y todos los waiters para una secuencia
+≤ ese valor son notificados. Bajo un burst de 24 encoders, esto
+transforma 24 × 12 ≈ 288 fsyncs per-shard concurrentes en ~200
+fsyncs/s batchados, amortizando N appends pendientes por batch. El
+handler no retorna `Ack` hasta que su WAL-seq asignada aterrice en
+disco — la frontera de durabilidad queda igual que en la era
+pre-WAL.
+
+### Cifrado at-rest (AES-256-GCM)
+
+Ponga `HOLOFS_AT_REST_ENC=1` en el nodo para activar — el switch es
+booleano, no una clave hex. La clave de 32 bytes se deriva HKDF-
+SHA256 del propio seed de identidad Ed25519 del nodo (la misma
+`identity.key` usada para el handshake wire), con
+`salt = "holofs-shard-salt-v1"` e `info = "holofs-shard-key-v1"`. Al
+activarse, el node-service cambia el magic del fichero shard de
+`HOLOFSS1` a `HOLOFSS2` y sella el blob `coeffs || payload` con
+AES-256-GCM; el nonce de 12 bytes se guarda inline justo después
+del header AAD. Los hashes de shards se computan sobre el payload
+*plaintext*, así que el inventario de hashes y el content-addressing
+no cambian — un nodo que conmuta el flag a mitad de vida re-emite
+la misma lista de hashes en el siguiente escaneo. Véase
+`crates/holofs-storage/src/crypto.rs::derive_shard_key` para la
+derivación y el formato on-disk.
+
+**Cobertura de amenazas.** Protege contra lecturas a nivel de
+filesystem en el host del nodo (insider read, fuga de cinta de
+backup). **No** protege contra el propio proceso node que posee K
+shards de un objeto — el plaintext se descifra en cada lectura. Y
+como la clave está atada al seed de identidad, una clave de identidad
+perdida significa shards irrecuperables; respaldar `identity.key`
+off-line antes de activar.
+
 ### Recuperación del índice
 
 En `Store::open(dir)` el nodo recorre su árbol y reconstruye el índice

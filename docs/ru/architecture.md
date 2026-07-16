@@ -350,6 +350,45 @@ rename <name>.shard.tmp → <name>.shard
 При падении на диске остаётся либо ничего, либо целый шард — рваного
 файла не бывает.
 
+### WAL + group-commit
+
+Каждый `Store::put_appended` (вызывается из хендлера node-сервиса на
+`Request::Put` / `Request::PutBatch`) пишет length-prefixed запись с
+sha256-дайджестом в append-only WAL-сегмент (`wal-<N>.log`, magic
+`HOLOFSW1`). Фоновый flusher просыпается каждые
+`HOLOFS_NODE_FLUSH_INTERVAL_MS` (дефолт 5 мс, молча клампится до ≥ 1
+мс после фикса B3), сбрасывает `BufWriter`, отпускает store-лок и
+вызывает `fsync` по нижележащему файлу через `spawn_blocking`. Когда
+fsync возвращается, `wal_synced_seq` бампится и все ожидатели
+последовательности ≤ этого значения нотифицируются. Под burst из
+24 encoder'ов это превращает 24 × 12 ≈ 288 конкурентных
+per-shard fsync'ов в ~200 batched fsync/сек, где каждый batch
+амортизирует N pending-appends. Handler не возвращает `Ack`, пока
+его WAL-seq не приземлится на диск, — граница durability не
+изменилась по сравнению с pre-WAL эрой.
+
+### At-rest шифрование (AES-256-GCM)
+
+Установите `HOLOFS_AT_REST_ENC=1` на ноде для включения — переключатель
+булев, не hex-ключ. 32-байтовый ключ HKDF-SHA256 выводится из
+собственного Ed25519 identity-seed ноды (тот же `identity.key`, что
+используется для wire-handshake), с `salt = "holofs-shard-salt-v1"` и
+`info = "holofs-shard-key-v1"`. При включении node-сервис
+переключает magic шард-файла с `HOLOFSS1` на `HOLOFSS2` и запечатывает
+`coeffs || payload` с AES-256-GCM; 12-байтовый nonce хранится инлайн
+сразу после AAD-заголовка. Хэши шардов считаются по *plaintext*
+payload, так что hash inventory и content-addressing не меняются —
+нода, переключающая флаг mid-life, эмитит тот же список хэшей на
+следующем скане. См. `crates/holofs-storage/src/crypto.rs::derive_shard_key`
+по деривации и on-disk формату.
+
+**Покрытие угроз.** Защищает от filesystem-level чтения на хосте
+ноды (инсайдер, утечка бэкап-ленты). **Не** защищает от самой node-
+процесса, держащего K шардов объекта, — plaintext расшифровывается
+на каждом чтении. И поскольку ключ привязан к identity-seed, потеря
+identity-key означает невосстановимые шарды; забэкапьте `identity.key`
+оффлайн до включения.
+
 ### Восстановление индекса
 
 На `Store::open(dir)` нода обходит своё дерево и пересобирает
