@@ -292,8 +292,16 @@ button[data-holofs-was-busy="1"]::after {
   justify-content: center;
 }
 
-/* Hide the native file input but keep it accessible. */
-.upload-form input[type="file"], .dropzone input[type="file"] {
+/* Hide native `<input type="file">` visuals wherever a `.file-label`
+ * wraps them — the styled `.file-button` <span> takes the click.
+ * Generalized so this works both in the styled `.upload-form` block
+ * and inside compact tree-inline / tree-root / directory-`+` popover
+ * flows. Prior scope was `.upload-form` / `.dropzone` only, so tree
+ * uploads showed browser-locale "Файл не выбран" text next to the
+ * native button — a diss in an English UI. */
+.file-label input[type="file"],
+.upload-form input[type="file"],
+.dropzone input[type="file"] {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -304,13 +312,14 @@ button[data-holofs-was-busy="1"]::after {
   white-space: nowrap;
   border: 0;
 }
-
+.file-label,
 .upload-form .file-label {
   display: inline-flex;
   align-items: center;
   gap: 10px;
   cursor: pointer;
 }
+.file-button,
 .upload-form .file-button {
   display: inline-block;
   background: var(--surf2);
@@ -322,10 +331,76 @@ button[data-holofs-was-busy="1"]::after {
   font-weight: 500;
   transition: border-color .15s ease, color .15s ease;
 }
+.file-label:hover .file-button,
+.file-label input[type="file"]:focus + .file-button,
 .upload-form .file-label:hover .file-button,
 .upload-form input[type="file"]:focus + .file-button {
   border-color: var(--accent);
   color: var(--accent);
+}
+/* Compact variant for tree rows — smaller padding + type so the file
+ * button fits alongside the mkdir input without doubling row height. */
+.dir-add-menu .file-button {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* Post-live-test feedback: every dir row used to lay out
+ *   [⊕][⊖] · new-folder-input · [+folder] · file-input · [↑ upload] ·
+ *   open→ · delete
+ * — the mkdir + upload forms overflowed the viewport ("Фай…бран",
+ * "open" clipped). Now the two forms live behind a `<details
+ * class="dir-add">` "+" popover so the row stays short and the
+ * whole set is still one click away. */
+.dir-add {
+  display: inline;
+  position: relative;
+}
+.dir-add > summary {
+  display: inline-block;
+  cursor: pointer;
+  padding: 0 6px;
+  color: var(--accent);
+  list-style: none;
+  user-select: none;
+  font-weight: 600;
+}
+.dir-add > summary::-webkit-details-marker { display: none; }
+.dir-add > summary::marker { content: ""; }
+.dir-add > summary:hover { color: var(--fg); }
+.dir-add[open] > summary { color: var(--fg); }
+.dir-add-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  min-width: 260px;
+  padding: 10px;
+  background: var(--surf);
+  border: 1px solid var(--bord);
+  border-radius: 6px;
+  box-shadow: var(--shadow-popover);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dir-add-menu > form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.dir-add-menu input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  background: var(--surf2);
+  border: 1px solid var(--bord);
+  border-radius: 4px;
+  color: var(--fg);
+  font: 12px ui-monospace, monospace;
+}
+.dir-add-menu input[type="text"]:focus {
+  border-color: var(--accent);
 }
 .upload-form .file-name {
   font: 12px ui-monospace, monospace;

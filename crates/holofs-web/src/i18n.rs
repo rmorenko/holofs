@@ -264,6 +264,15 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
         ["new path", "новый путь", "neuer Pfad", "nouveau chemin", "nueva ruta"]),
     ("card.rename_save",
         ["save", "сохранить", "speichern", "enregistrer", "guardar"]),
+    // Live-test feedback (v2 post-review): dir-row "+" popover +
+    // styled file-picker label. The prior every-control-on-every-row
+    // layout clipped on narrow viewports; the popover consolidates.
+    ("dir.add.title",
+        ["add here", "добавить сюда", "hier hinzufügen",
+         "ajouter ici", "añadir aquí"]),
+    ("upload.choose_file_short",
+        ["choose file", "выбрать файл", "Datei wählen",
+         "choisir fichier", "elegir archivo"]),
     // Hygiene · UI-UX: replace hardcoded English tooltips + link
     // labels on tree leaves so switching locale actually flips them.
     ("tree.meta.size_title",

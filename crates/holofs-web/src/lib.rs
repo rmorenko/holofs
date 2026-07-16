@@ -9,6 +9,13 @@
 //! Shared types (e.g. [`CatalogEntry`]) and components live here so the same
 //! Rust code drives the server render and the client hydrate.
 
+// Bumped from the compiler default (128) because Leptos generates
+// deeply-nested tuple types for a few of the larger views (see e.g.
+// the `LazyDirNode` dir-row with its `+` popover). Setting higher
+// than we strictly need so opportunistic markup expansions don't
+// keep bumping into this.
+#![recursion_limit = "256"]
+
 use leptos::prelude::*;
 use leptos_meta::*;
 use leptos_router::components::{Route, Router, Routes};

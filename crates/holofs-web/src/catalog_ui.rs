@@ -981,55 +981,15 @@ fn LazyDirNode(entry: CatalogEntry, sort: TreeSort, depth: usize) -> impl IntoVi
                             "⊖"
                         </button>
                         <span class="tree-sep">"·"</span>
-                        <form
-                            method="POST"
-                            action="/api/mkdir"
-                            class="inline-form tree-inline-mkdir"
-                            onclick="event.stopPropagation()"
-                        >
-                            <input type="hidden" name="parent" value=path_for_form/>
-                            // land back on the tree view
-                            // with this folder expanded so the new
-                            // child is visible — `?open=<path>`
-                            // unrolls the `<details>` chain down to
-                            // it. Beats throwing the user into the
-                            // focus view, which loses the tree state.
-                            <input
-                                type="hidden"
-                                name="return_to"
-                                value={format!("/?p={enc_path}")}
-                            />
-                            <input
-                                type="text"
-                                name="name"
-                                placeholder={t!("tree.new_folder")}
-                                required=true
-                                minlength="1"
-                            />
-                            <button type="submit" class="link-btn">"+ " {t!("folder.kind_label")}</button>
-                        </form>
-                        <span class="tree-sep">"·"</span>
-                        // Inline upload: drop a file straight into this
-                        // folder, no detour through the topbar Upload
-                        // page. Mirrors the per-folder mkdir form; same
-                        // ?open=<path> return so the tree re-opens at
-                        // exactly this branch after the multipart POST.
-                        <form
-                            method="POST"
-                            action="/api/upload"
-                            enctype="multipart/form-data"
-                            class="inline-form tree-inline-upload"
-                            onclick="event.stopPropagation()"
-                        >
-                            <input type="hidden" name="parent" value=path_for_upload/>
-                            <input
-                                type="hidden"
-                                name="return_to"
-                                value={format!("/?p={enc_path}")}
-                            />
-                            <input type="file" name="file" required=true/>
-                            <button type="submit" class="link-btn">"↑ " {t!("upload.submit")}</button>
-                        </form>
+                        // Live-test feedback: mkdir + upload collapsed
+                        // into a "+" popover so the dir-row stays
+                        // narrow and doesn't clip on narrow viewports
+                        // ("Фай…бран" / "open" cut-off reported).
+                        // Native `<input type="file">` also hidden
+                        // behind `<label class="file-label">` so the
+                        // browser-locale text ("Файл не выбран" in a
+                        // RU browser on an EN UI) doesn't leak.
+                        <DirAddPopover parent=path_for_form.clone() return_to={format!("/?p={enc_path}")}/>
                         <span class="tree-sep">"·"</span>
                         <a href={format!("/?p={enc_path}")} rel="external">{t!("folder.open")} " →"</a>
                         <span class="tree-sep">"·"</span>
@@ -1156,7 +1116,15 @@ fn CatalogTreeBody(entries: Vec<CatalogEntry>, sort: TreeSort) -> impl IntoView 
             >
                 <input type="hidden" name="parent" value=""/>
                 <input type="hidden" name="return_to" value=""/>
-                <input type="file" name="file" required=true/>
+                // Native file input hidden inside label so the
+                // browser-locale "Файл не выбран" text can't leak
+                // into an EN UI. `upload-init.js` mirrors the picked
+                // filename into a `.file-name-inline` span after the
+                // input.
+                <label class="file-label">
+                    <input type="file" name="file" required=true/>
+                    <span class="file-button">{t!("upload.choose_file_short")}</span>
+                </label>
                 <button type="submit" class="tree-control-btn">
                     <span class="tree-control-icon">"↑"</span>
                     <span class="tree-control-label">{t!("upload.submit")}</span>
@@ -1481,48 +1449,7 @@ fn TreeNodeView(node: TreeNode, depth: usize) -> impl IntoView {
                                 "⊖"
                             </button>
                             <span class="tree-sep">"·"</span>
-                            <form
-                                method="POST"
-                                action="/api/mkdir"
-                                class="inline-form tree-inline-mkdir"
-                                onclick="event.stopPropagation()"
-                            >
-                                <input type="hidden" name="parent" value=path.clone()/>
-                                // same `?open=` trick the
-                                // lazy tree uses — keeps the user on
-                                // the tree view with this folder
-                                // pre-expanded.
-                                <input
-                                    type="hidden"
-                                    name="return_to"
-                                    value={format!("/?p={enc_path}")}
-                                />
-                                <input
-                                    type="text"
-                                    name="name"
-                                    placeholder={t!("tree.new_folder")}
-                                    required=true
-                                    minlength="1"
-                                />
-                                <button type="submit" class="link-btn">"+ " {t!("folder.kind_label")}</button>
-                            </form>
-                            <span class="tree-sep">"·"</span>
-                            <form
-                                method="POST"
-                                action="/api/upload"
-                                enctype="multipart/form-data"
-                                class="inline-form tree-inline-upload"
-                                onclick="event.stopPropagation()"
-                            >
-                                <input type="hidden" name="parent" value=path.clone()/>
-                                <input
-                                    type="hidden"
-                                    name="return_to"
-                                    value={format!("/?p={enc_path}")}
-                                />
-                                <input type="file" name="file" required=true/>
-                                <button type="submit" class="link-btn">"↑ " {t!("upload.submit")}</button>
-                            </form>
+                            <DirAddPopover parent=path.clone() return_to={format!("/?p={enc_path}")}/>
                             <span class="tree-sep">"·"</span>
                             <a href={format!("/?p={enc_path}")} rel="external">{t!("folder.open")} " →"</a>
                             <span class="tree-sep">"·"</span>
@@ -1624,6 +1551,63 @@ fn MkdirForm(parent: String) -> impl IntoView {
 /// The same script wires drag-and-drop on the surrounding `.upload-form`
 /// box so files dropped anywhere on the dashed area land on the input.
 /// Without JS the form still works — the label acts as a button natively.
+/// "+" popover attached to every directory row — collapses the
+/// per-folder mkdir + upload forms so the tree row itself stays
+/// narrow. Extracted as its own component to keep the caller's view
+/// tree shallow (Leptos would otherwise blow past the
+/// `recursion_limit` when expanding the deeply-nested tuple type of
+/// a `LazyDirNode` row with both forms inline).
+///
+/// Live-test feedback (v2 post-review): the previous inline layout
+/// clipped on narrow viewports and leaked the browser-locale text
+/// from the native `<input type="file">`.
+///
+/// Returns `AnyView` so the caller's outer view-tree type stays
+/// shallow — the two nested forms would otherwise push Leptos's
+/// generic type past `recursion_limit`.
+#[component]
+fn DirAddPopover(parent: String, return_to: String) -> impl IntoView {
+    let parent_upload = parent.clone();
+    let return_to_upload = return_to.clone();
+    view! {
+        <details
+            class="dir-add js-dropdown"
+            onclick="event.stopPropagation()"
+        >
+            <summary title={t!("dir.add.title")} aria-label={t!("dir.add.title")}>"+"</summary>
+            <div class="dir-add-menu">
+                <form method="POST" action="/api/mkdir" class="inline-form">
+                    <input type="hidden" name="parent" value=parent/>
+                    <input type="hidden" name="return_to" value=return_to/>
+                    <input
+                        type="text"
+                        name="name"
+                        placeholder={t!("tree.new_folder")}
+                        required=true
+                        minlength="1"
+                    />
+                    <button type="submit" class="link-btn">"+ " {t!("folder.kind_label")}</button>
+                </form>
+                <form
+                    method="POST"
+                    action="/api/upload"
+                    enctype="multipart/form-data"
+                    class="inline-form"
+                >
+                    <input type="hidden" name="parent" value=parent_upload/>
+                    <input type="hidden" name="return_to" value=return_to_upload/>
+                    <label class="file-label">
+                        <input type="file" name="file" required=true/>
+                        <span class="file-button">{t!("upload.choose_file_short")}</span>
+                    </label>
+                    <button type="submit" class="link-btn">"↑ " {t!("upload.submit")}</button>
+                </form>
+            </div>
+        </details>
+    }
+    .into_any()
+}
+
 #[component]
 fn UploadForm(parent: String) -> impl IntoView {
     let name_ph = move || t!("upload.name_placeholder");
