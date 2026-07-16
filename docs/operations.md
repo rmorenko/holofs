@@ -268,9 +268,16 @@ list. Flags take precedence over env vars.
 
 ### 5.2. Standalone `holofs-node`
 
-The standalone node daemon takes only positional arguments and does
-not read any `HOLOFS_*` env vars — it is intentionally minimal so the
-same binary works under systemd, docker, or hand-invocation.
+The standalone node daemon's **CLI** takes only positional arguments —
+no `--storage` sibling flags for things like TLS or fsync. But the
+node process itself does read a small set of `HOLOFS_*` env vars from
+the environment before it opens its `Store`:
+
+| Variable                      | Default | Description                                              |
+|-------------------------------|---------|----------------------------------------------------------|
+| `HOLOFS_AT_REST_ENC`          | `0`     | `1` enables AES-256-GCM sealing of shard files (`HOLOFSS2`). Key is HKDF-derived from the node's `identity.key`; see [architecture.md §4.9](./architecture.md#at-rest-encryption-aes-256-gcm). |
+| `HOLOFS_NODE_FSYNC`           | `1`     | `0` skips per-shard `fsync` after WAL append. Trades a durability boundary for ~4× write throughput on rotational disks; keep at `1` in prod. |
+| `HOLOFS_NODE_FLUSH_INTERVAL_MS` | `1`   | Group-commit debounce for the WAL flusher. Higher = fewer syscalls at the cost of longer client-visible ack latency. |
 
 ```text
 holofs-node [ADDR] [--storage DIR]
@@ -301,7 +308,7 @@ runtime-adjustable.
 
 | Variable                    | Default | Description                                    |
 |-----------------------------|---------|------------------------------------------------|
-| `HOLOFS_EMBED_BASE_PORT`    | `9100`  | Stable base port for the in-process nodes; each node binds `base + idx`. Skip to avoid ephemeral-port churn. |
+| `HOLOFS_EMBED_BASE_PORT`    | `9200`  | Stable base port for the in-process nodes; each node binds `base + idx`. Skip to avoid ephemeral-port churn. |
 | `HOLOFS_NO_SEED`            | `false` | Skip the two-PNG demo seed on an empty catalog. Set to `true` when re-uploading from a known sample tree so the seed doesn't collide with your data. |
 | `HOLOFS_W` / `HOLOFS_H`     | `512`   | Frame dimensions (both must be a positive multiple of `2^LEVELS = 8`). |
 
@@ -312,8 +319,8 @@ runtime-adjustable.
 | `HOLOFS_RPC_TIMEOUT_MS`     | `8000`  | Per-RPC overall budget (`tokio::time::timeout`). `0` disables the cap; the OS-level TCP timeout (60-75 s) is then the only stop. |
 | `HOLOFS_SCRUB_INTERVAL`     | `600`   | Background shard scrub period (seconds). `0` disables. Scrubs walk the catalog, diff `list_node_hashes` vs `place_shard`, repair the mismatches before users hit them. |
 | `HOLOFS_VERSIONS_KEEP_LAST` | `0`     | Per-name version-history cap. Drops oldest archives on every PUT. `0` = unlimited (manual `/api/versions/delete` is then the only path to reclaim shards). Requires `--enable-versions`. |
-| `HOLOFS_POOL_PER_NODE`      | `8`     | Max idle pooled wire connections per node addr.         |
-| `HOLOFS_POOL_IDLE_SECS`     | `60`    | Drop pooled entries idle longer than this on `acquire`. |
+| `HOLOFS_POOL_PER_NODE`      | `32`    | Max idle pooled wire connections per node addr.         |
+| `HOLOFS_POOL_IDLE_SECS`     | `30`    | Drop pooled entries idle longer than this on `acquire`. |
 | `HOLOFS_POOL_DISABLE`       | `false` | Bypass the keepalive pool — every RPC dials fresh. Useful when chasing wire-level bugs. |
 
 ### 5.5.c. Per-IP rate limit
@@ -327,7 +334,7 @@ GC) buckets; SHORT and streaming endpoints stay unlimited.
 | Variable                        | Default   | Description                                              |
 |---------------------------------|-----------|----------------------------------------------------------|
 | `HOLOFS_RATE_LIMIT_RPS_PER_IP`  | `0`       | Token bucket refill rate per client IP. Zero disables the layer entirely. |
-| `HOLOFS_RATE_LIMIT_BURST`       | `2 × rps` | Max tokens a bucket holds. On empty bucket the request 429s with `Retry-After: 1`. |
+| `HOLOFS_RATE_LIMIT_BURST`       | `20`      | Max tokens a bucket holds (fixed default, not a multiple of rps as prior versions of this doc claimed). On empty bucket the request 429s with `Retry-After: 1`. |
 | `HOLOFS_RATE_LIMIT_IDLE_SECS`   | `300`     | Idle-eviction threshold for the per-IP map (bounded memory under high-churn client populations). |
 
 **Client-IP source.** Behind a reverse proxy the middleware reads
@@ -346,7 +353,7 @@ client (investigate) or an under-provisioned cap (raise
 
 | Variable                    | Default   | Description                                              |
 |-----------------------------|-----------|----------------------------------------------------------|
-| `HOLOFS_UPLOAD_MAX_SIZE`    | `1 GiB`   | Per-request body cap for `PUT /*path`. The body streams straight to `<storage>/uploads/upload-<pid>-<counter>.tmp` (constant RAM regardless of client speed / body size) and is read back into a `Vec<u8>` right before `Gateway::ingest_bytes`. Bodies exceeding the cap return 413 Payload Too Large; the tempfile is deleted on every exit path. |
+| `HOLOFS_UPLOAD_MAX_SIZE`    | `200 MiB` | Per-request body cap for `PUT /*path` (bytes). The body streams straight to `<storage>/uploads/upload-<pid>-<counter>.tmp` (constant RAM regardless of client speed / body size) and is read back into a `Vec<u8>` right before `Gateway::ingest_bytes`. Bodies exceeding the cap return 413 Payload Too Large; the tempfile is deleted on every exit path. |
 
 Streaming keeps the gateway RSS delta bounded by the copy buffer
 (~64 KiB) rather than the client's upload rate — a slow client on a
@@ -363,7 +370,11 @@ with none of them set.
 | Variable                              | Default | Description                                              |
 |---------------------------------------|---------|----------------------------------------------------------|
 | `HOLOFS_MEDIUM_CONCURRENCY`           | `64`    | Permits for the MEDIUM route bucket (decodes, PUT, dir ops). On saturation the handler middleware returns 503 with a diagnostic body instead of piling axum tasks. Tune against `holofs_backpressure_permits_available{bucket="medium"}`. |
-| `HOLOFS_LONG_CONCURRENCY`             | `8`     | Permits for the LONG bucket (semantic search, spotlight, `/api/gc`, `/api/embed_all`, fingerprint scans). |
+| `HOLOFS_LONG_CONCURRENCY`             | `24`    | Permits for the LONG bucket (semantic search, spotlight, `/api/gc`, `/api/embed_all`, fingerprint scans). |
+| `HOLOFS_ENCODE_CONCURRENCY`           | `8`     | Permits for the encoder pool — the RLNC/DWT worker that runs inside every synchronous PUT. Async PUTs (`HOLOFS_ASYNC_ENCODE=1`) queue against the same pool. |
+| `HOLOFS_ENCODE_QUEUE_MAX`             | `32`    | Async-ingest backlog cap: once the encoder queue holds this many pending manifests the 202 fast-path stops accepting and returns 429 with `Retry-After`. |
+| `HOLOFS_MONITOR_INTERVAL`             | `15`    | Seconds between health-monitor ticks (per-object margin scan + kick auto-repair). Lower = faster recovery, higher CPU. |
+| `HOLOFS_AUDIT_INTERVAL`               | `60`    | Seconds between PoR-auditor rounds (samples a random shard from a random object, checks that the holding node still has it). Reputation decays on misses. |
 | `HOLOFS_REPUTATION_PERSIST_INTERVAL`  | `30`    | How often the shared `Reputation` state is snapshotted to `<storage>/reputation.bin`. The bootstrap loads it back next start; a `n_nodes` mismatch or corrupt file silently falls back to a fresh table. A final snapshot is also written on SIGTERM. |
 | `HOLOFS_ADMIN_TOKEN`                  | _(unset)_ | When set, `POST /admin/node` and `POST /api/gc` require `Authorization: Bearer <token>`. Missing/wrong → 401. |
 | `HOLOFS_ADMIN_UNAUTHENTICATED`        | _(unset)_ | Dev override: set to `1` to leave the admin surface open when `HOLOFS_ADMIN_TOKEN` is unset. Logs a WARN at boot. If neither var is set the admin surface is disabled (403). |
@@ -641,16 +652,15 @@ groups:
         token. If unexpected, treat as a probe.
 ```
 
-### 6.3. Tracing
+### 6.3. Tracing (roadmap)
 
-When `HOLOFS_TELEMETRY_OTLP` is set, the gateway exports OTLP/HTTP spans:
-
-| Span name              | Useful attributes                          |
-|------------------------|--------------------------------------------|
-| `gateway.put`          | `object.kind`, `bytes.in`, `shards.out`    |
-| `gateway.get`          | `object.kind`, `layers`, `bytes.out`, `nodes_contacted` |
-| `gateway.repair`       | `object_id`, `channel`, `layer`, `shards_recovered` |
-| `wire.send`            | `op`, `target.node`, `bytes`               |
+There is no OTLP exporter today. The previous version of this section
+described a `HOLOFS_TELEMETRY_OTLP` env var and per-operation spans
+(`gateway.put`, `gateway.get`, `gateway.repair`, `wire.send`); none
+of that exists in the crate. Structured logs go to stderr in JSON via
+`tracing-subscriber` (`HOLOFS_LOG` controls the level) — pipe them
+into your log aggregator and correlate by request-id. A first-class
+OTLP exporter is on the roadmap.
 
 ### 6.4. Dashboards
 
@@ -724,7 +734,7 @@ For a 100 MB upload, the gateway emits ~925 MB to the node pool. Plan for
 
 ### 8.1. What lives on disk
 
-Per node (`HOLOFS_DATA_DIR`):
+Per node (`HOLOFS_STORAGE_DIR`):
 
 ```
 manifests/         per-object manifests (HOLOFSM6)
@@ -864,7 +874,7 @@ systemctl stop holofs-node@10
 ### 10.3. Replace a failed disk
 
 1. `systemctl stop holofs-node@N`
-2. Replace disk, mount fresh filesystem at `HOLOFS_DATA_DIR`.
+2. Replace disk, mount fresh filesystem at `HOLOFS_STORAGE_DIR`.
 3. Restore identity files (`identity/secret`, `whitelist.holofs`) from
    the off-site backup — these are tied to the node's address, not the
    disk.

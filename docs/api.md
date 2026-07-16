@@ -92,7 +92,9 @@ Status-code mapping for the dir ops:
 | `GET`  | `/health`             | Per-node table, kill/revive buttons          |
 | `GET`  | `/health/<name>`      | Margin per (channel, layer), Monte-Carlo loss simulation, zone-failure table |
 | `GET`  | `/api/stats`          | JSON: object counts by kind, shards, dedup % |
-| `POST` | `/admin/node` (`i=N`) | Toggle node N (admin-side excluded/restored). **Admin-auth gated** — requires `Authorization: Bearer $HOLOFS_ADMIN_TOKEN` when the env var is set. |
+| `GET`  | `/api/health/events`  | Server-Sent Events stream. One JSON-encoded `HealthSnapshot` per line (`{n_live, n_total, objects, ts_ms}`) every ~3 s. Used by the leptos `/health` page to live-update the cluster-stats cards without polling. Terminates when the client disconnects. |
+| `POST` | `/admin/node` (`i=N`) | Toggle node N (admin-side excluded/restored). **Admin-auth gated** — requires `Authorization: Bearer $HOLOFS_ADMIN_TOKEN` when the env var is set. `i` is read from the form body — send it via `--data 'i=5'`, not `?i=5`. |
+| `POST` | `/admin/add_node` (form `addr=&zone=`) | Register a new node address with the running gateway and rebalance existing objects onto it (reverse-index shard migration under one write-lock). Response JSON reports per-object success + a warning that the shared `ClusterInfo` still needs a gateway restart to expose the new address on GET paths. **Admin-auth gated**. |
 
 `/api/stats` returns:
 
@@ -248,7 +250,8 @@ gateway (no `--enable-embed`) → 503 + hint about the missing flag.
 |--------|-------------------------------|-------------|
 | `POST` | `/api/gc`                     | Orphan-shard collector. Walks catalog + version archives, lists every node's hashes, asks each to `PurgeByHash` the residue. **Admin-auth gated** — see below. |
 | `POST` | `/api/upload` (multipart)     | Form-friendly upload. Fields: `parent` (string, may be empty), `file` (binary), optional `name` rename, `return_to` |
-| `POST` | `/api/mv`                     | Rename / move. Form fields `from=…&to=…`. 4xx on clobber attempts. |
+| `POST` | `/api/mv`                     | Rename / move. Form fields `from=…&to=…&return_to=…`. 303 to `return_to` when the field is present; JSON `{from,to,moved}` otherwise. 4xx on clobber attempts. |
+| `POST` | `/api/batch/delete`           | Bulk delete under one catalog write-lock + one fsync + one fanout PurgeByHash. JSON body `{"names": [...]}`, max 10 000 per call. Response: `{removed, orphan_shards_purged, outcomes: [{name, object_id, error}]}`. Per-name failures (`not_found` / `is_directory` / `bad_request: …`) are reported inside `outcomes`; the batch does not abort on one bad name. Purpose: bulk cleanup (test drain, admin sweep). |
 
 `/api/gc` returns:
 
@@ -281,11 +284,11 @@ when `--enable-embed` is off.
 | `HOLOFS_SCRUB_INTERVAL`               | `600`   | Background scrub interval in seconds. `0` disables.    |
 | `HOLOFS_VERSIONS_KEEP_LAST`           | `0`     | Per-name history cap. Drops oldest on each PUT. `0` = unbounded. |
 | `HOLOFS_NO_SEED`                      | `false` | Skip the embedded-mode demo PNG seed on an empty catalog. |
-| `HOLOFS_POOL_PER_NODE`                | `8`     | Max idle pooled connections per node addr.             |
-| `HOLOFS_POOL_IDLE_SECS`               | `60`    | Drop pooled entries idle longer than this on `acquire`. |
+| `HOLOFS_POOL_PER_NODE`                | `32`    | Max idle pooled connections per node addr.             |
+| `HOLOFS_POOL_IDLE_SECS`               | `30`    | Drop pooled entries idle longer than this on `acquire`. |
 | `HOLOFS_POOL_DISABLE`                 | `false` | Bypass the keepalive pool — every RPC dials fresh.     |
 | `HOLOFS_MEDIUM_CONCURRENCY`           | `64`    | MEDIUM-bucket permits (decodes, PUT, dir ops).         |
-| `HOLOFS_LONG_CONCURRENCY`             | `8`     | LONG-bucket permits (search, spotlight, GC).           |
+| `HOLOFS_LONG_CONCURRENCY`             | `24`    | LONG-bucket permits (search, spotlight, GC).           |
 | `HOLOFS_REPUTATION_PERSIST_INTERVAL`  | `30`    | How often the shared `Reputation` state is snapshotted to `<storage>/reputation.bin`. |
 | `HOLOFS_ADMIN_TOKEN`                  | _(unset)_ | Bearer token for `/admin/*` + `/api/gc`. When set, the `Authorization: Bearer $TOKEN` header is mandatory. |
 | `HOLOFS_ADMIN_UNAUTHENTICATED`        | _(unset)_ | Dev override: set to `1` to leave the admin surface open when no token is configured (logs a WARN). |
@@ -326,8 +329,11 @@ Example calls with a configured token:
 
 ```sh
 export HOLOFS_ADMIN_TOKEN=$(openssl rand -hex 32)
+# NB: `i` is read from the form body, not the query string.
+# `?i=5` with an empty body returns 400.
 curl -H "Authorization: Bearer $HOLOFS_ADMIN_TOKEN" \
-     -X POST 'http://127.0.0.1:8787/admin/node?i=5'
+     -X POST --data 'i=5' \
+     http://127.0.0.1:8787/admin/node
 curl -H "Authorization: Bearer $HOLOFS_ADMIN_TOKEN" \
      -X POST http://127.0.0.1:8787/api/gc
 ```
@@ -349,15 +355,21 @@ nodes drop oversized frames and close the connection.
 
 ### Request types
 
-| Op   | Name              | Payload                                       |
-|------|-------------------|-----------------------------------------------|
-| 0x00 | `Ping`            | (empty)                                       |
-| 0x01 | `Put`             | object\_id, channel, layer, Shard             |
-| 0x02 | `Get`             | object\_id, channel, layer                    |
-| 0x03 | `Purge`           | object\_id                                    |
-| 0x04 | `Stat`            | (empty)                                       |
-| 0x05 | `Audit`           | object\_id, channel, layer, shard\_hash       |
-| 0x06 | `AuthChallenge`   | nonce[32]                                     |
+| Op   | Name                    | Payload                                       |
+|------|-------------------------|-----------------------------------------------|
+| 0x00 | `Ping`                  | (empty)                                       |
+| 0x01 | `Put`                   | object\_id, channel, layer, Shard             |
+| 0x02 | `Get`                   | object\_id, channel, layer                    |
+| 0x03 | `Purge`                 | object\_id (deletes every shard under the key) |
+| 0x04 | `Stat`                  | (empty)                                       |
+| 0x05 | `Audit`                 | object\_id, channel, layer, shard\_hash       |
+| 0x06 | `AuthChallenge`         | nonce[32]                                     |
+| 0x07 | `ListHashes`            | (empty). Enumerates every shard hash held by the node — used by `/api/gc` + orphan reconciliation. |
+| 0x08 | `PurgeByHash`           | count: u32 BE + N × hash[32]. Surgical delete, targets specific hashes instead of the whole `(object_id, ch, layer)` bucket. |
+| 0x09 | `PutBatch`              | count: u32 BE + N × (object\_id, channel, layer, Shard). Encoder-pool amortisation: one round-trip fans out K + margin shards. |
+| 0x0a | `CurrentEpoch`          | (empty). Returns the node's monotonic write epoch — used to gate `PurgeByHashUpTo`. |
+| 0x0b | `PurgeByHashUpTo`       | epoch: u64 BE + count: u32 BE + N × hash[32]. Only purges hashes whose write epoch ≤ arg; concurrent writes with a higher epoch survive. Epoch-GC pillar. |
+| 0x0c | `PutTimings`            | (empty). Diagnostic — returns the node's cumulative Put-timing counters for the last minute. |
 
 ### Response types
 
@@ -369,6 +381,9 @@ nodes drop oversized frames and close the connection.
 | 0x03 | `StatResp`            | total\_shards: u32 BE                         |
 | 0x04 | `AuditResp`           | tag: u8 (0=None, 1=Some) + optional Shard     |
 | 0x05 | `AuthChallengeOk`     | signature[64]                                 |
+| 0x06 | `Hashes`              | count: u32 BE + N × hash[32]. Response to `ListHashes`. |
+| 0x07 | `Epoch`               | epoch: u64 BE. Response to `CurrentEpoch`. |
+| 0x08 | `PutTimings`          | Diagnostic counters (see wire.rs for the field layout). |
 | 0xff | `Error`               | len: u32 BE + UTF-8 message                   |
 
 ### Shard wire format

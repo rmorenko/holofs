@@ -400,17 +400,26 @@ the durability boundary is unchanged from the pre-WAL era.
 
 ### At-rest encryption (AES-256-GCM)
 
-When `HOLOFS_NODE_STORAGE_KEY` is set (64 hex chars = 32 bytes) the
-node service switches the shard file magic from `HOLOFSS1` to
-`HOLOFSS2` and seals the `coeffs || payload` blob with AES-256-GCM.
-The 12-byte nonce is stored inline right after the AAD header; the
-key is HKDF-SHA256 derived from the raw storage key (`salt =
-"holofs-shard-salt-v1"`, `info = "holofs-shard-key-v1"`) so a leaked
-key rotation is a matter of decrypt-with-old, re-encrypt-with-new.
-Shard hashes are computed on the *plaintext* payload, so hash
-inventory and content addressing are unaffected — a node that swaps
-keys mid-stream still reports the same hash list. See
-`crates/holofs-storage/src/crypto.rs` for the wire format.
+Set `HOLOFS_AT_REST_ENC=1` on the node to enable — the switch is a
+plain boolean, not a hex key. The 32-byte key is HKDF-SHA256 derived
+from the node's own Ed25519 identity seed (the same
+`identity.key` used for the wire handshake), with
+`salt = "holofs-shard-salt-v1"` and `info = "holofs-shard-key-v1"`.
+When enabled the node service switches the shard file magic from
+`HOLOFSS1` to `HOLOFSS2` and seals the `coeffs || payload` blob with
+AES-256-GCM; the 12-byte nonce is stored inline right after the AAD
+header. Shard hashes are computed on the *plaintext* payload, so
+hash inventory and content addressing are unaffected — a node that
+toggles the flag mid-life re-emits the same hash list on the next
+scan. See `crates/holofs-storage/src/crypto.rs::derive_shard_key`
+for the derivation and the on-disk wire format.
+
+**Threat coverage.** Protects against filesystem-level reads on the
+node host (insider read, backup tape leak). Does **not** protect
+against the node process itself holding K shards of an object — the
+plaintext is decrypted on every read. And because the key ties to
+the identity seed, a lost identity key means unrecoverable shards;
+back up `identity.key` off-line before enabling.
 
 ### Index recovery
 
