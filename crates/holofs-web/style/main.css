@@ -270,6 +270,29 @@ button[data-holofs-was-busy="1"]::after {
   white-space: nowrap;
 }
 
+/* Unified upload UX: the tree-inline / tree-root variants get the
+ * same drag-drop highlight + filename echo the styled UploadForm
+ * carries. Kept small (font-size: 11px) so the tree row height
+ * doesn't grow when a file is picked; the injected span sits inline
+ * next to the file-selector-button. */
+.file-name-inline {
+  font: 11px ui-monospace, monospace;
+  color: var(--mut);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+.tree-inline-upload.drag-active,
+.tree-root-upload.drag-active {
+  outline: 2px dashed var(--accent);
+  outline-offset: 2px;
+  background: var(--surf3);
+  border-radius: 6px;
+}
+
 .upload-form input[type="text"], .dropzone input[type="text"] {
   background: var(--surf2);
   color: var(--fg);

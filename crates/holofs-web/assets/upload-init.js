@@ -1,34 +1,62 @@
-// progressive enhancement for the catalog upload form.
+// Progressive enhancement for every upload form on the page.
 //
-// Without JS: clicking the styled <label> opens the native file picker,
-// pressing "upload" submits the form. Works fine.
+// Pre-unification the styled focus-view `UploadForm` (`.upload-form`
+// block) got drag-drop + filename preview here, but the tree-inline
+// / tree-root uploads were bare `<input type="file">` — no
+// drag-drop, no filename echo. UI-UX review flagged the split. This
+// asset now targets ANY `<form>` on the page that contains an
+// `input[type="file"][name="file"]`, matching the mutation endpoint
+// whitelist mutation-forms.js already uses.
 //
-// With JS: dragging a file onto the dashed `.upload-form` box (or
-// anywhere within) sets it as the input's selection; the chosen
-// filename is mirrored into `.file-name` so the user has feedback
-// before clicking submit. A `drag-active` class toggles a hover state
-// while a file is hovering over the drop target.
+// Without JS: every form still works — the native picker opens on
+// button click, the submit button posts the form.
+//
+// With JS:
+//   · dragging a file onto the surrounding <form> sets it as the
+//     input's selection (highlight via `.drag-active`);
+//   · the chosen filename + human-readable size mirror into a sibling
+//     `.file-name` span — pre-existing on `.upload-form`, injected
+//     for the tree variants right after the input.
+//
+// Coexists with mutation-forms.js: this file is about *input
+// preparation*; mutation-forms.js catches the submit and does the
+// fetch/XHR round-trip + toast.
 
 (function () {
     "use strict";
 
-    function setupForm(formBox) {
-        var input = formBox.querySelector('input[type="file"]');
-        var nameLabel = formBox.querySelector('.file-name');
-        if (!input) return;
+    function humanSize(size) {
+        if (size >= 1024 * 1024) return (size / (1024 * 1024)).toFixed(1) + ' MB';
+        if (size >= 1024) return (size / 1024).toFixed(1) + ' KB';
+        return size + ' B';
+    }
 
-        // ---- filename preview ----------------------------------------
-        var originalText = nameLabel ? nameLabel.textContent : '';
+    function ensureFileName(form, input) {
+        // Prefer the pre-rendered slot when the styled `.upload-form`
+        // laid one out with the right typography. For every other form
+        // (tree inline / tree root / any future caller), inject a tiny
+        // inline span right after the input.
+        var existing = form.querySelector('.file-name');
+        if (existing) return existing;
+        var span = document.createElement('span');
+        span.className = 'file-name file-name-inline mut';
+        input.parentNode.insertBefore(span, input.nextSibling);
+        return span;
+    }
+
+    function setupForm(form) {
+        var input = form.querySelector('input[type="file"][name="file"]');
+        if (!input) return;
+        if (input.dataset.holofsUploadInit === '1') return;
+        input.dataset.holofsUploadInit = '1';
+
+        var nameLabel = ensureFileName(form, input);
+        var originalText = nameLabel.textContent || '';
+
         function updateName() {
-            if (!nameLabel) return;
             if (input.files && input.files.length > 0) {
                 var f = input.files[0];
-                var size = f.size;
-                var size_s;
-                if (size >= 1024 * 1024) size_s = (size / (1024*1024)).toFixed(1) + ' MB';
-                else if (size >= 1024) size_s = (size / 1024).toFixed(1) + ' KB';
-                else size_s = size + ' B';
-                nameLabel.textContent = f.name + ' · ' + size_s;
+                nameLabel.textContent = f.name + ' · ' + humanSize(f.size);
                 nameLabel.classList.remove('mut');
             } else {
                 nameLabel.textContent = originalText;
@@ -39,30 +67,27 @@
 
         // ---- drag and drop -------------------------------------------
         // Prevent the browser's default "open the file in a new tab"
-        // when the user accidentally misses the drop zone.
-        ['dragenter','dragover','dragleave','drop'].forEach(function (ev) {
-            formBox.addEventListener(ev, function (e) {
+        // when the user misses the target. Wired to the <form> itself
+        // so any bounding box (styled or bare) becomes a drop zone.
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(function (ev) {
+            form.addEventListener(ev, function (e) {
                 e.preventDefault();
                 e.stopPropagation();
             });
         });
-        formBox.addEventListener('dragenter', function () {
-            formBox.classList.add('drag-active');
+        form.addEventListener('dragenter', function () {
+            form.classList.add('drag-active');
         });
-        formBox.addEventListener('dragover', function () {
-            formBox.classList.add('drag-active');
+        form.addEventListener('dragover', function () {
+            form.classList.add('drag-active');
         });
-        formBox.addEventListener('dragleave', function (e) {
-            // The dragleave fires for every child element traversed.
-            // Only clear the highlight when leaving the actual box.
-            if (e.target === formBox) {
-                formBox.classList.remove('drag-active');
-            }
+        form.addEventListener('dragleave', function (e) {
+            // dragleave fires on every child; only clear on true form-exit.
+            if (e.target === form) form.classList.remove('drag-active');
         });
-        formBox.addEventListener('drop', function (e) {
-            formBox.classList.remove('drag-active');
+        form.addEventListener('drop', function (e) {
+            form.classList.remove('drag-active');
             if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
-            // FileList is read-only; we use DataTransfer to build a fresh one.
             var dt = new DataTransfer();
             dt.items.add(e.dataTransfer.files[0]);
             input.files = dt.files;
@@ -71,12 +96,37 @@
     }
 
     function init() {
-        document.querySelectorAll('.upload-form').forEach(setupForm);
+        document.querySelectorAll('form').forEach(setupForm);
+    }
+
+    // Re-scan on hydrate: Leptos may insert additional upload forms
+    // (LazyDirNode etc.) after DOMContentLoaded, so wire a
+    // MutationObserver in addition to the one-time init pass.
+    function watchNewForms() {
+        if (typeof MutationObserver !== 'function') return;
+        var obs = new MutationObserver(function (records) {
+            for (var i = 0; i < records.length; i++) {
+                var added = records[i].addedNodes;
+                for (var j = 0; j < added.length; j++) {
+                    var node = added[j];
+                    if (node.nodeType !== 1) continue;
+                    if (node.tagName === 'FORM') setupForm(node);
+                    if (node.querySelectorAll) {
+                        node.querySelectorAll('form').forEach(setupForm);
+                    }
+                }
+            }
+        });
+        obs.observe(document.body, { childList: true, subtree: true });
     }
 
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
+        document.addEventListener('DOMContentLoaded', function () {
+            init();
+            watchNewForms();
+        });
     } else {
         init();
+        watchNewForms();
     }
 })();

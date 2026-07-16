@@ -1598,7 +1598,6 @@ fn UploadForm(parent: String) -> impl IntoView {
                 />
                 <button type="submit">{t!("upload.submit")}</button>
             </form>
-            <script defer="defer" src="/assets/upload-init.js"></script>
         </section>
     }
 }

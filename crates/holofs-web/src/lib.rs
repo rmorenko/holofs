@@ -171,6 +171,13 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
                 // `data-holofs-mutate="1"` protocol. Closes A1 / A2
                 // from UI-UX-review.md.
                 <script defer="defer" src="/assets/mutation-forms.js"></script>
+                // Auto-enhances every upload form on the page (styled
+                // focus UploadForm + bare tree-inline / tree-root
+                // uploads) with drag-drop and filename preview.
+                // Was mounted only inside UploadForm — leaving the
+                // tree variants stuck on the bare `<input>` UX. See
+                // `assets/upload-init.js`.
+                <script defer="defer" src="/assets/upload-init.js"></script>
                 <Stylesheet id="leptos" href="/pkg/holofs.css"/>
                 <Title text="holofs"/>
             </head>
