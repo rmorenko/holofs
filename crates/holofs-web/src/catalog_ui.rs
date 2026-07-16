@@ -528,7 +528,16 @@ fn CatalogTreeLazyShell(
             >
                 <input type="hidden" name="parent" value=prefix_for_upload/>
                 <input type="hidden" name="return_to" value=return_to_upload/>
-                <input type="file" name="file" required=true/>
+                // v2-review tail: wrap in the same `.file-label`
+                // pattern the other four upload forms use so
+                // browser-locale "Файл не выбран" doesn't leak.
+                // (This branch lives in `CatalogFocusView`, which
+                // no route currently renders — kept in sync anyway
+                // to avoid grep-confusion during audits.)
+                <label class="file-label">
+                    <input type="file" name="file" required=true/>
+                    <span class="file-button">{t!("upload.choose_file_short")}</span>
+                </label>
                 <button type="submit" class="tree-control-btn">
                     <span class="tree-control-icon">"↑"</span>
                     <span class="tree-control-label">{t!("upload.submit")}</span>
