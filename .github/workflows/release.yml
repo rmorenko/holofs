@@ -5,9 +5,15 @@ on:
     tags: ["v*.*.*"]
   workflow_dispatch:
 
+# `id-token: write` is required for cosign keyless signing — the
+# sigstore OIDC exchange trades the workflow's ephemeral GitHub token
+# for a short-lived Fulcio-issued signing certificate. Without this
+# permission `cosign sign-blob --yes` errors out at OIDC exchange.
+# See docs/verify-releases.md for the P2.3 supply-chain contract.
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -98,25 +104,147 @@ jobs:
           path: holofs-site-bundle.tar.gz
 
   # ---------------------------------------------------------------------------
+  # P2.3 — workspace SBOM. Runs once per release (the SBOM is arch-agnostic
+  # since it enumerates the Cargo dependency graph). Publishes CycloneDX
+  # JSON so operators / auditors can `sbom-viewer` it or feed into
+  # `grype` / `trivy` for CVE analysis. Kept as a dedicated job so a
+  # SBOM regression can't accidentally re-trigger the arch matrix.
+  # ---------------------------------------------------------------------------
+  sbom:
+    name: cyclonedx SBOM (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+      - name: Generate CycloneDX SBOM (all workspace crates, JSON)
+        # `--all` walks every workspace crate; `--format json` emits one
+        # file per crate under `target/`. We aggregate them into a
+        # single top-level file for release-asset simplicity.
+        run: |
+          cargo cyclonedx --all --format json
+          mkdir -p sbom
+          find . -name 'bom.json' -not -path './target/*' -print0 \
+            | xargs -0 -I{} sh -c 'crate=$(basename $(dirname "{}")); cp "{}" "sbom/${crate}.cdx.json"'
+          ls -la sbom/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: holofs-sbom
+          path: sbom/
+
+  # ---------------------------------------------------------------------------
   # Publish the GH release with every per-arch tarball + the WASM bundle.
+  # P2.3 additions:
+  #   * cosign keyless signs every tarball via Fulcio OIDC. Emits
+  #     `<name>.tar.gz.sig` + `<name>.tar.gz.pem` per artifact — verifiers
+  #     use `cosign verify-blob --certificate ... --signature ...`.
+  #   * SBOM JSON bundle is attached alongside the binaries.
   # ---------------------------------------------------------------------------
   publish-release:
-    needs: build-binaries
+    needs: [build-binaries, sbom]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           pattern: holofs-*
           merge-multiple: true
+      # Cosign v2.x — pinned to a semver-known-good release rather than
+      # main-of-the-day to avoid a supply-chain rug pull on the signer
+      # tool itself. `cosign-installer` is the sigstore-maintained
+      # action.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: "v2.4.1"
+      - name: Sign every release tarball (keyless via Fulcio OIDC)
+        # `--yes` auto-accepts the OIDC + transparency-log prompt (the
+        # env's non-interactive). Each sign emits two artifacts:
+        #   * `<blob>.sig`     — detached signature (base64)
+        #   * `<blob>.pem`     — Fulcio-issued signing certificate,
+        #                        binding the GitHub OIDC identity to
+        #                        the key that made the signature.
+        # Rekor transparency log gets the entry automatically — the
+        # verifier queries it during `cosign verify-blob` without
+        # needing extra flags.
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in holofs-*.tar.gz; do
+            echo "signing $f"
+            cosign sign-blob --yes \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.pem" \
+              "$f"
+          done
+          ls -la holofs-*.tar.gz*
+      # Bundle SBOM artifact into the release too — attaches
+      # sbom/*.cdx.json under the release assets.
+      - name: Pull SBOM artifact into publish workspace
+        uses: actions/download-artifact@v4
+        with:
+          name: holofs-sbom
+          path: sbom
+      - name: Package SBOM tarball for release
+        run: |
+          tar -czf holofs-sbom.tar.gz -C sbom .
+          ls -la holofs-sbom.tar.gz
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             holofs-*.tar.gz
+            holofs-*.tar.gz.sig
+            holofs-*.tar.gz.pem
           generate_release_notes: true
+          # Preserve auto-generated release notes but prepend a
+          # verification header pointing to docs/verify-releases.md so
+          # first-time downloaders know signatures exist.
+          append_body: true
+          body: |
+            ## Supply chain verification (P2.3)
+
+            Every release tarball is signed via **sigstore keyless**
+            (Fulcio + Rekor). Each `holofs-*.tar.gz` ships with a
+            matching `.sig` + `.pem`. Verify with:
+
+            ```sh
+            cosign verify-blob \
+              --certificate holofs-<target>.tar.gz.pem \
+              --signature holofs-<target>.tar.gz.sig \
+              --certificate-identity-regexp 'https://github.com/.*/holofs/.github/workflows/release.yml@refs/tags/.*' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              holofs-<target>.tar.gz
+            ```
+
+            The container manifest (`ghcr.io/${{ github.repository }}:${{ github.ref_name }}`)
+            is signed via `cosign sign` under the same identity — verify with:
+
+            ```sh
+            cosign verify \
+              --certificate-identity-regexp 'https://github.com/.*/holofs/.github/workflows/release.yml@refs/tags/.*' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ```
+
+            A CycloneDX workspace SBOM is attached as
+            `holofs-sbom.tar.gz` (one `<crate>.cdx.json` per
+            workspace crate).
+
+            See `docs/verify-releases.md` for full verification
+            workflow, expected signer identity regexes, and
+            SBOM-consumption tips (grype / trivy).
 
   # ---------------------------------------------------------------------------
   # Multi-arch container image via buildx. The Dockerfile drives
   # cargo-leptos itself; we don't need to pre-build the bundle here.
+  #
+  # P2.3 — the pushed image manifest is signed via cosign keyless
+  # after `docker/build-push-action` reports the digest. `cosign sign`
+  # attaches the signature as a separate OCI artifact under the same
+  # repo (via `<sha256-DIGEST>.sig` naming), verifiable with
+  # `cosign verify` — see docs/verify-releases.md for the expected
+  # signer identity regex.
   # ---------------------------------------------------------------------------
   docker:
     needs: build-binaries
@@ -133,7 +261,8 @@ jobs:
       - name: Extract semver tag
         id: tag
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v5
+      - id: build
+        uses: docker/build-push-action@v5
         with:
           context: .
           push: true
@@ -148,3 +277,22 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: "v2.4.1"
+      - name: Sign container manifest (keyless via Fulcio OIDC)
+        # Pin to the digest emitted by build-push-action rather than
+        # the mutable `:latest` / `:<tag>` refs — cosign then records
+        # a signature over the exact bytes we just pushed. Verifiers
+        # can still `cosign verify ghcr.io/.../holofs:v1.2.3` because
+        # cosign resolves the tag to the same digest before checking.
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$IMAGE_DIGEST" || {
+            echo "docker/build-push-action did not export a digest"
+            exit 1
+          }
+          cosign sign --yes "ghcr.io/${{ github.repository }}@${IMAGE_DIGEST}"
