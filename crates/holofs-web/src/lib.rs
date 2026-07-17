@@ -144,20 +144,32 @@ pub fn Shell(options: LeptosOptions) -> impl IntoView {
                     // (expand or collapse) has since started. The
                     // root-is-DETAILS check stays as a fast path so
                     // a closed-from-summary-click also aborts.
+                    //
+                    // fix (user-reported "expand all opens per-row
+                    // popover menus everywhere"): both helpers now
+                    // exclude `details.js-dropdown` — that class marks
+                    // the inline card-more / card-rename / dir-add
+                    // popovers, which are per-row UI, not tree
+                    // structure. Sweeping them alongside real tree
+                    // nodes plastered every folder + file row with its
+                    // rename input, upload picker, and open/delete
+                    // menu — turning the tree into wall-to-wall
+                    // action-panels. Filter the selector.
                     "(function(){var ep=0;\
+                    var TREE_SEL='details:not(.js-dropdown)';\
                     window.holofsExpandAll=function(root){\
                     if(!root)return;ep++;var my=ep,tries=25;function step(){\
                     if(my!==ep)return;\
                     if(root.tagName==='DETAILS'&&!root.open)return;\
                     var any=false;\
-                    root.querySelectorAll('details').forEach(function(d){\
+                    root.querySelectorAll(TREE_SEL).forEach(function(d){\
                     if(!d.open){d.open=true;any=true;}});\
                     if(any){tries=25;setTimeout(step,200);}\
                     else if(--tries>0){setTimeout(step,200);}\
                     }if(root.tagName==='DETAILS')root.open=true;step();};\
                     window.holofsCollapseAll=function(root){if(!root)return;ep++;\
                     if(root.tagName==='DETAILS')root.open=false;\
-                    root.querySelectorAll('details').forEach(function(d){d.open=false;});};\
+                    root.querySelectorAll(TREE_SEL).forEach(function(d){d.open=false;});};\
                     })();"
                 }</script>
                 <HydrationScripts options/>
