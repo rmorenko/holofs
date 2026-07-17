@@ -415,6 +415,25 @@ producen el mismo CID — el dedup cross-formato sale gratis.
   cada shard contra el manifiesto según llega, rechazando shards
   corruptos antes de decodificar.
 
+### Endurecimiento contra segunda preimagen
+
+Un árbol Merkle ingenuo — hash de pares de hashes sin separación de
+dominio — es vulnerable a ataques de segunda preimagen: un atacante
+que pueda elegir una hoja $L$ tal que $H(L)$ iguale un hash de nodo
+interior $H(a \| b)$ puede sustituir $L$ por el subárbol completo
+sin cambiar la raíz. holofs bloquea esto de dos formas:
+
+1. **Etiquetas de dominio.** Las hojas se hashean como
+   $H(\texttt{holofs-merkle-leaf-v1} \| \text{shard\_hash})$; los
+   nodos interiores como
+   $H(\texttt{holofs-merkle-node-v1} \| a \| b)$. Los dos dominios
+   no pueden colisionar.
+2. **Mezcla del conteo de hojas.** La raíz se finaliza como
+   $H(\texttt{holofs-merkle-root-v1} \| \text{leaf\_count} \| \text{tree\_root})$,
+   por lo que duplicar la última hoja para rellenar hasta una potencia
+   de dos (una ambigüedad clásica de canonicalización) es detectado
+   por el conteo.
+
 **Implementaciones.** [`holofs-core::hash`](../../crates/holofs-core/src/hash.rs) (SHA-256 FIPS
 180-4, verificado con vectores NIST) y
 [`holofs-core::merkle`](../../crates/holofs-core/src/merkle.rs).

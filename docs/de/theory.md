@@ -419,6 +419,25 @@ Cross-Format-Dedup fällt umsonst ab.
   jeden Shard beim Eintreffen gegen das Manifest verifizieren und
   korrupte Shards vor der Decodierung ablehnen.
 
+### Second-Preimage-Härtung
+
+Ein naiver Merkle-Baum — Hash-von-Hash-Paaren ohne Domain-Trennung —
+ist anfällig für Second-Preimage-Angriffe: ein Angreifer, der ein Blatt
+$L$ so wählen kann, dass $H(L)$ gleich einem Interior-Node-Hash
+$H(a \| b)$ ist, kann $L$ gegen den gesamten Teilbaum tauschen, ohne
+die Wurzel zu ändern. holofs blockt das auf zwei Wegen:
+
+1. **Domain-Tags.** Blätter werden gehasht als
+   $H(\texttt{holofs-merkle-leaf-v1} \| \text{shard\_hash})$;
+   Interior-Nodes als
+   $H(\texttt{holofs-merkle-node-v1} \| a \| b)$. Die beiden Domains
+   können nicht kollidieren.
+2. **Blattzahl-Mixing.** Die Wurzel wird finalisiert als
+   $H(\texttt{holofs-merkle-root-v1} \| \text{leaf\_count} \| \text{tree\_root})$,
+   sodass das Duplizieren des letzten Blatts zum Auffüllen auf eine
+   Zweierpotenz (eine klassische Kanonisierungs-Ambiguität) durch die
+   Anzahl gefangen wird.
+
 **Implementierungen.**
 [`holofs-core::hash`](../../crates/holofs-core/src/hash.rs) (FIPS 180-4
 SHA-256, gegen NIST-Vektoren verifiziert) und

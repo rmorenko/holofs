@@ -59,6 +59,12 @@ jobs:
             tools/test-data/clean-cluster.sh \
             tools/test-data/upload-samples.sh \
             crates/holofs-e2e/scripts/run-tests.sh
+      - name: doc-anchor check (github-slugger)
+        run: |
+          npm install --no-save github-slugger
+          node scripts/check-doc-anchors.mjs
+      - name: locale heading parity (EN ↔ ru/de/fr/es)
+        run: python3 scripts/check-locale-parity.py
 
   # === Clippy lints =========================================================
   # `holofs-web` has mutually-exclusive `ssr` and `hydrate` features, so we

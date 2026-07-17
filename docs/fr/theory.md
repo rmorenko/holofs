@@ -423,6 +423,26 @@ même CID — la déduplication inter-format en découle gratuitement.
   vérifier chaque shard contre le manifeste à l'arrivée, rejetant les
   shards corrompus avant le décodage.
 
+### Durcissement second-préimage
+
+Un arbre de Merkle naïf — hachage de paires de hachages sans
+séparation de domaine — est vulnérable aux attaques second-préimage :
+un attaquant qui peut choisir une feuille $L$ telle que $H(L)$ égale
+un hachage de nœud intérieur $H(a \| b)$ peut substituer $L$ à tout
+le sous-arbre sans changer la racine. holofs bloque cela de deux
+manières :
+
+1. **Étiquettes de domaine.** Les feuilles sont hachées comme
+   $H(\texttt{holofs-merkle-leaf-v1} \| \text{shard\_hash})$ ; les
+   nœuds intérieurs comme
+   $H(\texttt{holofs-merkle-node-v1} \| a \| b)$. Les deux domaines
+   ne peuvent pas entrer en collision.
+2. **Mélange du nombre de feuilles.** La racine est finalisée comme
+   $H(\texttt{holofs-merkle-root-v1} \| \text{leaf\_count} \| \text{tree\_root})$,
+   de sorte que dupliquer la dernière feuille pour padder à une
+   puissance de deux (une ambiguïté classique de canonisation) est
+   attrapé par le compteur.
+
 **Implémentations.** [`holofs-core::hash`](../../crates/holofs-core/src/hash.rs) (FIPS
 180-4 SHA-256, vérifié sur les vecteurs NIST) et
 [`holofs-core::merkle`](../../crates/holofs-core/src/merkle.rs).
