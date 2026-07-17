@@ -342,8 +342,11 @@ completamente. El log del gateway no debe contener líneas
 
 ## 8. Escrow holográfico de claves
 
-**Objetivo.** Esquema de umbral estilo Shamir — dividir un archivo
-arbitrario en N partes con umbral K, recuperar desde cualquier K.
+**Objetivo.** Esquema de borrado RLNC con umbral (NO Shamir — véase
+theory.md §8) — dividir un archivo arbitrario en N partes con umbral
+K, recuperar desde cualquier K. Solo como respaldo de disponibilidad;
+K−1 partes filtran ≈(K−1)/K del texto plano, así que
+encrypt-then-share para secreto real.
 
 ```sh
 echo "my secret seed phrase" > /tmp/secret.txt

@@ -145,7 +145,7 @@ apuntan a él.
 | I3 | Fuga de metadatos: nombre + tipo + tamaño             | El manifiesto almacena el nombre del objeto y el tipo de contenido en texto plano. Los despliegues sensibles deben hashear o pseudonimizar los nombres antes de subirlos. |
 | I4 | Canales laterales (caché, tiempo de red)              | No mitigados en 0.1 — usar CPUs / red dedicadas para despliegues sensibles. |
 | I5 | Fuga en backups                                       | Los backups heredan la misma amenaza: deben cifrarse en reposo (`restic --pass-file`, S3 SSE-KMS). |
-| I6 | Fuga de Holoshare                                     | Un archivo `.holoshare` individual es una parte de un split `(k,n)` de Shamir-vía-RLNC. Poseer menos de `k` es teoría-de-la-información seguro (véase [theory.md §8](./theory.md#8-secreto-compartido-de-shamir--rlnc)). |
+| I6 | Fuga de Holoshare                                     | Un archivo `.holoshare` individual es una parte de un **split de borrado RLNC con umbral `(k,n)` — NO es Shamir, NO es teoría-de-la-información seguro**. Poseer `k-1` partes filtra ≈(k-1)/k del texto plano (véase [theory.md §8](./theory.md#8-secreto-compartido-de-shamir--rlnc)) — los textos planos con estructura auto-verificable (frases semilla, claves, IDs) caen a fuerza bruta en la última dimensión. Mitigación: trata los archivos `.holoshare` solo como respaldo de disponibilidad; **encrypt-then-share** (envuelve el texto plano en un cifrado autenticado, distribuye las partes del cifrado) si necesitas secreto real. |
 
 ### 4.5. Denegación de servicio
 

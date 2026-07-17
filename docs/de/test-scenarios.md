@@ -348,8 +348,11 @@ gleichzeitig — jeder rendert vollständig. Das Gateway-Log darf keine
 
 ## 8. Holografische Schlüsselhinterlegung
 
-**Ziel.** Shamir-artiges Schwellenschema — eine beliebige Datei in N
-Anteile mit Schwelle K aufteilen, aus beliebigen K wiederherstellen.
+**Ziel.** Threshold-RLNC-Erasure-Schema (KEIN Shamir — siehe theory.md
+§8) — eine beliebige Datei in N Anteile mit Schwelle K aufteilen, aus
+beliebigen K wiederherstellen. Nur als Verfügbarkeits-Backup nutzen;
+K−1 Anteile leaken ≈(K−1)/K des Klartexts, also Encrypt-then-share
+für echte Geheimhaltung.
 
 ```sh
 echo "my secret seed phrase" > /tmp/secret.txt

@@ -476,19 +476,42 @@ Rekonstruktionsmatrix ist eine Vandermonde-Determinante, immer
 ungleich null für verschiedene $x_j$.
 
 In holofs verwenden wir nicht direkt Vandermonde-Shamir; wir verwenden
-**zufällige** Koeffizientenvektoren. Die Sicherheitsgarantie ist
-geringfügig schwächer (beliebige $K - 1$ Shards leaken eine uniforme
-Dichteverteilung über dem Geheimnisraum — dasselbe wie Shamir im
-schlimmsten Fall, aber nicht für alle Koeffizienten-Wahlen). Für
-Key-Escrow-Anwendungen ist das akzeptabel.
+**zufällige** Koeffizientenvektoren. Dies ist ein **Threshold-Erasure-Code,
+kein Shamir**: der Koeffizientenvektor jedes Anteils liegt innerhalb
+der `.holoshare`-Datei selbst (das `coeffs`-Feld), sodass beliebige
+$K - 1$ Anteile einem Angreifer $K - 1$ lineare Gleichungen über
+$\mathrm{GF}(2^8)$ mit $K$ Unbekannten geben — die Lösung schrumpft
+auf einen eindimensionalen Unterraum statt des vollen
+$\mathrm{GF}(2^8)^K$. Das sind grob $(K-1)/K$ der Klartext-Information;
+das verbleibende $1/K$ ist das einzige echte Geheimnis. Für Klartext
+mit selbstprüfender Struktur (Seed-Phrasen, Wörterbuchwörter,
+Prüfsummen-IDs) forciert der Angreifer diese letzte Dimension trivial
+durch und stellt das ganze Geheimnis wieder her.
+
+**Konsequenz:** diese Konstruktion ist eine gute Obfuskation und ein
+gutes Verfügbarkeits-Primitiv (beliebige $K$ Anteile rekonstruieren
+byte-perfekt), aber sie ist **nicht** informationstheoretisch sicher
+und **kein** Shamir. Behandeln Sie `.holoshare`-Dateien nicht als
+sicher zur Übergabe an nicht vertrauenswürdige Parteien. Wickeln Sie
+den Klartext zuerst in einen authentifizierten Chiffre ein (Krawczyks
+„Encrypted-Then-Shared"-Muster, siehe unten), wenn Sie echte Geheimhaltung
+benötigen.
 
 ### holofs-Escrow
 
-`holofs-analytics::escrow` baut auf `holofs-core::rlnc::encode_layer_with_k`
-mit benutzergewähltem $K, N$ auf. Shards werden als
-`.holoshare`-Dateien serialisiert, die an Menschen / Geräte verteilt
-werden können. Der Escrow-Workflow ist *rein clientseitig*: nichts wird
-auf dem Cluster gespeichert.
+`holofs-analytics::escrow` baut auf
+`holofs-core::rlnc::encode_layer_with_k_random` mit benutzergewähltem
+$K, N$ auf. Jeder der $N$ Anteile ist eine frische zufällige
+Linearkombination der $K$ Klartext-Chunks — der systematische Pfad
+des allgemeinen RLNC-Encoders (der $\min(K, N)$ Anteile ausgeben würde,
+die einen Klartext-Chunk unverändert kopieren) wird für Escrow
+absichtlich übersprungen, sodass kein Anteil eine wörtliche
+Klartextkopie ist. Die Threshold-Erasure-Eigenschaft von oben gilt
+weiterhin: $K$ Anteile rekonstruieren exakt, $K-1$ leaken grob
+$(K-1)/K$ des Klartexts. Anteile werden als `.holoshare`-Dateien
+serialisiert, die an Menschen / Geräte verteilt werden können. Der
+Escrow-Workflow ist *rein clientseitig*: nichts wird auf dem Cluster
+gespeichert.
 
 **Referenzen.**
 

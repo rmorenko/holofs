@@ -471,19 +471,43 @@ reconstrucción es un determinante de Vandermonde, siempre no cero para
 $x_j$ distintos.
 
 En holofs no usamos Vandermonde-Shamir directamente; usamos vectores
-de coeficientes **aleatorios**. La garantía de seguridad es
-ligeramente más débil (cualesquiera $K - 1$ shards filtran una pdf
-uniforme sobre el espacio secreto — igual que Shamir en el peor caso,
-pero no para todas las elecciones de coeficientes). Para casos de uso
-de escrow de claves esto es aceptable.
+de coeficientes **aleatorios**. Esto es un **código de borrado con
+umbral, no Shamir**: el vector de coeficientes de cada parte vive
+dentro del propio archivo `.holoshare` (el campo `coeffs`), así que
+cualesquiera $K - 1$ partes dan a un atacante $K - 1$ ecuaciones
+lineales sobre $\mathrm{GF}(2^8)$ con $K$ incógnitas — la solución se
+colapsa a un subespacio unidimensional en lugar del
+$\mathrm{GF}(2^8)^K$ completo. Eso es aproximadamente $(K-1)/K$ de la
+información del texto plano; el $1/K$ restante es el único secreto
+verdadero. Para texto plano con estructura auto-verificable (frases
+semilla, palabras de diccionario, identificadores con suma de
+verificación), el atacante fuerza esa última dimensión trivialmente y
+recupera el secreto entero.
+
+**Consecuencia:** esta construcción es una buena ofuscación y una
+buena primitiva de disponibilidad (cualesquiera $K$ partes
+reconstruyen byte-perfecto), pero **no** es seguro en el sentido de
+teoría de la información y **no** es Shamir. No trates los archivos
+`.holoshare` como seguros para entregar a partes no confiables.
+Envuelve primero el texto plano en un cifrado autenticado (el patrón
+«cifrado-luego-compartido» de Krawczyk, abajo) si necesitas
+verdadero secreto.
 
 ### Escrow de holofs
 
 `holofs-analytics::escrow` se basa en
-`holofs-core::rlnc::encode_layer_with_k` con $K, N$ elegidos por el
-usuario. Los shards se serializan como archivos `.holoshare`
-distribuibles a humanos / dispositivos. El flujo de trabajo de escrow
-es *puro-cliente*: no se almacena nada en el clúster.
+`holofs-core::rlnc::encode_layer_with_k_random` con $K, N$ elegidos
+por el usuario. Cada una de las $N$ partes es una combinación lineal
+aleatoria fresca de los $K$ chunks de texto plano — el camino
+sistemático del codificador RLNC general (que emitiría $\min(K, N)$
+partes que copian tal cual un chunk de texto plano) se omite
+deliberadamente para el escrow, de modo que ninguna parte sea una
+copia literal del texto plano. La propiedad de borrado con umbral de
+arriba sigue aplicándose: $K$ partes reconstruyen exactamente, $K-1$
+filtran aproximadamente $(K-1)/K$ del texto plano. Las partes se
+serializan como archivos `.holoshare` distribuibles a humanos /
+dispositivos. El flujo de trabajo de escrow es *puro-cliente*: no se
+almacena nada en el clúster.
 
 **Referencias.**
 

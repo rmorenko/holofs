@@ -480,19 +480,43 @@ un déterminant de Vandermonde, toujours non nul pour des $x_j$
 distincts.
 
 Dans holofs, nous n'utilisons pas Vandermonde-Shamir directement ; nous
-utilisons des vecteurs de coefficients **aléatoires**. La garantie de
-sécurité est légèrement plus faible (toutes $K - 1$ shards laissent
-fuir une pdf uniforme sur l'espace du secret — la même chose que
-Shamir dans le pire cas, mais pas pour tous les choix de coefficients).
-Pour les cas d'usage de séquestre de clé, cela est acceptable.
+utilisons des vecteurs de coefficients **aléatoires**. C'est un **code
+d'effacement à seuil, pas du Shamir** : le vecteur de coefficients de
+chaque part vit à l'intérieur du fichier `.holoshare` lui-même (le
+champ `coeffs`), donc toutes $K - 1$ parts donnent à un attaquant
+$K - 1$ équations linéaires sur $\mathrm{GF}(2^8)$ avec $K$ inconnues
+— la solution se réduit à un sous-espace de dimension un au lieu du
+$\mathrm{GF}(2^8)^K$ complet. Cela représente environ $(K-1)/K$ de
+l'information du texte en clair ; le $1/K$ restant est le seul vrai
+secret. Pour du texte en clair à structure auto-vérifiante (phrases
+mnémoniques, mots de dictionnaire, identifiants avec somme de
+contrôle), l'attaquant force cette dernière dimension trivialement et
+récupère le secret entier.
+
+**Conséquence :** cette construction est une bonne obfuscation et une
+bonne primitive de disponibilité (toutes $K$ parts reconstruisent
+octet-parfaitement), mais elle n'est **pas** théoriquement sûre au
+sens de l'information et **pas** du Shamir. Ne considérez pas les
+fichiers `.holoshare` comme sûrs à remettre à des parties non
+fiables. Enveloppez d'abord le texte en clair dans un chiffrement
+authentifié (le motif « chiffré-puis-partagé » de Krawczyk, ci-dessous)
+si vous avez besoin d'un vrai secret.
 
 ### Séquestre holofs
 
 `holofs-analytics::escrow` s'appuie sur
-`holofs-core::rlnc::encode_layer_with_k` avec $K, N$ choisis par
-l'utilisateur. Les shards sont sérialisés en fichiers `.holoshare`
-distribuables à des humains / appareils. Le workflow de séquestre est
-*purement côté client* : rien n'est stocké sur le cluster.
+`holofs-core::rlnc::encode_layer_with_k_random` avec $K, N$ choisis
+par l'utilisateur. Chacune des $N$ parts est une combinaison linéaire
+aléatoire fraîche des $K$ chunks de texte en clair — le chemin
+systématique de l'encodeur RLNC général (qui émettrait $\min(K, N)$
+parts recopiant à l'identique un chunk de texte en clair) est
+délibérément sauté pour le séquestre, afin qu'aucune part ne soit une
+copie littérale du texte en clair. La propriété d'effacement à seuil
+ci-dessus s'applique toujours : $K$ parts reconstruisent exactement,
+$K-1$ laissent fuir environ $(K-1)/K$ du texte en clair. Les parts
+sont sérialisées en fichiers `.holoshare` distribuables à des humains
+/ appareils. Le workflow de séquestre est *purement côté client* :
+rien n'est stocké sur le cluster.
 
 **Références.**
 

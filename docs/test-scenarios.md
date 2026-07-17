@@ -335,8 +335,10 @@ contain `status=404` lines for `/api/shard/...`.
 
 ## 8. Holographic Key Escrow
 
-**Goal.** Shamir-style threshold scheme — split an arbitrary file into N
-shares with threshold K, recover from any K.
+**Goal.** Threshold-RLNC erasure scheme (NOT Shamir — see theory.md §8) —
+split an arbitrary file into N shares with threshold K, recover from
+any K. Use as availability backup only; K−1 shares leak ≈(K−1)/K of
+the plaintext, so encrypt-then-share for real secrecy.
 
 ```sh
 echo "my secret seed phrase" > /tmp/secret.txt

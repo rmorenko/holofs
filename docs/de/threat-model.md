@@ -147,7 +147,7 @@ zielen auf ihn ab.
 | I3 | Metadaten-Leak: Name + Art + Größe                            | Das Manifest speichert Objektname und Content-Type im Klartext. Sensible Deployments sollten Namen vor dem Upload hashen oder pseudonymisieren. |
 | I4 | Seitenkanäle (Cache, Netzwerk-Timing)                         | In 0.1 nicht gemindert — dedizierte CPUs / dediziertes Netzwerk für sensible Deployments. |
 | I5 | Backup-Leak                                                   | Backups erben dieselbe Bedrohung: sie müssen at rest verschlüsselt gespeichert werden (`restic --pass-file`, S3 SSE-KMS). |
-| I6 | Holoshare-Leak                                                | Eine einzelne `.holoshare`-Datei ist ein Anteil eines `(k,n)` Shamir-via-RLNC-Splits. Der Besitz von weniger als `k` ist informationstheoretisch sicher (siehe [theory.md §8](./theory.md#8-shamir-secret-sharing--rlnc)). |
+| I6 | Holoshare-Leak                                                | Eine einzelne `.holoshare`-Datei ist ein Anteil eines `(k,n)` **Threshold-RLNC-Erasure-Splits — KEIN Shamir, NICHT ITS-sicher**. Der Besitz von `k-1` Anteilen leakt ≈(k-1)/k des Klartexts (siehe [theory.md §8](./theory.md#8-shamir-secret-sharing--rlnc)) — Klartexte mit selbstprüfender Struktur (Seed-Phrasen, Schlüssel, IDs) fallen der Brute-Force über die letzte Dimension zum Opfer. Gegenmaßnahme: `.holoshare`-Dateien nur als Verfügbarkeits-Backup behandeln; **Encrypt-then-Share** (Klartext in authentifizierte Chiffre einwickeln, Anteile des Chiffretextes verteilen), wenn echte Geheimhaltung nötig ist. |
 
 ### 4.5. Denial of Service
 

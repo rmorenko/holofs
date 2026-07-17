@@ -348,8 +348,11 @@ de la passerelle ne doit pas contenir de lignes `status=404` pour
 
 ## 8. Séquestre holographique de clé
 
-**Objectif.** Schéma à seuil de style Shamir — découper un fichier
-arbitraire en N parts avec seuil K, récupérer depuis n'importe quelles K.
+**Objectif.** Schéma d'effacement RLNC à seuil (PAS du Shamir — voir
+theory.md §8) — découper un fichier arbitraire en N parts avec seuil
+K, récupérer depuis n'importe quelles K. À utiliser uniquement comme
+sauvegarde de disponibilité ; K−1 parts laissent fuir ≈(K−1)/K du
+texte en clair, donc encrypt-then-share pour un vrai secret.
 
 ```sh
 echo "my secret seed phrase" > /tmp/secret.txt

@@ -106,7 +106,7 @@ sin tocar la ruta del módulo.
 | `inspect` | View-model de `/inspect` + extracción de payload de shard. |
 | `metrics` | `file_metrics` — storage/dedup + originalidad + energía por capa en una sola pasada. |
 | `health` | Estadísticas del clúster, toggles admin, `scrub_tick`, `object_health`. |
-| `escrow` | Escrow de claves RLNC estilo Shamir. |
+| `escrow` | Escrow de claves RLNC con umbral (primitiva de disponibilidad, no ITS; véase theory.md §8). |
 | `gc` | Recolector de shards huérfanos. |
 
 **Regla general.** Los nuevos métodos de `Gateway` pertenecen al módulo
@@ -438,7 +438,7 @@ estructurado.
 | Identidad de nodo                 | Ed25519                         | ed25519-dalek (RFC 8032) |
 | Firma de whitelist de admin       | Ed25519                         | ed25519-dalek       |
 | Reto del handshake                | nonce aleatorio de 32 bytes + Ed25519 | holofs-storage |
-| Escrow de clave / estilo Shamir   | RLNC sobre GF(2⁸) con K personalizado | holofs-analytics |
+| Escrow de clave (RLNC con umbral) | RLNC sobre GF(2⁸) con K personalizado | holofs-analytics |
 | Separación de dominios            | prefijo de string (`holofs-XXX-vN`) antes de la entrada de hash / sign |
 
 ---

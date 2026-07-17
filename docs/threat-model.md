@@ -164,7 +164,7 @@ mitigations in this document target it.
 | I3 | Metadata leak: name + kind + size                  | Manifest stores object name and content type in plaintext. Sensitive deployments should hash or pseudonymise names before upload. |
 | I4 | Side channels (cache, network timing)              | Not mitigated in 0.1 — use dedicated CPUs / network for sensitive deployments. |
 | I5 | Backup leak                                        | Backups inherit the same threat: they must be encrypted at rest (`restic --pass-file`, S3 SSE-KMS). |
-| I6 | Holoshare leak                                     | An individual `.holoshare` file is one share of a `(k,n)` Shamir-via-RLNC split. Possessing fewer than `k` is information-theoretic safe (see [theory.md §8](./theory.md#8-shamir-secret-sharing--rlnc)). |
+| I6 | Holoshare leak                                     | An individual `.holoshare` file is one share of a `(k,n)` **threshold-RLNC erasure split — NOT Shamir, NOT ITS-safe**. Possessing `k-1` shares leaks ≈(k-1)/k of the plaintext (see [theory.md §8](./theory.md#8-shamir-secret-sharing--rlnc)) — plaintexts with self-checking structure (seed phrases, keys, IDs) fall to brute-force of the last dimension. Mitigation: treat `.holoshare` files as availability-backup only; **encrypt-then-share** (wrap plaintext in an authenticated cipher, distribute shares of the ciphertext) if you need real secrecy. |
 
 ### 4.5. Denial of service
 

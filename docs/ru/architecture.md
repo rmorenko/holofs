@@ -106,7 +106,7 @@ graph BT
 | `inspect` | View-model для `/inspect` + извлечение payload'а шарда. |
 | `metrics` | `file_metrics` — storage/dedup + оригинальность + энергия по слоям за один проход. |
 | `health` | Статистика кластера, admin-переключатели, `scrub_tick`, `object_health`. |
-| `escrow` | Shamir-style RLNC key escrow. |
+| `escrow` | Пороговый RLNC key escrow (availability-примитив, не ITS; см. theory.md §8). |
 | `gc` | Сборщик мусора (orphan-shards). |
 
 **Правило хорошего тона.** Новые методы `Gateway` идут в модуль, чью
@@ -430,7 +430,7 @@ proof-of-replication, нет Sybil-сопротивления. holofs — в т�
 | Идентичность ноды                | Ed25519                           | ed25519-dalek (RFC 8032) |
 | Подпись whitelist                | Ed25519                           | ed25519-dalek        |
 | Challenge handshake              | 32-байтовый случайный nonce + Ed25519 | holofs-storage   |
-| Key escrow / Shamir-style        | RLNC над GF(2⁸) с кастомным K     | holofs-analytics     |
+| Key escrow (пороговый RLNC)      | RLNC над GF(2⁸) с кастомным K     | holofs-analytics     |
 | Domain separation                | Строковой префикс (`holofs-XXX-vN`) перед hash/sign |         |
 
 ---

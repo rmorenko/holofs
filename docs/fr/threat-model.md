@@ -145,7 +145,7 @@ le ciblent.
 | I3 | Fuite de métadonnées : nom + type + taille          | Le manifeste stocke le nom de l'objet et le type de contenu en clair. Les déploiements sensibles doivent hacher ou pseudonymiser les noms avant l'envoi. |
 | I4 | Canaux auxiliaires (cache, timing réseau)           | Non atténué dans 0.1 — utiliser des CPUs / réseaux dédiés pour les déploiements sensibles. |
 | I5 | Fuite de sauvegarde                                 | Les sauvegardes héritent de la même menace : elles doivent être chiffrées au repos (`restic --pass-file`, S3 SSE-KMS). |
-| I6 | Fuite de holoshare                                  | Un fichier `.holoshare` individuel est une part d'un partage Shamir-via-RLNC `(k,n)`. Posséder moins de `k` parts est sûr au sens de la théorie de l'information (voir [theory.md §8](./theory.md#8-partage-de-secret-shamir--rlnc)). |
+| I6 | Fuite de holoshare                                  | Un fichier `.holoshare` individuel est une part d'un **partage d'effacement RLNC à seuil `(k,n)` — PAS du Shamir, PAS sûr au sens de la théorie de l'information**. Posséder `k-1` parts laisse fuir ≈(k-1)/k du texte en clair (voir [theory.md §8](./theory.md#8-partage-de-secret-shamir--rlnc)) — les textes en clair à structure auto-vérifiante (phrases mnémoniques, clés, identifiants) tombent à la force brute sur la dernière dimension. Atténuation : traiter les fichiers `.holoshare` uniquement comme une sauvegarde de disponibilité ; **encrypt-then-share** (envelopper le texte en clair dans un chiffrement authentifié, distribuer les parts du chiffré) si un vrai secret est requis. |
 
 ### 4.5. Déni de service
 

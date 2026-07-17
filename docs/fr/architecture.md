@@ -108,7 +108,7 @@ consommateurs écrivent toujours `holofs_gateway::GatewayError`,
 | `inspect` | View-model `/inspect` + extraction de la charge utile des shards. |
 | `metrics` | `file_metrics` — stockage/dedup + originalité + énergie par couche en une passe. |
 | `health` | Statistiques du cluster, bascules admin, `scrub_tick`, `object_health`. |
-| `escrow` | Séquestre de clé RLNC de style Shamir. |
+| `escrow` | Séquestre de clé RLNC à seuil (primitive de disponibilité, pas ITS ; voir theory.md §8). |
 | `gc` | Ramasse-miettes de shards orphelins. |
 
 **Règle empirique.** Les nouvelles méthodes de `Gateway` appartiennent
@@ -443,7 +443,7 @@ analyse structurée.
 | Identité du nœud                 | Ed25519                          | ed25519-dalek (RFC 8032) |
 | Signature de liste blanche admin | Ed25519                          | ed25519-dalek        |
 | Défi de poignée de main          | Nonce aléatoire 32 octets + Ed25519 | holofs-storage    |
-| Séquestre de clé / style Shamir  | RLNC sur GF(2⁸) avec K personnalisé | holofs-analytics  |
+| Séquestre de clé (RLNC à seuil)  | RLNC sur GF(2⁸) avec K personnalisé | holofs-analytics  |
 | Séparation de domaine            | Préfixe de chaîne (`holofs-XXX-vN`) avant l'entrée hash / sign |
 
 ---

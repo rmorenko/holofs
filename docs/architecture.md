@@ -138,7 +138,7 @@ etc. without touching the module path.
 | `inspect` | `/inspect` view-model + shard payload extraction. |
 | `metrics` | `file_metrics` — storage/dedup + originality + layer energy in one pass. |
 | `health` | Cluster stats, admin toggles, `scrub_tick`, `object_health`. |
-| `escrow` | Shamir-style RLNC key escrow. |
+| `escrow` | Threshold-RLNC key escrow (availability primitive, not ITS; see theory.md §8). |
 | `gc` | Orphan-shard garbage collector. |
 
 **Rule of thumb.** New `Gateway` methods belong to the module whose
@@ -462,7 +462,7 @@ trust class as Backblaze B2 or AWS S3, not Filecoin or Storj. See
 | Node identity                    | Ed25519                         | ed25519-dalek (RFC 8032) |
 | Admin whitelist signature        | Ed25519                         | ed25519-dalek       |
 | Handshake challenge              | random 32-byte nonce + Ed25519  | holofs-storage      |
-| Key escrow / Shamir-style        | RLNC over GF(2⁸) with custom K  | holofs-analytics    |
+| Key escrow (threshold-RLNC)      | RLNC over GF(2⁸) with custom K  | holofs-analytics    |
 | Domain separation                | string prefix (`holofs-XXX-vN`) | hash / sign inputs  |
 
 ---

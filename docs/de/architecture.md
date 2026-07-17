@@ -107,7 +107,7 @@ ohne den Modulpfad zu berühren.
 | `inspect` | `/inspect`-View-Model + Shard-Payload-Extraktion. |
 | `metrics` | `file_metrics` — Storage/Dedup + Originality + Layer-Energie in einem Durchgang. |
 | `health` | Cluster-Stats, Admin-Toggles, `scrub_tick`, `object_health`. |
-| `escrow` | Shamir-artige RLNC-Schlüsselhinterlegung. |
+| `escrow` | Threshold-RLNC-Schlüsselhinterlegung (Verfügbarkeits-Primitiv, nicht ITS; siehe theory.md §8). |
 | `gc` | Garbage Collector für verwaiste Shards. |
 
 **Faustregel.** Neue `Gateway`-Methoden gehören zu dem Modul, dessen
@@ -442,7 +442,7 @@ strukturierte Analyse.
 | Node-Identität                   | Ed25519                         | ed25519-dalek (RFC 8032) |
 | Admin-Whitelist-Signatur         | Ed25519                         | ed25519-dalek        |
 | Handshake-Challenge              | zufällige 32-Byte-Nonce + Ed25519 | holofs-storage     |
-| Key Escrow / Shamir-Stil         | RLNC über GF(2⁸) mit benutzerdefiniertem K | holofs-analytics |
+| Key Escrow (Threshold-RLNC)      | RLNC über GF(2⁸) mit benutzerdefiniertem K | holofs-analytics |
 | Domain-Trennung                  | String-Präfix (`holofs-XXX-vN`) vor Hash- / Sign-Eingabe |
 
 ---
