@@ -45,13 +45,59 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::pin::Pin;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use holofs_storage::identity::{NodeIdentity, PubKey};
+use holofs_storage::node_service::perform_bilateral_handshake_as_client;
+
 use crate::transport::{self, TransportStream};
+
+/// Client-side authentication material for the P0.3b bilateral
+/// handshake. Installed process-wide via [`set_client_auth`] at
+/// gateway bootstrap; every fresh pool-dial afterwards runs the
+/// handshake before the stream is handed out. Reused pooled
+/// connections skip the handshake — the TCP peer is the same
+/// authenticated party that completed it the first time.
+///
+/// `None` disables the handshake entirely (pre-P0.3b behaviour;
+/// nothing changes). Setting this to `Some` while any nodes in
+/// `node_pubkeys` run in `--client-whitelist` strict mode requires
+/// `identity.pubkey()` to be on their whitelist — otherwise the
+/// handshake fails and the pool surfaces `ConnectionAborted`.
+pub struct ClientAuthConfig {
+    /// Gateway's own Ed25519 identity — used to sign the node's
+    /// counter-nonce during the handshake.
+    pub identity: NodeIdentity,
+    /// Map from node addr (as the pool sees it, i.e. the string
+    /// used with `acquire`) to that node's expected pubkey. Nodes
+    /// absent from this map bypass the handshake — legacy nodes /
+    /// nodes running in permissive mode.
+    pub node_pubkeys: HashMap<String, PubKey>,
+}
+
+/// Install process-wide client-auth material. Called by
+/// `holofs_web::bootstrap` after loading `gateway_identity.key`
+/// and the signed cluster whitelist. Passing `None` clears any
+/// previously-installed config so tests can reset state.
+pub fn set_client_auth(cfg: Option<Arc<ClientAuthConfig>>) {
+    let slot = client_auth_slot();
+    if let Ok(mut w) = slot.write() {
+        *w = cfg;
+    }
+}
+
+fn client_auth_slot() -> &'static RwLock<Option<Arc<ClientAuthConfig>>> {
+    static SLOT: OnceLock<RwLock<Option<Arc<ClientAuthConfig>>>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(None))
+}
+
+fn current_client_auth() -> Option<Arc<ClientAuthConfig>> {
+    client_auth_slot().read().ok().and_then(|r| r.clone())
+}
 
 struct Entry {
     stream: TransportStream,
@@ -146,15 +192,18 @@ fn read_disabled() -> bool {
 /// pool when the guard is dropped, unless [`Pooled::poison`] was called.
 pub async fn acquire(addr: &str) -> io::Result<Pooled> {
     if disabled() {
-        let stream = transport::connect(addr).await?;
+        let mut stream = transport::connect(addr).await?;
+        handshake_if_configured(addr, &mut stream).await?;
         // keep_on_drop=false so a disabled-pool acquire never leaks
         // a TCP connection into the cache after the env knob flips.
         return Ok(Pooled::detached(addr.to_string(), stream));
     }
     if let Some(stream) = pop_fresh(addr) {
+        // Reused connection already handshake'd on first dial; skip.
         return Ok(Pooled::new(addr.to_string(), stream, true));
     }
-    let stream = transport::connect(addr).await?;
+    let mut stream = transport::connect(addr).await?;
+    handshake_if_configured(addr, &mut stream).await?;
     Ok(Pooled::new(addr.to_string(), stream, false))
 }
 
@@ -165,11 +214,33 @@ pub async fn acquire(addr: &str) -> io::Result<Pooled> {
 /// same LIFO queue — very likely equally dead. Freshly dialing on
 /// the retry breaks that streak.
 pub async fn acquire_fresh(addr: &str) -> io::Result<Pooled> {
-    let stream = transport::connect(addr).await?;
+    let mut stream = transport::connect(addr).await?;
+    handshake_if_configured(addr, &mut stream).await?;
     if disabled() {
         return Ok(Pooled::detached(addr.to_string(), stream));
     }
     Ok(Pooled::new(addr.to_string(), stream, false))
+}
+
+/// If [`set_client_auth`] has been called AND we know the expected
+/// pubkey for `addr`, run the P0.3b bilateral handshake on the
+/// freshly-dialed stream. Failure propagates as
+/// `ConnectionAborted` so the caller can retry (or fail cleanly).
+///
+/// Nodes not present in `node_pubkeys` skip the handshake — they're
+/// either legacy peers or running in permissive mode. This lets a
+/// gateway mix trusted-cluster and legacy nodes during rollout
+/// without a big-bang cutover.
+async fn handshake_if_configured(addr: &str, stream: &mut TransportStream) -> io::Result<()> {
+    let Some(cfg) = current_client_auth() else {
+        return Ok(());
+    };
+    let Some(expected) = cfg.node_pubkeys.get(addr).copied() else {
+        return Ok(());
+    };
+    perform_bilateral_handshake_as_client(stream, &cfg.identity, &expected)
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::ConnectionAborted, format!("handshake {addr}: {e}")))
 }
 
 fn pop_fresh(addr: &str) -> Option<TransportStream> {
@@ -539,5 +610,174 @@ mod tests {
         assert_eq!(idle, 0, "disabled pool keeps nothing");
 
         clear();
+    }
+
+    // === P0.3b: handshake-aware pool ==================================
+
+    #[tokio::test]
+    async fn acquire_runs_handshake_when_client_auth_configured() {
+        // End-to-end: node with `--client-whitelist`-style enforcement
+        // (Some(wl)) + gateway with client_auth (identity + node
+        // pubkey map) → acquire() completes handshake transparently
+        // and subsequent Ping/Pong flows normally.
+        use holofs_storage::identity::NodeIdentity;
+        use holofs_storage::node_service::spawn_node_persistent_with_tls_and_whitelist;
+        use holofs_storage::whitelist::{Whitelist, WhitelistEntry};
+
+        let _serial = pool_test_lock();
+        clear();
+        set_client_auth(None); // reset any prior test's install
+
+        // Build cluster whitelist: contains the client identity so
+        // the node accepts our handshake.
+        let admin = NodeIdentity::generate();
+        let client_id = NodeIdentity::generate();
+        let client_pk = client_id.pubkey();
+        let ingress_wl = Arc::new(Whitelist::sign(
+            vec![WhitelistEntry {
+                addr: String::new(),
+                pubkey: client_pk,
+                zone: 0,
+            }],
+            &admin,
+        ));
+
+        let dir = std::env::temp_dir().join(format!(
+            "pool-handshake-happy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (bound, _store, _h) = spawn_node_persistent_with_tls_and_whitelist(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            &dir,
+            None,
+            Some(ingress_wl),
+        )
+        .await
+        .unwrap();
+
+        // Load the node's own identity so we can tell the client
+        // what pubkey to expect.
+        let node_id =
+            NodeIdentity::load_or_create(dir.join("identity.key")).unwrap();
+        let mut node_pubkeys = HashMap::new();
+        node_pubkeys.insert(bound.to_string(), node_id.pubkey());
+        set_client_auth(Some(Arc::new(ClientAuthConfig {
+            identity: client_id,
+            node_pubkeys,
+        })));
+
+        // acquire runs handshake under the hood; ping/pong works.
+        let (resp, _) = ping(&bound.to_string()).await;
+        assert!(matches!(resp, Response::Pong));
+
+        // Cleanup so other tests in this file see a fresh slot.
+        set_client_auth(None);
+        clear();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn acquire_skips_handshake_when_addr_not_in_pubkey_map() {
+        // Client auth is installed BUT this addr is not on the
+        // gateway's pubkey map (mixed rollout: some nodes still in
+        // permissive mode). Handshake is skipped, RPC works over the
+        // legacy path unchanged.
+        use holofs_storage::identity::NodeIdentity;
+
+        let _serial = pool_test_lock();
+        clear();
+        set_client_auth(None);
+
+        // Install auth that references a bogus addr so the real
+        // node lookup returns None.
+        set_client_auth(Some(Arc::new(ClientAuthConfig {
+            identity: NodeIdentity::generate(),
+            node_pubkeys: HashMap::from([
+                ("192.0.2.1:9999".to_string(), [0xAAu8; 32]),
+            ]),
+        })));
+
+        let (addr, _store, _h) = spawn_node((Ipv4Addr::LOCALHOST, 0).into())
+            .await
+            .unwrap();
+        let (resp, _) = ping(&addr.to_string()).await;
+        assert!(matches!(resp, Response::Pong));
+
+        set_client_auth(None);
+        clear();
+    }
+
+    #[tokio::test]
+    async fn acquire_fails_when_gateway_not_whitelisted() {
+        // Gateway identity is NOT on the node's ingress whitelist →
+        // handshake rejected → acquire() surfaces
+        // ConnectionAborted.
+        use holofs_storage::identity::NodeIdentity;
+        use holofs_storage::node_service::spawn_node_persistent_with_tls_and_whitelist;
+        use holofs_storage::whitelist::{Whitelist, WhitelistEntry};
+
+        let _serial = pool_test_lock();
+        clear();
+        set_client_auth(None);
+
+        let admin = NodeIdentity::generate();
+        let authorised = NodeIdentity::generate(); // NOT our client
+        let intruder_id = NodeIdentity::generate();
+        let ingress_wl = Arc::new(Whitelist::sign(
+            vec![WhitelistEntry {
+                addr: String::new(),
+                pubkey: authorised.pubkey(),
+                zone: 0,
+            }],
+            &admin,
+        ));
+
+        let dir = std::env::temp_dir().join(format!(
+            "pool-handshake-reject-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (bound, _store, _h) = spawn_node_persistent_with_tls_and_whitelist(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            &dir,
+            None,
+            Some(ingress_wl),
+        )
+        .await
+        .unwrap();
+
+        let node_id =
+            NodeIdentity::load_or_create(dir.join("identity.key")).unwrap();
+        let mut node_pubkeys = HashMap::new();
+        node_pubkeys.insert(bound.to_string(), node_id.pubkey());
+        set_client_auth(Some(Arc::new(ClientAuthConfig {
+            identity: intruder_id,
+            node_pubkeys,
+        })));
+
+        let err = match acquire(&bound.to_string()).await {
+            Ok(_) => panic!("acquire must fail when gateway pubkey is not on ingress whitelist"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
+        assert!(
+            err.to_string().contains("handshake"),
+            "expected handshake error, got: {err}"
+        );
+
+        set_client_auth(None);
+        clear();
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

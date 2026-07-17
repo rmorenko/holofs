@@ -174,6 +174,45 @@ pub async fn bootstrap_cluster(
             nodes = wl.len(),
             "loaded signed whitelist"
         );
+
+        // P0.3b client-side: load our own gateway identity + install
+        // the pool-wide auth material so every outbound wire dial
+        // completes the bilateral handshake against the whitelisted
+        // node pubkey. Nodes running in `--client-whitelist` strict
+        // mode need the pubkey we log here on their whitelist;
+        // nodes still in permissive mode accept the handshake but
+        // don't verify, so mixed rollouts work.
+        //
+        // Identity path: `HOLOFS_GATEWAY_IDENTITY_KEY` env override,
+        // else `<storage>/gateway_identity.key`. `load_or_create`
+        // seeds a fresh keypair on first boot and persists it — the
+        // pubkey is stable across restarts, safe to bake into a
+        // signed node whitelist.
+        let identity_path = std::env::var_os("HOLOFS_GATEWAY_IDENTITY_KEY")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| config.storage.join("gateway_identity.key"));
+        let gw_identity =
+            holofs_storage::identity::NodeIdentity::load_or_create(&identity_path)
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    format!("gateway identity {}: {e}", identity_path.display()).into()
+                })?;
+        info!(
+            gateway_identity = %identity_path.display(),
+            gateway_pubkey = %hex(&gw_identity.pubkey()),
+            "loaded gateway identity (add this pubkey to each node's --client-whitelist)"
+        );
+        let mut node_pubkeys: std::collections::HashMap<String, [u8; PUBKEY_LEN]> =
+            std::collections::HashMap::with_capacity(wl.entries.len());
+        for e in &wl.entries {
+            node_pubkeys.insert(e.addr.clone(), e.pubkey);
+        }
+        holofs_client::pool::set_client_auth(Some(std::sync::Arc::new(
+            holofs_client::pool::ClientAuthConfig {
+                identity: gw_identity,
+                node_pubkeys,
+            },
+        )));
+
         let addrs: Vec<String> = wl.entries.iter().map(|e| e.addr.clone()).collect();
         let zs: Vec<u8> = wl.entries.iter().map(|e| e.zone).collect();
         let n = addrs.len();
