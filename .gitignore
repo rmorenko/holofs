@@ -45,3 +45,6 @@ __pycache__/
 
 # holofs-soak artefacts (per-run subdirectories under this root)
 /.soak/
+
+# `scripts/check-doc-anchors.mjs` installs github-slugger with --no-save
+/node_modules/
