@@ -2040,4 +2040,78 @@ mod tests {
         let mut store = Store::new();
         assert!(store.compact().unwrap().is_none());
     }
+
+    /// Framed request/response over any `AsyncRead + AsyncWrite`
+    /// stream — needed for the TLS path where the stream isn't a
+    /// bare TcpStream. Wire framing matches `rpc` above.
+    async fn rpc_generic<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        stream: &mut S,
+        req: Request,
+    ) -> Response {
+        let bytes = req.encode();
+        let len = bytes.len() as u32;
+        stream.write_all(&len.to_be_bytes()).await.unwrap();
+        stream.write_all(&bytes).await.unwrap();
+        let mut lb = [0u8; 4];
+        stream.read_exact(&mut lb).await.unwrap();
+        let n = u32::from_be_bytes(lb) as usize;
+        let mut payload = vec![0u8; n];
+        stream.read_exact(&mut payload).await.unwrap();
+        Response::decode(&payload).unwrap()
+    }
+
+    #[tokio::test]
+    async fn mtls_node_accepts_client_with_valid_cert() {
+        // Full P0.3-flavored end-to-end: generate self-signed
+        // TlsMaterial, spawn a persistent node with the resulting
+        // ServerConfig (mtls = true so the node also requires a
+        // client cert), connect from a TLS client presenting the
+        // same-CA client cert, and do a round-trip Ping. Verifies
+        // that the CLI wiring path — `--tls-cert/--tls-key/--tls-ca
+        // --mtls` → `TlsMaterial::server_config(true)` →
+        // `spawn_node_persistent_with_tls` — actually terminates
+        // TLS at the node.
+        use crate::tls::{server_name_for, TlsMaterial};
+        use tokio_rustls::TlsConnector;
+
+        let (material, _signer) =
+            TlsMaterial::self_signed("test-node", &["127.0.0.1".into()]).unwrap();
+        let server_cfg = material.server_config(true).unwrap();
+        let client_cfg = material.client_config(true).unwrap();
+        let client_cfg_bad = TlsMaterial::self_signed("intruder", &["127.0.0.1".into()])
+            .unwrap()
+            .0
+            .client_config(true)
+            .unwrap();
+
+        let dir = tmpdir("mtls-node");
+        let (addr, _store, _h) = spawn_node_persistent_with_tls(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            &dir,
+            Some(server_cfg),
+        )
+        .await
+        .unwrap();
+
+        // Happy path: same-CA client cert accepted, wire RPC succeeds.
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let connector = TlsConnector::from(client_cfg);
+        let sni = server_name_for(&format!("{}", addr.ip())).unwrap();
+        let mut tls_stream = connector.connect(sni, tcp).await.unwrap();
+        assert_eq!(rpc_generic(&mut tls_stream, Request::Ping).await, Response::Pong);
+
+        // Wrong-CA client cert: TLS handshake refused before any
+        // wire byte lands. Node rejecting → connect returns Err.
+        // (rustls surfaces this as a `bad_certificate` alert.)
+        let tcp2 = TcpStream::connect(addr).await.unwrap();
+        let connector_bad = TlsConnector::from(client_cfg_bad);
+        let sni2 = server_name_for(&format!("{}", addr.ip())).unwrap();
+        let handshake_res = connector_bad.connect(sni2, tcp2).await;
+        assert!(
+            handshake_res.is_err(),
+            "mtls node must reject client cert signed by a different CA"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

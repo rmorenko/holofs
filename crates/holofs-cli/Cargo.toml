@@ -13,6 +13,9 @@ holofs-model.workspace = true
 holofs-wire.workspace = true
 holofs-codec.workspace = true
 holofs-storage.workspace = true
+# holofs-node CLI plumbs TLS material through `rustls::ServerConfig`
+# type signatures; the TLS layer itself lives in `holofs-storage::tls`.
+rustls.workspace = true
 holofs-client.workspace = true
 holofs-cluster.workspace = true
 holofs-analytics.workspace = true
