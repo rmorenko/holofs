@@ -543,8 +543,8 @@ impl Store {
             let entry = entry?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            let is_wal_file = name.starts_with("wal-")
-                && (name.ends_with(".seg") || name.ends_with(".seg.tmp"));
+            let is_wal_file =
+                name.starts_with("wal-") && (name.ends_with(".seg") || name.ends_with(".seg.tmp"));
             if !is_wal_file {
                 continue;
             }
@@ -605,8 +605,8 @@ impl Store {
         // Rotating just to write an empty compact segment is churn.
         let existing_segs = crate::wal::walk_wal_segments(&dir)?;
         let existing_compacts = crate::wal::walk_compact_segments(&dir)?;
-        let has_prior_closed = existing_segs.len() > 1
-            || existing_segs.iter().any(|(seq, _)| *seq < wal.active_seq());
+        let has_prior_closed =
+            existing_segs.len() > 1 || existing_segs.iter().any(|(seq, _)| *seq < wal.active_seq());
         let active_has_data = wal.bytes_written() > 8; // > magic
         if !has_prior_closed && !active_has_data && existing_compacts.is_empty() {
             return Ok(None);
@@ -630,7 +630,9 @@ impl Store {
                 let o = *o;
                 let c = *c;
                 let l = *l;
-                bucket.iter().map(move |(h, (s, _))| (o, c, l, *h, s.clone()))
+                bucket
+                    .iter()
+                    .map(move |(h, (s, _))| (o, c, l, *h, s.clone()))
             })
             .collect();
         let record_count = live_records.len();
@@ -638,12 +640,8 @@ impl Store {
             .iter()
             .map(|(_, _, _, _, s)| (s.coeffs.len() + s.payload.len()) as u64)
             .sum();
-        let compact_path = crate::wal::write_compacted_segment(
-            &dir,
-            epoch,
-            live_records,
-            self.keyring.clone(),
-        )?;
+        let compact_path =
+            crate::wal::write_compacted_segment(&dir, epoch, live_records, self.keyring.clone())?;
 
         // 4. Sweep subsumed regular + older compacted segments +
         // any stray .tmp orphans. Best-effort — failures here just
@@ -657,7 +655,6 @@ impl Store {
             compact_path,
         }))
     }
-
 
     pub fn get(&self, k: Key) -> Vec<Shard> {
         self.shards
@@ -774,8 +771,7 @@ impl Store {
             self.maybe_rotate_wal();
         }
         // Now safe to mutate.
-        let doomed: std::collections::HashSet<Hash> =
-            removed_hashes.iter().copied().collect();
+        let doomed: std::collections::HashSet<Hash> = removed_hashes.iter().copied().collect();
         let mut removed = 0usize;
         self.shards.retain(|_, bucket| {
             bucket.retain(|h, _| {
@@ -808,7 +804,10 @@ impl Store {
     /// epoch-GC: peek at a shard's stored write-epoch. Used by
     /// tests + diagnostic paths; there is no wire op for this.
     pub fn epoch_of(&self, k: Key, hash: &Hash) -> Option<WriteEpoch> {
-        self.shards.get(&k).and_then(|m| m.get(hash)).map(|(_, e)| *e)
+        self.shards
+            .get(&k)
+            .and_then(|m| m.get(hash))
+            .map(|(_, e)| *e)
     }
 
     /// Drop everything (used on "node death + replacement").
@@ -855,7 +854,10 @@ impl Store {
     /// Override a shard by key + hash (test-only path for corruption testing).
     pub fn inject_corrupt(&mut self, k: Key, shard: Shard) {
         let h = shard_hash(&shard);
-        self.shards.entry(k).or_default().insert(h, (shard, now_epoch()));
+        self.shards
+            .entry(k)
+            .or_default()
+            .insert(h, (shard, now_epoch()));
     }
 
     /// Storage directory if persistent; otherwise `None`.
@@ -1185,9 +1187,8 @@ async fn spawn_node_with_identity(
     {
         let store_for_flusher = store.clone();
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
-                flush_interval_ms,
-            ));
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_millis(flush_interval_ms));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
@@ -1237,9 +1238,7 @@ async fn spawn_node_with_identity(
                             continue;
                         }
                         Err(join) => {
-                            eprintln!(
-                                "Store::flush_and_publish: fsync task panicked: {join}"
-                            );
+                            eprintln!("Store::flush_and_publish: fsync task panicked: {join}");
                             continue;
                         }
                     }
@@ -1767,6 +1766,40 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
             NODE_PUT_COUNT.fetch_add(1, Ordering::Relaxed);
             Response::Ack
         }
+        Request::PutBatchMulti { object_id, groups } => {
+            // Multi-(c, l) batched PUT — same store discipline as
+            // PutBatch (one store-lock acquisition, one WAL wait at
+            // the end) but the append loop walks every group. Timing
+            // counters get one increment for the whole frame so the
+            // /metrics `holofs_put_count_total` shape stays a "PUT
+            // frame count", not "shard count".
+            let t_lock = std::time::Instant::now();
+            let mut s = store.lock().await;
+            let lock_ns = t_lock.elapsed().as_nanos() as u64;
+            let t_append = std::time::Instant::now();
+            let mut last_seq: u64 = 0;
+            for (channel, layer, shards) in groups {
+                for shard in shards {
+                    let (_ok, seq) = s.put_appended((object_id, channel, layer), shard);
+                    if seq > last_seq {
+                        last_seq = seq;
+                    }
+                }
+            }
+            let synced_seq = Arc::clone(&s.wal_synced_seq);
+            let notify = Arc::clone(&s.wal_notify);
+            drop(s);
+            let append_ns = t_append.elapsed().as_nanos() as u64;
+            let t_wal = std::time::Instant::now();
+            wait_for_wal_seq(&synced_seq, &notify, last_seq).await;
+            let wal_ns = t_wal.elapsed().as_nanos() as u64;
+            use std::sync::atomic::Ordering;
+            NODE_PUT_LOCK_WAIT_NS_SUM.fetch_add(lock_ns, Ordering::Relaxed);
+            NODE_PUT_APPEND_NS_SUM.fetch_add(append_ns, Ordering::Relaxed);
+            NODE_PUT_WAL_WAIT_NS_SUM.fetch_add(wal_ns, Ordering::Relaxed);
+            NODE_PUT_COUNT.fetch_add(1, Ordering::Relaxed);
+            Response::Ack
+        }
         Request::CurrentEpoch => {
             // Wall-clock: independent of what's in the store.
             // Answering without acquiring the mutex keeps GC pass
@@ -1795,12 +1828,10 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
         // routing them through the generic request loop wouldn't
         // give us a place to write `HandshakeChallenge` before the
         // next read). Reaching here indicates a bug in the caller.
-        Request::Handshake { .. } | Request::HandshakeComplete { .. } => {
-            Response::Error(
-                "handshake frames must not reach handle_request; dispatched via handle_connection"
-                    .into(),
-            )
-        }
+        Request::Handshake { .. } | Request::HandshakeComplete { .. } => Response::Error(
+            "handshake frames must not reach handle_request; dispatched via handle_connection"
+                .into(),
+        ),
         Request::Capacity => {
             // P1.4b — take a short snapshot under the store lock (dir
             // path + live-bytes estimate) so we don't block the
@@ -1809,7 +1840,10 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
             // the store mutex across it.
             let (dir, live_bytes) = {
                 let s = store.lock().await;
-                (s.dir().map(std::path::PathBuf::from), s.live_bytes_estimate())
+                (
+                    s.dir().map(std::path::PathBuf::from),
+                    s.live_bytes_estimate(),
+                )
             };
             let (free_bytes, total_bytes) = match dir.as_deref() {
                 Some(d) => crate::disk_space::free_and_total_bytes(d),
@@ -2017,7 +2051,8 @@ mod tests {
         let raw = std::fs::read(&segments[0].1).unwrap();
         assert_eq!(&raw[..8], crate::wal::SEG_MAGIC);
         assert!(
-            !raw.windows(sh.payload.len()).any(|w| w == sh.payload.as_slice()),
+            !raw.windows(sh.payload.len())
+                .any(|w| w == sh.payload.as_slice()),
             "encrypted WAL segment contains plaintext payload — GCM broken?"
         );
 
@@ -2154,12 +2189,7 @@ mod tests {
         let e1 = s.epoch_of((0, 0, 0), &h).unwrap();
         // Simulate a slow clock — pin e1 down artificially, then
         // re-PUT and confirm the epoch updates.
-        s.shards
-            .get_mut(&(0, 0, 0))
-            .unwrap()
-            .get_mut(&h)
-            .unwrap()
-            .1 = e1.saturating_sub(1_000);
+        s.shards.get_mut(&(0, 0, 0)).unwrap().get_mut(&h).unwrap().1 = e1.saturating_sub(1_000);
         let pinned = s.epoch_of((0, 0, 0), &h).unwrap();
         assert!(!s.put((0, 0, 0), sh));
         let e2 = s.epoch_of((0, 0, 0), &h).unwrap();
@@ -2285,19 +2315,23 @@ mod tests {
         let dir = tmpdir("compact-basic");
         let mut store = Store::open(&dir).unwrap();
         // 3 live puts + 1 purge of one of them.
-        store
-            .put_appended((1, 0, 0), make_shard(1));
-        store
-            .put_appended((2, 0, 0), make_shard(2));
-        store
-            .put_appended((3, 0, 0), make_shard(3));
+        store.put_appended((1, 0, 0), make_shard(1));
+        store.put_appended((2, 0, 0), make_shard(2));
+        store.put_appended((3, 0, 0), make_shard(3));
         store.purge(2).unwrap();
         // At this point: shards for object 2 tombstoned; 1 and 3 live.
         assert_eq!(store.total(), 2);
 
         let report = store.compact().unwrap().expect("should have compacted");
-        assert!(report.records >= 2, "at least the 2 live shards; got {}", report.records);
-        assert!(report.compact_path.file_name().unwrap()
+        assert!(
+            report.records >= 2,
+            "at least the 2 live shards; got {}",
+            report.records
+        );
+        assert!(report
+            .compact_path
+            .file_name()
+            .unwrap()
             .to_string_lossy()
             .starts_with("wal-c"));
 
@@ -2308,7 +2342,10 @@ mod tests {
         assert_eq!(compacts[0].0, report.epoch);
         let regulars = crate::wal::walk_wal_segments(&dir).unwrap();
         for (seq, _) in &regulars {
-            assert!(*seq > report.epoch, "regular seg {seq} should have been gc'd");
+            assert!(
+                *seq > report.epoch,
+                "regular seg {seq} should have been gc'd"
+            );
         }
 
         // Reopen: same live state.
@@ -2316,7 +2353,10 @@ mod tests {
         let store2 = Store::open(&dir).unwrap();
         assert_eq!(store2.total(), 2);
         assert!(!store2.get((1, 0, 0)).is_empty());
-        assert!(store2.get((2, 0, 0)).is_empty(), "purged obj must stay purged");
+        assert!(
+            store2.get((2, 0, 0)).is_empty(),
+            "purged obj must stay purged"
+        );
         assert!(!store2.get((3, 0, 0)).is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
@@ -2374,10 +2414,18 @@ mod tests {
             wal.sync(true).unwrap();
             let epoch = wal.active_seq();
             wal.rotate().unwrap();
-            let records: Vec<_> = store.shards.iter().flat_map(|((o, c, l), bucket)| {
-                let o = *o; let c = *c; let l = *l;
-                bucket.iter().map(move |(h, (s, _))| (o, c, l, *h, s.clone()))
-            }).collect();
+            let records: Vec<_> = store
+                .shards
+                .iter()
+                .flat_map(|((o, c, l), bucket)| {
+                    let o = *o;
+                    let c = *c;
+                    let l = *l;
+                    bucket
+                        .iter()
+                        .map(move |(h, (s, _))| (o, c, l, *h, s.clone()))
+                })
+                .collect();
             crate::wal::write_compacted_segment(&dir_clone, epoch, records, None).unwrap();
             // Deliberately skip `wal::gc_compacted(&dir, epoch)`.
         }
@@ -2462,20 +2510,20 @@ mod tests {
             .unwrap();
 
         let dir = tmpdir("mtls-node");
-        let (addr, _store, _h) = spawn_node_persistent_with_tls(
-            (Ipv4Addr::LOCALHOST, 0).into(),
-            &dir,
-            Some(server_cfg),
-        )
-        .await
-        .unwrap();
+        let (addr, _store, _h) =
+            spawn_node_persistent_with_tls((Ipv4Addr::LOCALHOST, 0).into(), &dir, Some(server_cfg))
+                .await
+                .unwrap();
 
         // Happy path: same-CA client cert accepted, wire RPC succeeds.
         let tcp = TcpStream::connect(addr).await.unwrap();
         let connector = TlsConnector::from(client_cfg);
         let sni = server_name_for(&format!("{}", addr.ip())).unwrap();
         let mut tls_stream = connector.connect(sni, tcp).await.unwrap();
-        assert_eq!(rpc_generic(&mut tls_stream, Request::Ping).await, Response::Pong);
+        assert_eq!(
+            rpc_generic(&mut tls_stream, Request::Ping).await,
+            Response::Pong
+        );
 
         // Wrong-CA client cert: TLS handshake refused before any
         // wire byte lands. Node rejecting → connect returns Err.
@@ -2672,10 +2720,7 @@ mod tests {
         let err = perform_bilateral_handshake_as_client(&mut s, &client_id, &wrong_pubkey)
             .await
             .expect_err("client must detect the signature mismatch");
-        assert!(
-            err.contains("verification"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("verification"), "unexpected error: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2736,10 +2781,9 @@ mod tests {
     #[tokio::test]
     async fn capacity_on_persistent_node_reports_real_disk_and_live_bytes() {
         let dir = tmpdir("capacity-persistent");
-        let (addr, _store, _h) =
-            spawn_node_persistent((Ipv4Addr::LOCALHOST, 0).into(), &dir)
-                .await
-                .unwrap();
+        let (addr, _store, _h) = spawn_node_persistent((Ipv4Addr::LOCALHOST, 0).into(), &dir)
+            .await
+            .unwrap();
 
         // Baseline: fresh node, no shards → live_bytes=0 but the mount
         // should report a real total capacity via statvfs.
@@ -2790,5 +2834,90 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- PutBatchMulti handler (Replicated-perf single-round PUT) ---
+
+    #[tokio::test]
+    async fn put_batch_multi_stores_every_group_and_gets_by_key() {
+        // Multi-(c, l) frame with two distinct buckets. Both must
+        // be routable via the corresponding `Request::Get`.
+        let (addr, _store, _h) = spawn_node((Ipv4Addr::LOCALHOST, 0).into()).await.unwrap();
+        let mut s = TcpStream::connect(addr).await.unwrap();
+
+        let sh1 = make_shard(11);
+        let sh2 = make_shard(22);
+        let sh3 = make_shard(33);
+        let resp = rpc(
+            &mut s,
+            Request::PutBatchMulti {
+                object_id: 777,
+                groups: vec![
+                    (0, 0, vec![sh1.clone()]),
+                    (1, 2, vec![sh2.clone(), sh3.clone()]),
+                ],
+            },
+        )
+        .await;
+        assert_eq!(resp, Response::Ack, "multi-frame must commit atomically");
+
+        // (0, 0) → one shard.
+        match rpc(
+            &mut s,
+            Request::Get {
+                object_id: 777,
+                channel: 0,
+                layer: 0,
+            },
+        )
+        .await
+        {
+            Response::Shards(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0], sh1);
+            }
+            other => panic!("expected Shards, got {other:?}"),
+        }
+        // (1, 2) → two shards.
+        match rpc(
+            &mut s,
+            Request::Get {
+                object_id: 777,
+                channel: 1,
+                layer: 2,
+            },
+        )
+        .await
+        {
+            Response::Shards(v) => {
+                assert_eq!(v.len(), 2);
+                assert!(v.iter().any(|s| s == &sh2));
+                assert!(v.iter().any(|s| s == &sh3));
+            }
+            other => panic!("expected Shards, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn put_batch_multi_empty_frame_is_a_no_op_ack() {
+        // Zero groups is legal on the wire; the handler must Ack
+        // without touching the store.
+        let (addr, _store, _h) = spawn_node((Ipv4Addr::LOCALHOST, 0).into()).await.unwrap();
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let resp = rpc(
+            &mut s,
+            Request::PutBatchMulti {
+                object_id: 1,
+                groups: vec![],
+            },
+        )
+        .await;
+        assert_eq!(resp, Response::Ack);
+        // Store stat should be zero — the empty frame didn't
+        // sneak anything in.
+        assert_eq!(
+            rpc(&mut s, Request::Stat).await,
+            Response::StatResp { total_shards: 0 }
+        );
     }
 }

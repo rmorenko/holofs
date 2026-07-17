@@ -198,12 +198,7 @@ fn is_likely_transient(e: &io::Error) -> bool {
     use io::ErrorKind::*;
     matches!(
         e.kind(),
-        UnexpectedEof
-            | BrokenPipe
-            | ConnectionReset
-            | ConnectionAborted
-            | NotConnected
-            | TimedOut
+        UnexpectedEof | BrokenPipe | ConnectionReset | ConnectionAborted | NotConnected | TimedOut
     )
 }
 
@@ -496,11 +491,23 @@ pub async fn put_object_replicated_blocks(
         block_size,
     };
 
-    // 3. Encode each channel, group per-(c, l, node) shard sets so
-    //    every node receives one PutBatch per (c, l) — RPC count is
-    //    channels * nlayers * min(replication, live.len()).
+    // 3. Encode every (c, l), aggregating shards per-node across
+    //    ALL (c, l) groups. Then dispatch one `PutBatchMulti` per
+    //    node so the outer join_all has one entry per NODE (~40)
+    //    instead of one per (c, l) × NODE (~480 on a 40-node
+    //    cluster with `channels × nlayers = 12`). This is the
+    //    single-round-trip fix for the >60 s first-PUT surfaced by
+    //    the July 2026 40-node soak — the previous per-(c, l)
+    //    dispatch produced 12 sequential rounds even with
+    //    intra-round `join_all`.
     let mut shard_hashes: Vec<Vec<Vec<Hash>>> = vec![vec![Vec::new(); nlayers]; ch];
     let mut leaves_flat: Vec<Hash> = Vec::new();
+
+    // per_node[node_idx] = Vec<(channel, layer, Vec<Shard>)>
+    // Owned to avoid a mutable-manifest borrow across the encode
+    // loop and the subsequent join_all dispatch.
+    let mut per_node: std::collections::HashMap<usize, Vec<(u8, u8, Vec<Shard>)>> =
+        std::collections::HashMap::new();
 
     for c in 0..ch {
         let mut plane = channels[c].clone();
@@ -508,9 +515,9 @@ pub async fn put_object_replicated_blocks(
         for l in 0..nlayers {
             let positions = &manifest.layer_positions[l];
             let n_blocks = manifest.n_per_layer[l] as usize;
-            // Build shards + placements first.
-            // batches[node] -> Vec<Shard> to send to that node.
-            let mut batches: std::collections::HashMap<usize, Vec<Shard>> =
+            // Bucket shards for this (c, l) by node so we don't
+            // duplicate work re-scanning `per_node` later.
+            let mut layer_by_node: std::collections::HashMap<usize, Vec<Shard>> =
                 std::collections::HashMap::new();
             let mut layer_hashes: Vec<Hash> = Vec::with_capacity(n_blocks);
             for b in 0..n_blocks {
@@ -537,39 +544,46 @@ pub async fn put_object_replicated_blocks(
                     shard_idx: b as u32,
                 };
                 for node in place_replicas(key, replication, live)? {
-                    batches.entry(node).or_default().push(shard.clone());
+                    layer_by_node.entry(node).or_default().push(shard.clone());
                 }
             }
             shard_hashes[c][l] = layer_hashes;
-
-            // Dispatch one PutBatch per node covering all blocks
-            // this node holds for (c, l). Parallel via
-            // `join_all` — on 40 nodes with R=3 this collapses
-            // ~40 sequential RPCs into one round-trip, taking
-            // the 512×512 PUT under the MEDIUM-bucket timeout
-            //sequential dispatch made
-            // large clusters + Replicated encoding 504 out).
-            let dispatches = batches.into_iter().filter_map(|(node, shards)| {
-                let addr = manifest.nodes.get(node)?.clone();
-                let req = Request::PutBatch {
-                    object_id: manifest.object_id,
-                    channel: c as u8,
-                    layer: l as u8,
-                    shards,
-                };
-                Some(async move { rpc(&addr, req).await })
-            });
-            for result in futures_util::future::join_all(dispatches).await {
-                match result? {
-                    Response::Ack => {}
-                    Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
-                    other => {
-                        return Err(ClientError::UnexpectedResponse {
-                            expected: "Ack from PutBatch",
-                            got: format!("{other:?}"),
-                        })
-                    }
+            // Fold this (c, l)'s per-node buckets into the
+            // cross-(c, l) `per_node` aggregate. Only add a group
+            // when it has at least one shard — a node that got
+            // nothing for this (c, l) simply doesn't get an entry.
+            for (node, shards) in layer_by_node {
+                if !shards.is_empty() {
+                    per_node
+                        .entry(node)
+                        .or_default()
+                        .push((c as u8, l as u8, shards));
                 }
+            }
+        }
+    }
+
+    // Single round-trip fan-out: one `PutBatchMulti` per node,
+    // covering every (c, l) that landed there. Wall time ≈ single
+    // node RTT (parallel), which is why this collapses the ~60 s
+    // first-PUT into a single-round window.
+    let dispatches = per_node.into_iter().filter_map(|(node, groups)| {
+        let addr = manifest.nodes.get(node)?.clone();
+        let req = Request::PutBatchMulti {
+            object_id: manifest.object_id,
+            groups,
+        };
+        Some(async move { rpc(&addr, req).await })
+    });
+    for result in futures_util::future::join_all(dispatches).await {
+        match result? {
+            Response::Ack => {}
+            Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
+            other => {
+                return Err(ClientError::UnexpectedResponse {
+                    expected: "Ack from PutBatchMulti",
+                    got: format!("{other:?}"),
+                })
             }
         }
     }
@@ -623,11 +637,12 @@ pub async fn get_object_up_to_layer(
             }
         }
     }
-    let mut fetch_stream = futures_util::stream::iter(targets.into_iter().map(|(c, l)| async move {
-        let raw = gather_layer(manifest, live, c as u8, l as u8).await?;
-        Ok::<(usize, usize, Vec<Shard>), ClientError>((c, l, raw))
-    }))
-    .buffer_unordered(CL_INFLIGHT);
+    let mut fetch_stream =
+        futures_util::stream::iter(targets.into_iter().map(|(c, l)| async move {
+            let raw = gather_layer(manifest, live, c as u8, l as u8).await?;
+            Ok::<(usize, usize, Vec<Shard>), ClientError>((c, l, raw))
+        }))
+        .buffer_unordered(CL_INFLIGHT);
     let mut fetched: Vec<(usize, usize, Vec<Shard>)> = Vec::new();
     while let Some(res) = fetch_stream.next().await {
         fetched.push(res?);
@@ -763,8 +778,18 @@ pub async fn mix_images_at_split(
         return Err(ClientError::Incompatible(format!(
             "shape mismatch: a={}×{} ch={} layers={} levels={} k={}, \
              b={}×{} ch={} layers={} levels={} k={}",
-            a.width, a.height, a.channels, a.nlayers, a.levels, a.k,
-            b.width, b.height, b.channels, b.nlayers, b.levels, b.k,
+            a.width,
+            a.height,
+            a.channels,
+            a.nlayers,
+            a.levels,
+            a.k,
+            b.width,
+            b.height,
+            b.channels,
+            b.nlayers,
+            b.levels,
+            b.k,
         )));
     }
     if a.sym_len != b.sym_len {
@@ -917,12 +942,13 @@ pub async fn get_object_blocks(
             }
             let positions = &manifest.layer_positions[l];
             for &b in ids {
-                let expected_hash = *manifest.shard_hashes[c][l]
-                    .get(b as usize)
-                    .ok_or(ClientError::LayerLost {
-                        channel: c as u8,
-                        layer: l as u8,
-                    })?;
+                let expected_hash =
+                    *manifest.shard_hashes[c][l]
+                        .get(b as usize)
+                        .ok_or(ClientError::LayerLost {
+                            channel: c as u8,
+                            layer: l as u8,
+                        })?;
                 let key = ShardKey {
                     object_id: manifest.object_id,
                     channel: c as u8,
@@ -997,7 +1023,6 @@ pub async fn get_object_blocks(
     Ok((out, bytes_used))
 }
 
-
 /// Encode UTF-8 text into a cluster object. The text is split into K chunks
 /// along UTF-8 boundaries, then encoded as a single layer (channels=1,
 /// nlayers=1). The first K shards are systematic — each literally contains
@@ -1017,14 +1042,8 @@ pub async fn put_text_object(
         ObjectKind::Text,
         "put_text_object: kind must be Text"
     );
-    assert_eq!(
-        manifest.channels, 1,
-        "put_text_object: channels must be 1"
-    );
-    assert_eq!(
-        manifest.nlayers, 1,
-        "put_text_object: nlayers must be 1"
-    );
+    assert_eq!(manifest.channels, 1, "put_text_object: channels must be 1");
+    assert_eq!(manifest.nlayers, 1, "put_text_object: nlayers must be 1");
 
     let split = split_text_into_k_chunks(text);
     manifest.chunk_lens = split.chunk_lens;
@@ -1089,7 +1108,6 @@ pub async fn get_text_object_with_holes(
     let chunks = decode_layer_with_holes(gf, &refs, sl);
     Ok(assemble_text_with_holes(&chunks, &manifest.chunk_lens))
 }
-
 
 /// Encode an audio object: 1D Haar DWT per channel, priority-layer placement
 /// (like images but without the second axis). Channels (1 or 2) become
@@ -1306,8 +1324,7 @@ pub async fn layer_energies(
     for c in 0..manifest.channels as usize {
         for l in 0..nlayers {
             let raw = gather_layer(manifest, live, c as u8, l as u8).await?;
-            let expected: HashSet<Hash> =
-                manifest.shard_hashes[c][l].iter().copied().collect();
+            let expected: HashSet<Hash> = manifest.shard_hashes[c][l].iter().copied().collect();
             let verified: Vec<Shard> = raw
                 .into_iter()
                 .filter(|s| expected.contains(&shard_hash(s)))
@@ -1330,7 +1347,6 @@ pub async fn layer_energies(
     }
     Ok((energy, bytes_used))
 }
-
 
 /// Encode an arbitrary binary as a single RLNC "canvas": the payload is split
 /// into K chunks and encode_layer emits n systematic+RLNC shards.
@@ -1496,10 +1512,7 @@ pub async fn repair_node(
     if manifest.nodes.is_empty() {
         return Ok(RepairStats::default());
     }
-    assert!(
-        live.contains(&replacement),
-        "replacement node must be live"
-    );
+    assert!(live.contains(&replacement), "replacement node must be live");
     let mut stats = RepairStats::default();
 
     // Clear storage on the node being replaced.
@@ -1520,7 +1533,10 @@ pub async fn repair_node(
         Response::Ack => {}
         Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
         other => {
-            return Err(ClientError::UnexpectedResponse { expected: "Ack from Purge", got: format!("{other:?}") })
+            return Err(ClientError::UnexpectedResponse {
+                expected: "Ack from Purge",
+                got: format!("{other:?}"),
+            })
         }
     }
 
@@ -1569,7 +1585,10 @@ pub async fn repair_node(
                     }
                     Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
                     other => {
-                        return Err(ClientError::UnexpectedResponse { expected: "Shards", got: format!("{other:?}") })
+                        return Err(ClientError::UnexpectedResponse {
+                            expected: "Shards",
+                            got: format!("{other:?}"),
+                        })
                     }
                 }
                 if donors.len() >= d {
@@ -1611,7 +1630,10 @@ pub async fn repair_node(
                     }
                     Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
                     other => {
-                        return Err(ClientError::UnexpectedResponse { expected: "Ack", got: format!("{other:?}") })
+                        return Err(ClientError::UnexpectedResponse {
+                            expected: "Ack",
+                            got: format!("{other:?}"),
+                        })
                     }
                 }
             }
@@ -1737,8 +1759,8 @@ pub async fn drain_node_from_manifest(
             let need = migrating.len();
             stats.bytes_downloaded += donors.len() as u64 * bytes_per_shard;
             stats.bytes_baseline_full += (k as u64).min(donors.len() as u64) * bytes_per_shard;
-            stats.gf_muls_baseline += (k as u64) * (k as u64 + 1) * (slen + k as u64)
-                + (need as u64) * (k as u64) * slen;
+            stats.gf_muls_baseline +=
+                (k as u64) * (k as u64 + 1) * (slen + k as u64) + (need as u64) * (k as u64) * slen;
             stats.gf_muls_repair += (need as u64) * (donors.len() as u64) * (slen + k as u64);
 
             // Mix `need` fresh combinations from the donors and PUT
@@ -1833,10 +1855,7 @@ pub async fn repair_node_replicated(
     if manifest.nodes.is_empty() {
         return Ok(RepairStats::default());
     }
-    assert!(
-        live.contains(&replacement),
-        "replacement node must be live"
-    );
+    assert!(live.contains(&replacement), "replacement node must be live");
     let (replication, _block_size) = match manifest.encoding {
         ObjectEncoding::Replicated {
             replication,
@@ -1981,7 +2000,10 @@ pub async fn purge_object(manifest: &Manifest, live: &LiveNodes) -> Result<(), C
             Response::Ack => {}
             Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
             other => {
-                return Err(ClientError::UnexpectedResponse { expected: "Ack from Purge", got: format!("{other:?}") })
+                return Err(ClientError::UnexpectedResponse {
+                    expected: "Ack from Purge",
+                    got: format!("{other:?}"),
+                })
             }
         }
     }
@@ -2019,7 +2041,10 @@ pub async fn list_node_hashes(addr: &str) -> Result<Vec<Hash>, ClientError> {
     match rpc(addr, Request::ListHashes).await? {
         Response::Hashes(hs) => Ok(hs),
         Response::Error(msg) => Err(ClientError::RemoteError(msg)),
-        other => Err(ClientError::UnexpectedResponse { expected: "Hashes from ListHashes", got: format!("{other:?}") }),
+        other => Err(ClientError::UnexpectedResponse {
+            expected: "Hashes from ListHashes",
+            got: format!("{other:?}"),
+        }),
     }
 }
 
@@ -2027,14 +2052,14 @@ pub async fn list_node_hashes(addr: &str) -> Result<Vec<Hash>, ClientError> {
 /// `hashes`. Idempotent — a node that never held a hash just no-ops on
 /// it. Returns `Ok(())` once the node acks; on Error response, surfaces
 /// the protocol error.
-pub async fn purge_node_by_hash(
-    addr: &str,
-    hashes: Vec<Hash>,
-) -> Result<(), ClientError> {
+pub async fn purge_node_by_hash(addr: &str, hashes: Vec<Hash>) -> Result<(), ClientError> {
     match rpc(addr, Request::PurgeByHash { hashes }).await? {
         Response::Ack => Ok(()),
         Response::Error(msg) => Err(ClientError::RemoteError(msg)),
-        other => Err(ClientError::UnexpectedResponse { expected: "Ack from PurgeByHash", got: format!("{other:?}") }),
+        other => Err(ClientError::UnexpectedResponse {
+            expected: "Ack from PurgeByHash",
+            got: format!("{other:?}"),
+        }),
     }
 }
 

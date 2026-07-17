@@ -149,6 +149,44 @@ pub enum Request {
     /// total_bytes = 0, live_bytes = live shard payload sum`, which
     /// the gateway interprets as "capacity unknown, skip skew check".
     Capacity,
+    /// Multi-(channel, layer) batched PUT — same semantics as
+    /// [`Request::PutBatch`] but the shards may span several
+    /// `(channel, layer)` groups in one frame, so the client can
+    /// collapse `channels × nlayers` sequential rounds into one
+    /// round-trip per node.
+    ///
+    /// # When to prefer this over `PutBatch`
+    ///
+    /// The RLNC hot path already collapses shards for a single
+    /// `(c, l)` bucket into one `PutBatch`. The Replicated encoding
+    /// path, however, walks every `(c, l)` in the manifest and does
+    /// its own per-bucket `PutBatch` — on a 40-node cluster with
+    /// `channels × nlayers = 12`, that's 12 sequential round-trips
+    /// even when the client fans out across nodes within one round.
+    /// `PutBatchMulti` lets the client aggregate every bucket that
+    /// happens to land on the same node into a single frame; the
+    /// client's outer `join_all` then has one entry per NODE (~40)
+    /// instead of one per `(c, l)` × NODE (~480). Measured on the
+    /// 40-node soak: first-PUT wall-time drops from ~60 s to a
+    /// single round-trip window.
+    ///
+    /// # Reply
+    ///
+    /// Single [`Response::Ack`] on success — the whole frame commits
+    /// atomically at the store level (all `put_appended` calls are
+    /// made under one store-lock acquisition + one WAL wait) so a
+    /// partial-fail wire semantics is not exposed.
+    PutBatchMulti {
+        /// Object id every shard in this frame belongs to. Kept as
+        /// a single field (not per-group) because a real PUT never
+        /// spans multiple objects — sharing the field across groups
+        /// keeps the encoded frame lean.
+        object_id: u64,
+        /// One entry per `(channel, layer)` bucket. `groups[i] =
+        /// (channel, layer, shards)`. Ordering is free-form; the
+        /// node handler processes each group independently.
+        groups: Vec<(u8, u8, Vec<Shard>)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +270,8 @@ const OP_HANDSHAKE: u8 = 0x0d;
 const OP_HANDSHAKE_COMPLETE: u8 = 0x0e;
 // P1.4b capacity report.
 const OP_CAPACITY: u8 = 0x0f;
+// Multi-(c, l) batched PUT (replicated encoding perf fix).
+const OP_PUT_BATCH_MULTI: u8 = 0x10;
 
 const RSP_PONG: u8 = 0x00;
 const RSP_ACK: u8 = 0x01;
@@ -344,6 +384,19 @@ impl Request {
                 b.extend_from_slice(client_signature);
             }
             Request::Capacity => b.push(OP_CAPACITY),
+            Request::PutBatchMulti { object_id, groups } => {
+                b.push(OP_PUT_BATCH_MULTI);
+                b.extend_from_slice(&object_id.to_be_bytes());
+                b.extend_from_slice(&(groups.len() as u32).to_be_bytes());
+                for (c, l, shards) in groups {
+                    b.push(*c);
+                    b.push(*l);
+                    b.extend_from_slice(&(shards.len() as u32).to_be_bytes());
+                    for s in shards {
+                        encode_shard(&mut b, s);
+                    }
+                }
+            }
         }
         b
     }
@@ -446,6 +499,27 @@ impl Request {
                 Ok(Request::HandshakeComplete { client_signature })
             }
             OP_CAPACITY => Ok(Request::Capacity),
+            OP_PUT_BATCH_MULTI => {
+                let object_id = c.u64()?;
+                let n_groups = c.u32()? as usize;
+                // Per-group min bytes on the wire: 1 (channel) + 1
+                // (layer) + 4 (shard count u32) = 6. Empty shards
+                // vec inside the group is legal (nothing forbids
+                // it), so 6 is the correct floor for bounded_cap.
+                let mut groups = Vec::with_capacity(bounded_cap(n_groups, 6, c.remaining()));
+                for _ in 0..n_groups {
+                    let ch = c.u8()?;
+                    let la = c.u8()?;
+                    let n_shards = c.u32()? as usize;
+                    let mut shards =
+                        Vec::with_capacity(bounded_cap(n_shards, SHARD_MIN_SIZE, c.remaining()));
+                    for _ in 0..n_shards {
+                        shards.push(decode_shard(&mut c)?);
+                    }
+                    groups.push((ch, la, shards));
+                }
+                Ok(Request::PutBatchMulti { object_id, groups })
+            }
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unknown op: {other:#x}"),
@@ -1044,5 +1118,45 @@ mod tests {
                 "truncated Capacity of len {cut} decoded successfully"
             );
         }
+    }
+
+    // --- PutBatchMulti (replicated-perf multi-(c, l) batching) ---
+
+    #[test]
+    fn request_put_batch_multi_roundtrip() {
+        // Non-trivial: multiple groups, each with a distinct (c, l)
+        // and a different-length shard list — catches any per-group
+        // length-prefix bug that a single-group test would miss.
+        let r = Request::PutBatchMulti {
+            object_id: 0xF00D_BEEF,
+            groups: vec![
+                (0, 0, vec![s(&[1, 2], &[10, 20, 30])]),
+                (1, 2, vec![s(&[3, 4, 5], &[40]), s(&[6, 7], &[50, 60])]),
+                (2, 3, vec![]), // empty-shards group is legal
+            ],
+        };
+        assert_eq!(Request::decode(&r.encode()).unwrap(), r);
+    }
+
+    #[test]
+    fn request_put_batch_multi_empty_groups_roundtrip() {
+        // Degenerate but legal: zero groups. Wire frame is just
+        // op + u64 object_id + u32(0).
+        let r = Request::PutBatchMulti {
+            object_id: 0x1234,
+            groups: vec![],
+        };
+        assert_eq!(Request::decode(&r.encode()).unwrap(), r);
+    }
+
+    #[test]
+    fn decode_oversized_put_batch_multi_returns_error() {
+        // OP + u64 object_id + u32 group count only. Dishonest
+        // count must not turn Vec::with_capacity into an OOM abort.
+        let mut b = vec![OP_PUT_BATCH_MULTI];
+        b.extend_from_slice(&0u64.to_be_bytes());
+        b.extend_from_slice(&u32::MAX.to_be_bytes());
+        let e = Request::decode(&b).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
     }
 }
