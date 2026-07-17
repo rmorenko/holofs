@@ -208,6 +208,7 @@ mod tests {
             audio_sample_rate: 0,
             channels: 0,
             created_at_unix: created,
+            bytes_stored: 0,
         }
     }
 

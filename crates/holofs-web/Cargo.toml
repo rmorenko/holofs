@@ -38,6 +38,11 @@ ssr = [
   "dep:toml",
   "dep:tracing",
   "dep:tracing-subscriber",
+  "dep:opentelemetry",
+  "dep:opentelemetry_sdk",
+  "dep:opentelemetry-otlp",
+  "dep:tracing-opentelemetry",
+  "dep:anyhow",
   "dep:rustls",
   "dep:pulldown-cmark",
   "dep:regex",
@@ -96,6 +101,17 @@ clap = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
+# P1.5 OTLP tracing — env-gated at boot; if HOLOFS_OTLP_ENDPOINT is
+# unset the exporter is never constructed and none of these crates
+# do runtime work.
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+# Bootstrap error plumbing — `Box<dyn Error>` return type mixes with
+# anyhow-flavoured `map_err(|e| anyhow!(...))` from the catalog-store
+# migration path.
+anyhow = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 # in-app /help section renders markdown server-side.
 pulldown-cmark = { workspace = true, optional = true }
@@ -128,6 +144,10 @@ web-sys = { workspace = true, features = [
   "Element",
 ] }
 js-sys = { workspace = true }
+
+[dev-dependencies]
+# audit.rs round-trip tests write/read a temp `audit.log`.
+tempfile = "3"
 
 [lints]
 workspace = true

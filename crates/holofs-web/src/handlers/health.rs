@@ -24,6 +24,7 @@ use futures_util::stream::Stream;
 
 use holofs_gateway::Gateway;
 
+use crate::audit::{log_event, AuditEvent};
 use crate::health::HealthSnapshot;
 
 use super::response::stats_to_json;
@@ -316,6 +317,12 @@ pub async fn gc_orphans(Extension(gw): Extension<Arc<Gateway>>) -> Response {
                 body.push('}');
             }
             body.push_str("]}");
+            log_event(
+                &AuditEvent::now("gc_orphans", "", "ok").with_details(format!(
+                    "{{\"live_hashes\":{},\"purged_total\":{},\"duration_ms\":{}}}",
+                    rep.live_hashes, rep.purged_total, rep.duration_ms,
+                )),
+            );
             (
                 StatusCode::OK,
                 [(http::header::CONTENT_TYPE, "application/json")],
@@ -323,7 +330,10 @@ pub async fn gc_orphans(Extension(gw): Extension<Arc<Gateway>>) -> Response {
             )
                 .into_response()
         }
-        Err(e) => error_to_response(e),
+        Err(e) => {
+            log_event(&AuditEvent::now("gc_orphans", "", "error"));
+            error_to_response(e)
+        }
     }
 }
 
@@ -355,12 +365,26 @@ pub async fn toggle_node(
             .into_response();
     };
     match gw.toggle_admin_kill(idx).await {
-        Ok(_) => Response::builder()
-            .status(StatusCode::SEE_OTHER)
-            .header(header::LOCATION, "/health")
-            .body(axum::body::Body::empty())
-            .expect("redirect build"),
-        Err(e) => error_to_response(e),
+        Ok(_) => {
+            log_event(&AuditEvent::now(
+                "toggle_node",
+                format!("idx={idx}"),
+                "ok",
+            ));
+            Response::builder()
+                .status(StatusCode::SEE_OTHER)
+                .header(header::LOCATION, "/health")
+                .body(axum::body::Body::empty())
+                .expect("redirect build")
+        }
+        Err(e) => {
+            log_event(&AuditEvent::now(
+                "toggle_node",
+                format!("idx={idx}"),
+                "error",
+            ));
+            error_to_response(e)
+        }
     }
 }
 
@@ -411,6 +435,17 @@ pub async fn admin_add_node(
         zone,
         ok,
         failed
+    );
+    log_event(
+        &AuditEvent::now(
+            "add_node",
+            format!("addr={addr},zone={zone}"),
+            if failed > 0 { "error" } else { "ok" },
+        )
+        .with_details(format!(
+            "{{\"objects_rebalanced\":{},\"objects_failed\":{}}}",
+            ok, failed
+        )),
     );
     (
         StatusCode::OK,
@@ -477,6 +512,21 @@ pub async fn admin_drain_node(
          \"warning\":\"admin_kills is a runtime-only flag — restart the gateway with a whitelist that omits the drained node to make removal permanent\"{}}}",
         idx, outcome.admin_kill_set, ok, failed, outcome.purged, error_frag,
     );
+    log_event(
+        &AuditEvent::now(
+            "drain_node",
+            format!("idx={idx}"),
+            if outcome.error.is_some() || failed > 0 {
+                "error"
+            } else {
+                "ok"
+            },
+        )
+        .with_details(format!(
+            "{{\"admin_kill_set\":{},\"drained_objects\":{},\"failed_objects\":{},\"purged\":{}}}",
+            outcome.admin_kill_set, ok, failed, outcome.purged,
+        )),
+    );
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
@@ -503,6 +553,7 @@ pub async fn admin_drain_node(
 /// ```
 pub async fn admin_catalog_names(Extension(gw): Extension<Arc<Gateway>>) -> Response {
     let entries = gw.list_all_objects().await;
+    let n = entries.len();
     let mut buf = String::from("[");
     for (i, e) in entries.iter().enumerate() {
         if i > 0 {
@@ -516,6 +567,10 @@ pub async fn admin_catalog_names(Extension(gw): Extension<Arc<Gateway>>) -> Resp
         ));
     }
     buf.push(']');
+    log_event(
+        &AuditEvent::now("catalog_names", "", "ok")
+            .with_details(format!("{{\"objects\":{n}}}")),
+    );
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],

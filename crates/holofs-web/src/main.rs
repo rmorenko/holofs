@@ -525,28 +525,112 @@ async fn wait_for_shutdown_signal() {
 /// Initialise the tracing subscriber based on `--log` and `--log-format`.
 /// JSON format is meant for structured log shippers (journald, fluentd,
 /// Vector); text is ANSI-coloured when stdout is a TTY.
+///
+/// P1.5 — if `HOLOFS_OTLP_ENDPOINT` is set (e.g. `http://otel-collector:4317`),
+/// an OTLP span exporter is added alongside the local fmt layer so every
+/// existing `tracing::info_span!` / `#[instrument]` also flows to the
+/// distributed tracer (Jaeger / Tempo / Honeycomb — anything speaking
+/// OTLP gRPC). Unset → local logging only, no runtime cost.
 fn init_tracing(cli: &Cli) {
     let filter = EnvFilter::try_new(&cli.log)
         .unwrap_or_else(|_| EnvFilter::new("info,holofs_web=debug"));
+
+    let otel_layer = build_otel_layer();
+
     match cli.log_format {
         LogFormat::Json => {
-            let layer = fmt::layer().json().with_target(true);
+            let fmt_layer = fmt::layer().json().with_target(true);
             tracing_subscriber::registry()
                 .with(filter)
-                .with(layer)
+                .with(otel_layer)
+                .with(fmt_layer)
                 .init();
         }
         LogFormat::Text => {
-            let layer = fmt::layer()
+            let fmt_layer = fmt::layer()
                 .with_ansi(true)
                 .with_target(true)
                 .with_thread_ids(false);
             tracing_subscriber::registry()
                 .with(filter)
-                .with(layer)
+                .with(otel_layer)
+                .with(fmt_layer)
                 .init();
         }
     }
+}
+
+/// If `HOLOFS_OTLP_ENDPOINT` is set, build an OTLP tracing layer that
+/// batch-exports spans to the given gRPC endpoint. Returns `None`
+/// (short-circuit) if the env var is unset or the exporter fails to
+/// build — in either case the fmt layer alone stays authoritative
+/// and the boot never fails just because tracing configuration is
+/// off.
+///
+/// Env knobs:
+/// - `HOLOFS_OTLP_ENDPOINT` — gRPC endpoint URL (e.g.
+///   `http://otel-collector.observability.svc:4317`). Absence
+///   disables OTLP entirely.
+/// - `HOLOFS_OTLP_SERVICE_NAME` — `service.name` resource attribute
+///   (default `holofs-web`). Populates the "Service" filter in
+///   Jaeger / Tempo / Honeycomb.
+fn build_otel_layer<S>() -> Option<tracing_opentelemetry::OpenTelemetryLayer<S, opentelemetry_sdk::trace::Tracer>>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+{
+    let endpoint = std::env::var("HOLOFS_OTLP_ENDPOINT").ok()?;
+    if endpoint.trim().is_empty() {
+        return None;
+    }
+    let service_name =
+        std::env::var("HOLOFS_OTLP_SERVICE_NAME").unwrap_or_else(|_| "holofs-web".to_string());
+
+    use opentelemetry_otlp::WithExportConfig;
+    let exporter = match opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()
+    {
+        Ok(e) => e,
+        Err(err) => {
+            eprintln!(
+                "OTLP: could not build exporter for {endpoint}: {err} \
+                 — continuing without distributed tracing"
+            );
+            return None;
+        }
+    };
+
+    use opentelemetry::global;
+    use opentelemetry::KeyValue;
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+    use opentelemetry_sdk::trace::TracerProvider;
+    use opentelemetry_sdk::Resource;
+
+    let provider = TracerProvider::builder()
+        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+        .with_resource(Resource::new(vec![KeyValue::new(
+            "service.name",
+            service_name,
+        )]))
+        .build();
+
+    // Install the propagator so incoming HTTP requests carrying
+    // `traceparent` headers become the parent of gateway spans —
+    // stitches cross-service traces together (client → gateway
+    // → nodes in a future chunk if we teach the node wire to
+    // pass a trace context).
+    global::set_text_map_propagator(TraceContextPropagator::new());
+
+    use opentelemetry::trace::TracerProvider as _;
+    let tracer = provider.tracer("holofs-web");
+    // Keep the provider alive for the process lifetime so
+    // the batch exporter's background thread doesn't get dropped.
+    // Global setter takes ownership; the layer keeps the tracer
+    // handle we hand it.
+    global::set_tracer_provider(provider);
+
+    Some(tracing_opentelemetry::layer().with_tracer(tracer))
 }
 
 /// Fallback for paths the Leptos router does not match: serve a static file

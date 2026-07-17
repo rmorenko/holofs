@@ -652,15 +652,68 @@ groups:
         token. If unexpected, treat as a probe.
 ```
 
-### 6.3. Tracing (roadmap)
+### 6.3. Distributed tracing and audit log
 
-There is no OTLP exporter today. The previous version of this section
-described a `HOLOFS_TELEMETRY_OTLP` env var and per-operation spans
-(`gateway.put`, `gateway.get`, `gateway.repair`, `wire.send`); none
-of that exists in the crate. Structured logs go to stderr in JSON via
-`tracing-subscriber` (`HOLOFS_LOG` controls the level) — pipe them
-into your log aggregator and correlate by request-id. A first-class
-OTLP exporter is on the roadmap.
+Structured logs go to stderr in JSON via `tracing-subscriber`
+(`HOLOFS_LOG` controls the level) — pipe them into your log
+aggregator and correlate by request-id.
+
+#### OTLP export (opt-in)
+
+Two env vars, set at gateway startup:
+
+| Variable                       | Default          | Notes                                                              |
+|--------------------------------|------------------|--------------------------------------------------------------------|
+| `HOLOFS_OTLP_ENDPOINT`         | *(unset → off)*  | OTLP gRPC endpoint URL (`http://otel-collector:4317` typically).   |
+| `HOLOFS_OTLP_SERVICE_NAME`     | `holofs-web`     | `service.name` resource attr — the "Service" filter in Jaeger etc. |
+
+When `HOLOFS_OTLP_ENDPOINT` is set, every existing
+`tracing::info_span!` / `#[instrument]` span in the gateway
+batch-exports to the collector. The tower-http `TraceLayer` on the
+HTTP router creates a request-level span with method, path, status,
+and latency automatically; deeper spans (ingest / decode / repair)
+appear as children. W3C `traceparent` propagation is installed at
+the same time, so cross-service traces (client → gateway) stitch
+together in the UI. Wire-level propagation to nodes is not yet
+plumbed — spans stop at the gateway/node boundary. Bad-endpoint at
+boot logs an `eprintln!` and continues without OTLP; the local fmt
+layer stays authoritative regardless.
+
+#### Audit log (`<storage>/audit.log`)
+
+Every `/admin/*` request writes a JSONL line — one line per event:
+
+```json
+{"ts_unix_ms":1720000000000,"actor":"admin_token","verb":"drain_node",
+ "target":"idx=10","result":"ok","details":{"admin_kill_set":true,
+ "drained_objects":12345,"failed_objects":0,"purged":true}}
+```
+
+Covered verbs (all admin-token-gated):
+`add_node`, `toggle_node`, `drain_node`, `gc_orphans`, `catalog_names`.
+
+| Variable                | Default                    | Notes                                                              |
+|-------------------------|----------------------------|--------------------------------------------------------------------|
+| `HOLOFS_AUDIT_LOG`      | `<storage>/audit.log`      | Absolute or relative path.                                         |
+| `HOLOFS_AUDIT_LOG=off`  | *(literal string)*         | Case-insensitive off-switch — no file open, all events discarded.  |
+
+**Best-effort semantics.** IO failure on the audit path prints an
+`eprintln!` but never fails the admin action itself — a full disk
+shouldn't 500 the operator's drain call, and the audit log's value
+is post-incident forensics rather than real-time enforcement (that's
+`require_admin_token`'s job). Per-event `flush()` after write so a
+crash doesn't lose the last handful of actions.
+
+**Rotation.** Logger opens the file once at boot with `O_APPEND`
+and keeps the handle for the process lifetime. External `logrotate`
+(`copytruncate` or SIGHUP-on-rotate) is standard; pointing
+`HOLOFS_AUDIT_LOG` at a new path + gateway restart cleanly
+transitions.
+
+**Actor field.** Today all admin handlers gate on the same shared
+`admin_token` bearer, so `actor` is always `"admin_token"`. Field
+is emitted as a string so per-user attribution (scenario B) slots
+in without a schema bump.
 
 ### 6.4. Dashboards
 

@@ -27,6 +27,8 @@ pub mod about;
 #[cfg(feature = "ssr")]
 pub mod admin_auth;
 #[cfg(feature = "ssr")]
+pub mod audit;
+#[cfg(feature = "ssr")]
 pub mod backpressure;
 pub mod bootstrap;
 pub mod catalog_types;

@@ -372,6 +372,19 @@ pub async fn bootstrap_cluster(
     // N5: reputation state persists across restarts. Path fixed at
     // `<storage>/reputation.bin`. Any load failure (missing, corrupt,
     // n_nodes mismatch) silently falls back to a fresh table so a
+    // P1.5 audit log — install the process-wide singleton before
+    // axum starts serving so the first admin request already flows
+    // through it. HOLOFS_AUDIT_LOG env override handled inside
+    // `AuditLogger::open`; unset ⇒ `<storage>/audit.log`, `off` ⇒
+    // no-op logger. IO failure downgrades to disabled with an
+    // eprintln, never blocks boot.
+    let audit_logger = crate::audit::AuditLogger::open(&config.storage);
+    match audit_logger.path() {
+        Some(p) => info!(path = %p.display(), "audit log enabled"),
+        None => info!("audit log disabled (HOLOFS_AUDIT_LOG=off or open failed)"),
+    }
+    crate::audit::set_global(std::sync::Arc::clone(&audit_logger));
+
     // rewired cluster boots successfully.
     let reputation_path = config.storage.join("reputation.bin");
     let (reputation_state, rep_loaded) =
