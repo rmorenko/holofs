@@ -1000,7 +1000,8 @@ pub struct NodeHandle {
 pub async fn spawn_node(
     addr: SocketAddr,
 ) -> io::Result<(SocketAddr, SharedStore, tokio::task::JoinHandle<()>)> {
-    let h = spawn_node_with_identity(addr, Store::new(), NodeIdentity::generate(), None).await?;
+    let h =
+        spawn_node_with_identity(addr, Store::new(), NodeIdentity::generate(), None, None).await?;
     Ok((h.addr, h.store, h.task))
 }
 
@@ -1021,6 +1022,22 @@ pub async fn spawn_node_persistent_with_tls(
     storage_dir: impl AsRef<Path>,
     tls: Option<Arc<rustls::ServerConfig>>,
 ) -> io::Result<(SocketAddr, SharedStore, tokio::task::JoinHandle<()>)> {
+    spawn_node_persistent_with_tls_and_whitelist(addr, storage_dir, tls, None).await
+}
+
+/// Full-fat persistent-node constructor: TLS/mTLS **plus** ingress
+/// client whitelist (P0.3b). When `client_whitelist` is `Some`, every
+/// incoming connection MUST complete a bilateral
+/// [`Request::Handshake`] → [`Request::HandshakeComplete`] exchange
+/// before the node accepts any Put/Get/Purge frame — the client
+/// pubkey is verified against `client_whitelist`. `None` preserves the
+/// pre-P0.3b permissive contract (any TCP peer accepted).
+pub async fn spawn_node_persistent_with_tls_and_whitelist(
+    addr: SocketAddr,
+    storage_dir: impl AsRef<Path>,
+    tls: Option<Arc<rustls::ServerConfig>>,
+    client_whitelist: Option<Arc<crate::whitelist::Whitelist>>,
+) -> io::Result<(SocketAddr, SharedStore, tokio::task::JoinHandle<()>)> {
     let dir = storage_dir.as_ref().to_path_buf();
     // opt in to at-rest shard encryption via
     // `HOLOFS_AT_REST_ENC=1`. Key material comes from the node's
@@ -1036,14 +1053,14 @@ pub async fn spawn_node_persistent_with_tls(
         Store::open(&dir)?
     };
     store.set_sync_on_write(cfg.fsync_on_write);
-    let h = spawn_node_with_identity(addr, store, identity, tls).await?;
+    let h = spawn_node_with_identity(addr, store, identity, tls, client_whitelist).await?;
     Ok((h.addr, h.store, h.task))
 }
 
 /// Start an in-memory node with a specific identity. Returns a struct with
 /// the node's pubkey — needed for building a whitelist.
 pub async fn spawn_node_full(addr: SocketAddr) -> io::Result<NodeHandle> {
-    spawn_node_with_identity(addr, Store::new(), NodeIdentity::generate(), None).await
+    spawn_node_with_identity(addr, Store::new(), NodeIdentity::generate(), None, None).await
 }
 
 async fn spawn_node_with_identity(
@@ -1051,6 +1068,7 @@ async fn spawn_node_with_identity(
     store: Store,
     identity: NodeIdentity,
     tls: Option<Arc<rustls::ServerConfig>>,
+    client_whitelist: Option<Arc<crate::whitelist::Whitelist>>,
 ) -> io::Result<NodeHandle> {
     let store: SharedStore = Arc::new(Mutex::new(store));
     let listener = TcpListener::bind(addr).await?;
@@ -1232,6 +1250,7 @@ async fn spawn_node_with_identity(
     let store_for_task = store.clone();
     let identity_for_task = identity.clone();
     let acceptor = tls.clone().map(tokio_rustls::TlsAcceptor::from);
+    let whitelist_for_task = client_whitelist.clone();
     let task = tokio::spawn(async move {
         loop {
             let (stream, _peer) = match listener.accept().await {
@@ -1244,12 +1263,13 @@ async fn spawn_node_with_identity(
             let store = store_for_task.clone();
             let identity = identity_for_task.clone();
             let acceptor = acceptor.clone();
+            let whitelist = whitelist_for_task.clone();
             tokio::spawn(async move {
                 let result = match acceptor {
-                    None => handle_connection(stream, store, identity).await,
+                    None => handle_connection(stream, store, identity, whitelist).await,
                     Some(acc) => match acc.accept(stream).await {
                         Ok(tls_stream) => {
-                            handle_connection(tls_stream, store, identity).await
+                            handle_connection(tls_stream, store, identity, whitelist).await
                         }
                         Err(e) => Err(io::Error::new(
                             io::ErrorKind::ConnectionAborted,
@@ -1280,16 +1300,254 @@ async fn handle_connection<S>(
     mut stream: S,
     store: SharedStore,
     identity: NodeIdentity,
+    client_whitelist: Option<Arc<crate::whitelist::Whitelist>>,
 ) -> io::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    // P0.3b bilateral-auth state. Set by a successful
+    // `Request::Handshake` → `Request::HandshakeComplete` round
+    // trip; the node then knows the peer identity is a legitimate
+    // holder of `client_pubkey`.
+    //
+    // Strict mode (client_whitelist = Some) rejects every non-
+    // handshake frame until this flips true; permissive mode
+    // (client_whitelist = None, current contract) treats the flag
+    // as advisory — clients may still speak the handshake but the
+    // node doesn't require or verify it.
+    let mut authenticated = false;
+    let strict = client_whitelist.is_some();
+
     loop {
         let buf = read_frame(&mut stream).await?;
         let req = Request::decode(&buf)?;
+
+        // Bilateral handshake mini-state-machine. Handshake requests
+        // are handled inline here (not by `handle_request`) because
+        // they own the next round-trip on the wire.
+        match req {
+            Request::Handshake {
+                client_pubkey,
+                client_nonce,
+            } => {
+                match process_handshake(
+                    &mut stream,
+                    &identity,
+                    &client_pubkey,
+                    &client_nonce,
+                    client_whitelist.as_deref(),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        authenticated = true;
+                        continue;
+                    }
+                    Err(reason) => {
+                        let _ = write_frame(
+                            &mut stream,
+                            &Response::Error(format!("handshake: {reason}")).encode(),
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                }
+            }
+            Request::HandshakeComplete { .. } => {
+                // Second-frame arriving alone: protocol violation —
+                // must be preceded by `Handshake`.
+                let _ = write_frame(
+                    &mut stream,
+                    &Response::Error("unexpected HandshakeComplete frame".into()).encode(),
+                )
+                .await;
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // Strict mode: every non-handshake frame requires a
+        // completed handshake first. Rejection closes the
+        // connection — retry means a fresh TCP + handshake.
+        if strict && !authenticated {
+            let _ = write_frame(
+                &mut stream,
+                &Response::Error(
+                    "handshake required: node runs with client whitelist enforcement".into(),
+                )
+                .encode(),
+            )
+            .await;
+            return Ok(());
+        }
+
         let resp = handle_request(req, &store, &identity).await;
         write_frame(&mut stream, &resp.encode()).await?;
     }
+}
+
+/// Client-side counterpart to [`process_handshake`]. Runs the
+/// bilateral handshake as the initiating party:
+///
+/// 1. Emit [`Request::Handshake`] carrying our own pubkey + a fresh
+///    nonce.
+/// 2. Read [`Response::HandshakeChallenge`]; verify the node's
+///    signature over our nonce against `expected_node_pubkey`.
+/// 3. Sign the `server_nonce` we just received and emit
+///    [`Request::HandshakeComplete`].
+/// 4. Read final [`Response::Ack`] (any other response = rejection).
+///
+/// Returns `Ok(())` on a fully-verified round trip, `Err(reason)`
+/// otherwise. Callers should treat any error as "connection is
+/// unauthenticated" and close the socket.
+///
+/// Independent of TLS: this runs on top of whatever `AsyncRead +
+/// AsyncWrite` stream you hand it. Compose with `TlsConnector` for
+/// TLS-inside-authn.
+pub async fn perform_bilateral_handshake_as_client<S>(
+    stream: &mut S,
+    client_identity: &NodeIdentity,
+    expected_node_pubkey: &crate::identity::PubKey,
+) -> Result<(), String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use crate::identity::{fresh_nonce, verify_challenge};
+
+    // Step 1: emit Handshake.
+    let client_nonce = fresh_nonce();
+    let client_pubkey = client_identity.pubkey();
+    write_frame(
+        stream,
+        &Request::Handshake {
+            client_pubkey,
+            client_nonce,
+        }
+        .encode(),
+    )
+    .await
+    .map_err(|e| format!("write handshake: {e}"))?;
+
+    // Step 2: read HandshakeChallenge, verify node signature.
+    let buf = read_frame(stream)
+        .await
+        .map_err(|e| format!("read challenge: {e}"))?;
+    let resp = Response::decode(&buf).map_err(|e| format!("decode challenge: {e}"))?;
+    let (node_signature, server_nonce) = match resp {
+        Response::HandshakeChallenge {
+            node_signature,
+            server_nonce,
+        } => (node_signature, server_nonce),
+        Response::Error(msg) => {
+            return Err(format!("node rejected handshake: {msg}"));
+        }
+        other => {
+            return Err(format!(
+                "expected HandshakeChallenge, got {:?}",
+                std::mem::discriminant(&other)
+            ));
+        }
+    };
+    if !verify_challenge(expected_node_pubkey, &client_nonce, &node_signature) {
+        return Err("node signature over client nonce failed verification".into());
+    }
+
+    // Step 3: sign server_nonce, emit HandshakeComplete.
+    let client_signature = client_identity.sign_challenge(&server_nonce);
+    write_frame(
+        stream,
+        &Request::HandshakeComplete { client_signature }.encode(),
+    )
+    .await
+    .map_err(|e| format!("write complete: {e}"))?;
+
+    // Step 4: read final Ack.
+    let buf = read_frame(stream)
+        .await
+        .map_err(|e| format!("read final ack: {e}"))?;
+    let resp = Response::decode(&buf).map_err(|e| format!("decode final ack: {e}"))?;
+    match resp {
+        Response::Ack => Ok(()),
+        Response::Error(msg) => Err(format!("node rejected on complete: {msg}")),
+        other => Err(format!(
+            "expected Ack after HandshakeComplete, got {:?}",
+            std::mem::discriminant(&other)
+        )),
+    }
+}
+
+/// Bilateral handshake helper (P0.3b). Called from
+/// [`handle_connection`] as soon as the peer sends
+/// [`Request::Handshake`]. Runs the remaining 3 wire steps:
+///
+/// 1. Verify `client_pubkey` against the ingress whitelist (skipped
+///    when the whitelist is `None` — permissive mode).
+/// 2. Sign `client_nonce` with the node's identity + generate a
+///    fresh `server_nonce`; write [`Response::HandshakeChallenge`].
+/// 3. Read next frame, expect [`Request::HandshakeComplete`],
+///    verify `client_signature` against `client_pubkey` over
+///    `server_nonce`.
+/// 4. Write final [`Response::Ack`] on success.
+///
+/// Any deviation from this sequence (wrong pubkey, bad signature,
+/// wrong frame kind) returns `Err(reason)`; the caller surfaces the
+/// reason inside a `Response::Error` and closes the connection.
+async fn process_handshake<S>(
+    stream: &mut S,
+    identity: &NodeIdentity,
+    client_pubkey: &[u8; 32],
+    client_nonce: &[u8; 32],
+    client_whitelist: Option<&crate::whitelist::Whitelist>,
+) -> Result<(), String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use crate::identity::{fresh_nonce, verify_challenge};
+
+    // Step 1: whitelist check (skipped in permissive mode).
+    if let Some(wl) = client_whitelist {
+        if wl.lookup_by_pubkey(client_pubkey).is_none() {
+            return Err("client pubkey is not in ingress whitelist".into());
+        }
+    }
+
+    // Step 2: sign client nonce + emit our own.
+    let node_signature = identity.sign_challenge(client_nonce);
+    let server_nonce = fresh_nonce();
+    write_frame(
+        stream,
+        &Response::HandshakeChallenge {
+            node_signature,
+            server_nonce,
+        }
+        .encode(),
+    )
+    .await
+    .map_err(|e| format!("write challenge: {e}"))?;
+
+    // Step 3: read complete + verify.
+    let buf = read_frame(stream)
+        .await
+        .map_err(|e| format!("read complete: {e}"))?;
+    let req = Request::decode(&buf).map_err(|e| format!("decode complete: {e}"))?;
+    let client_signature = match req {
+        Request::HandshakeComplete { client_signature } => client_signature,
+        other => {
+            return Err(format!(
+                "expected HandshakeComplete, got {:?}",
+                std::mem::discriminant(&other)
+            ));
+        }
+    };
+    if !verify_challenge(client_pubkey, &server_nonce, &client_signature) {
+        return Err("client signature over server nonce failed verification".into());
+    }
+
+    // Step 4: final Ack.
+    write_frame(stream, &Response::Ack.encode())
+        .await
+        .map_err(|e| format!("write ack: {e}"))?;
+    Ok(())
 }
 
 /// Wait until the group-commit flusher has published `my_seq`.
@@ -1443,6 +1701,17 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
                 wal_wait_ns: NODE_PUT_WAL_WAIT_NS_SUM.load(Ordering::Relaxed),
                 count: NODE_PUT_COUNT.load(Ordering::Relaxed),
             }
+        }
+        // Handshake frames are consumed by `handle_connection`
+        // directly (they own the next round-trip on the wire, so
+        // routing them through the generic request loop wouldn't
+        // give us a place to write `HandshakeChallenge` before the
+        // next read). Reaching here indicates a bug in the caller.
+        Request::Handshake { .. } | Request::HandshakeComplete { .. } => {
+            Response::Error(
+                "handshake frames must not reach handle_request; dispatched via handle_connection"
+                    .into(),
+            )
         }
     }
 }
@@ -2112,6 +2381,226 @@ mod tests {
             "mtls node must reject client cert signed by a different CA"
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // === P0.3b bilateral handshake + ingress whitelist ================
+
+    /// Build a signed whitelist containing `authorised_clients` — one
+    /// WhitelistEntry per pubkey. `addr` is empty (clients are
+    /// address-agnostic; the field is only meaningful for node entries).
+    fn client_whitelist(
+        admin: &NodeIdentity,
+        authorised_clients: &[crate::identity::PubKey],
+    ) -> Arc<crate::whitelist::Whitelist> {
+        let entries: Vec<crate::whitelist::WhitelistEntry> = authorised_clients
+            .iter()
+            .map(|pk| crate::whitelist::WhitelistEntry {
+                addr: String::new(),
+                pubkey: *pk,
+                zone: 0,
+            })
+            .collect();
+        Arc::new(crate::whitelist::Whitelist::sign(entries, admin))
+    }
+
+    #[tokio::test]
+    async fn permissive_mode_accepts_peers_without_handshake() {
+        // No client_whitelist configured → pre-P0.3b behaviour: any
+        // TCP peer can Ping without touching the handshake flow.
+        // Guards against a regression that would silently require
+        // handshake for legacy clients.
+        let dir = tmpdir("permissive-mode");
+        let (addr, _store, _h) = spawn_node_persistent_with_tls_and_whitelist(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            &dir,
+            None, // no TLS
+            None, // no whitelist → permissive
+        )
+        .await
+        .unwrap();
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        assert_eq!(rpc(&mut s, Request::Ping).await, Response::Pong);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn strict_mode_rejects_first_non_handshake_frame() {
+        // Whitelist configured but client speaks Put directly → node
+        // MUST respond with Error and close the connection before
+        // touching the store.
+        let dir = tmpdir("strict-rejects-put");
+        let admin = NodeIdentity::generate();
+        let authorised = NodeIdentity::generate();
+        let wl = client_whitelist(&admin, &[authorised.pubkey()]);
+        let (addr, _store, _h) = spawn_node_persistent_with_tls_and_whitelist(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            &dir,
+            None,
+            Some(wl),
+        )
+        .await
+        .unwrap();
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        match rpc(&mut s, Request::Ping).await {
+            Response::Error(msg) => {
+                assert!(msg.contains("handshake required"), "got: {msg}");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        // Next read should hit EOF — connection closed.
+        let mut buf = [0u8; 4];
+        let n = s.read(&mut buf).await.unwrap_or(0);
+        assert_eq!(n, 0, "connection must be closed after strict rejection");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn handshake_from_authorised_client_unlocks_rpc() {
+        // Full bilateral flow via the client helper: after successful
+        // handshake, the connection accepts Put/Get like normal.
+        let dir = tmpdir("handshake-happy");
+        let admin = NodeIdentity::generate();
+        let client_id = NodeIdentity::generate();
+        let wl = client_whitelist(&admin, &[client_id.pubkey()]);
+        let (addr, store, _h) = spawn_node_persistent_with_tls_and_whitelist(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            &dir,
+            None,
+            Some(wl),
+        )
+        .await
+        .unwrap();
+        // Node identity is what the persistent-mode loader created
+        // under storage_dir/identity.key.
+        let node_id =
+            crate::identity::NodeIdentity::load_or_create(dir.join("identity.key")).unwrap();
+        let node_pubkey = node_id.pubkey();
+
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        perform_bilateral_handshake_as_client(&mut s, &client_id, &node_pubkey)
+            .await
+            .expect("handshake should succeed for authorised client");
+
+        // Post-handshake, normal RPC works.
+        assert_eq!(rpc(&mut s, Request::Ping).await, Response::Pong);
+        let sh = make_shard(1);
+        rpc(
+            &mut s,
+            Request::Put {
+                object_id: 42,
+                channel: 0,
+                layer: 0,
+                shard: sh.clone(),
+            },
+        )
+        .await;
+        // Assert against the store, not just the response, so we
+        // prove the write actually landed.
+        let stored = store.lock().await.get((42, 0, 0));
+        assert_eq!(stored.len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn handshake_from_unauthorised_client_rejected() {
+        // Client presents a valid Ed25519 identity that isn't on the
+        // node's whitelist. Node must reject at the whitelist-check
+        // step (before generating any signatures/nonces) and close
+        // the connection.
+        let dir = tmpdir("handshake-unauth");
+        let admin = NodeIdentity::generate();
+        let authorised = NodeIdentity::generate();
+        let intruder = NodeIdentity::generate();
+        let wl = client_whitelist(&admin, &[authorised.pubkey()]); // intruder NOT included
+        let (addr, _store, _h) = spawn_node_persistent_with_tls_and_whitelist(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            &dir,
+            None,
+            Some(wl),
+        )
+        .await
+        .unwrap();
+        let node_id =
+            crate::identity::NodeIdentity::load_or_create(dir.join("identity.key")).unwrap();
+        let node_pubkey = node_id.pubkey();
+
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let err = perform_bilateral_handshake_as_client(&mut s, &intruder, &node_pubkey)
+            .await
+            .expect_err("intruder must be rejected");
+        assert!(
+            err.contains("not in ingress whitelist") || err.contains("rejected"),
+            "unexpected error: {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn handshake_client_detects_node_signature_forgery() {
+        // Symmetry test: if the client's expected_node_pubkey does
+        // not match the actual node identity, the node's signature
+        // over client_nonce will fail verification — proves the
+        // node-side identity check is genuine, not accidentally
+        // permissive.
+        let dir = tmpdir("handshake-wrong-node-pk");
+        let admin = NodeIdentity::generate();
+        let client_id = NodeIdentity::generate();
+        let wl = client_whitelist(&admin, &[client_id.pubkey()]);
+        let (addr, _store, _h) = spawn_node_persistent_with_tls_and_whitelist(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            &dir,
+            None,
+            Some(wl),
+        )
+        .await
+        .unwrap();
+        // Pretend the client was told the node's pubkey is something
+        // else (attacker-injected whitelist).
+        let wrong_pubkey = NodeIdentity::generate().pubkey();
+
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let err = perform_bilateral_handshake_as_client(&mut s, &client_id, &wrong_pubkey)
+            .await
+            .expect_err("client must detect the signature mismatch");
+        assert!(
+            err.contains("verification"),
+            "unexpected error: {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn handshake_complete_without_handshake_is_rejected() {
+        // Protocol-violation guard: a client that jumps straight to
+        // HandshakeComplete (no preceding Handshake) must be closed
+        // out. Prevents an attacker from trying to skip the
+        // whitelist check by malformed sequencing.
+        let dir = tmpdir("hc-out-of-sequence");
+        let admin = NodeIdentity::generate();
+        let ok_client = NodeIdentity::generate();
+        let wl = client_whitelist(&admin, &[ok_client.pubkey()]);
+        let (addr, _store, _h) = spawn_node_persistent_with_tls_and_whitelist(
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            &dir,
+            None,
+            Some(wl),
+        )
+        .await
+        .unwrap();
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        match rpc(
+            &mut s,
+            Request::HandshakeComplete {
+                client_signature: [0u8; 64],
+            },
+        )
+        .await
+        {
+            Response::Error(msg) => assert!(msg.contains("unexpected"), "got: {msg}"),
+            other => panic!("expected Error, got {other:?}"),
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

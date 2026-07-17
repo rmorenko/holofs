@@ -39,8 +39,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use holofs_core::hash::hex;
-use holofs_storage::node_service::{spawn_node, spawn_node_persistent_with_tls};
+use holofs_storage::node_service::{
+    spawn_node, spawn_node_persistent_with_tls, spawn_node_persistent_with_tls_and_whitelist,
+};
 use holofs_storage::tls::TlsMaterial;
+use holofs_storage::whitelist::Whitelist;
 
 /// Parsed CLI, ready to hand to the async main.
 struct Args {
@@ -50,6 +53,7 @@ struct Args {
     tls_key: Option<PathBuf>,
     tls_ca: Option<PathBuf>,
     mtls: bool,
+    client_whitelist: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -60,6 +64,7 @@ fn parse_args() -> Result<Args, String> {
     let mut tls_key: Option<PathBuf> = None;
     let mut tls_ca: Option<PathBuf> = None;
     let mut mtls = false;
+    let mut client_whitelist: Option<PathBuf> = None;
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
@@ -78,6 +83,13 @@ fn parse_args() -> Result<Args, String> {
             "--mtls" => {
                 mtls = true;
                 i += 1;
+            }
+            "--client-whitelist" => {
+                client_whitelist = Some(PathBuf::from(take_val(
+                    &raw,
+                    &mut i,
+                    "--client-whitelist",
+                )?));
             }
             "--help" | "-h" => {
                 print_usage();
@@ -103,7 +115,27 @@ fn parse_args() -> Result<Args, String> {
         tls_key,
         tls_ca,
         mtls,
+        client_whitelist,
     })
+}
+
+/// Load + verify the signed client-whitelist file. Verification uses
+/// the embedded `admin_pubkey` (matches gateway-side semantics — a
+/// caller who wants defence against admin substitution stores a
+/// known-good copy elsewhere). Failure exits with a clear message
+/// rather than silently starting in permissive mode.
+fn load_client_whitelist(path: &PathBuf) -> Result<Arc<Whitelist>, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("read client whitelist {}: {e}", path.display()))?;
+    let wl = Whitelist::decode(&bytes)
+        .map_err(|e| format!("decode client whitelist {}: {e}", path.display()))?;
+    if !wl.verify(None) {
+        return Err(format!(
+            "client whitelist {} failed signature verification",
+            path.display()
+        ));
+    }
+    Ok(Arc::new(wl))
 }
 
 fn take_val(raw: &[String], i: &mut usize, name: &str) -> Result<String, String> {
@@ -177,28 +209,64 @@ async fn main() -> std::io::Result<()> {
         );
         std::process::exit(2);
     }
+    // Client whitelist also requires persistent storage: the whole
+    // point is to enforce identity at ingress; ephemeral in-memory
+    // nodes make no operational sense as a hardening target.
+    if args.client_whitelist.is_some() && args.storage.is_none() {
+        eprintln!(
+            "--client-whitelist requires --storage: ingress whitelist \
+             enforcement is a persistent-mode-only feature."
+        );
+        std::process::exit(2);
+    }
+    let client_whitelist = match args.client_whitelist.as_ref() {
+        Some(path) => match load_client_whitelist(path) {
+            Ok(wl) => Some(wl),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
 
-    let (bound, handle, pubkey_hex, wire_mode) = if let Some(dir) = &args.storage {
-        let (a, _s, h) =
-            spawn_node_persistent_with_tls(args.addr, dir.as_str(), tls.clone()).await?;
+    let (bound, handle, pubkey_hex, wire_mode, ingress_mode) = if let Some(dir) = &args.storage {
+        let (a, _s, h) = if client_whitelist.is_some() {
+            spawn_node_persistent_with_tls_and_whitelist(
+                args.addr,
+                dir.as_str(),
+                tls.clone(),
+                client_whitelist.clone(),
+            )
+            .await?
+        } else {
+            spawn_node_persistent_with_tls(args.addr, dir.as_str(), tls.clone()).await?
+        };
         let id = holofs_storage::identity::NodeIdentity::load_or_create(
             std::path::Path::new(dir).join("identity.key"),
         )?;
         let pk = hex(&id.pubkey());
-        let mode = match (tls.is_some(), args.mtls) {
+        let wm = match (tls.is_some(), args.mtls) {
             (false, _) => "plain-tcp",
             (true, false) => "tls",
             (true, true) => "mtls",
         };
-        (a, h, pk, mode)
+        let im = if client_whitelist.is_some() {
+            "whitelist-strict"
+        } else {
+            "permissive"
+        };
+        (a, h, pk, wm, im)
     } else {
         let (a, _s, h) = spawn_node(args.addr).await?;
         // In-memory: identity is generated randomly inside spawn_node
         // and is not exposed. We print "<ephemeral>" as a marker that
         // the pubkey is new each run.
-        (a, h, "<ephemeral>".to_string(), "plain-tcp")
+        (a, h, "<ephemeral>".to_string(), "plain-tcp", "permissive")
     };
-    eprintln!("holofs-node addr={bound} pubkey={pubkey_hex} wire={wire_mode}");
+    eprintln!(
+        "holofs-node addr={bound} pubkey={pubkey_hex} wire={wire_mode} ingress={ingress_mode}"
+    );
     handle.await.ok();
     Ok(())
 }
@@ -207,18 +275,31 @@ fn print_usage() {
     eprintln!(
         "usage: holofs-node [ADDR] [--storage DIR]\n\
          \x20              [--tls-cert PATH --tls-key PATH --tls-ca PATH] [--mtls]\n\
+         \x20              [--client-whitelist PATH]\n\
          \n\
-         ADDR         host:port to bind (default 127.0.0.1:5000)\n\
-         --storage    directory for shards and identity.key (persistent mode)\n\
+         ADDR                   host:port to bind (default 127.0.0.1:5000)\n\
+         --storage              directory for shards + identity.key (persistent mode)\n\
          \n\
-         --tls-cert   PEM leaf certificate presented to peers (server-side)\n\
-         --tls-key    PEM private key matching --tls-cert\n\
-         --tls-ca     PEM CA certificate trust root (also used as client-CA under --mtls)\n\
-         --mtls       require + verify client cert signed by --tls-ca\n\
+         --tls-cert             PEM leaf certificate presented to peers (server-side)\n\
+         --tls-key              PEM private key matching --tls-cert\n\
+         --tls-ca               PEM CA cert trust root (also client-CA under --mtls)\n\
+         --mtls                 require + verify client cert signed by --tls-ca\n\
+         \n\
+         --client-whitelist     signed whitelist file listing Ed25519 pubkeys\n\
+         \x20                    authorised to run wire RPCs against this node.\n\
+         \x20                    Enables the bilateral handshake at ingress —\n\
+         \x20                    every connection MUST complete Request::Handshake\n\
+         \x20                    → HandshakeComplete before Put/Get/Purge are\n\
+         \x20                    accepted (P0.3b). Omit for permissive mode (any\n\
+         \x20                    TCP peer accepted, no handshake required —\n\
+         \x20                    pre-P0.3b contract).\n\
          \n\
          Notes:\n\
          \x20 - --tls-cert / --tls-key / --tls-ca must all be set together.\n\
-         \x20 - TLS/mTLS requires --storage (persistent mode).\n\
-         \x20 - No TLS flags → plain TCP, same as before."
+         \x20 - TLS/mTLS and --client-whitelist both require --storage.\n\
+         \x20 - The two hardening layers are independent: --mtls guards the\n\
+         \x20   transport (any CA-issued cert accepted), --client-whitelist\n\
+         \x20   guards the application (only listed Ed25519 pubkeys accepted).\n\
+         \x20   Recommended prod: both together."
     );
 }

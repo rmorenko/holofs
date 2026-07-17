@@ -113,6 +113,28 @@ pub enum Request {
     /// wall time — `(lock_wait, put_appended, wal_wait, count)` in
     /// nanoseconds. Added to trace fanout amplification under load.
     PutTimings,
+    /// bilateral handshake, first frame (P0.3b). Client presents
+    /// its own Ed25519 identity + a fresh nonce for the node to
+    /// sign. Node validates `client_pubkey` against its ingress
+    /// whitelist; on success it replies with
+    /// [`Response::HandshakeChallenge`] carrying its counter-nonce,
+    /// otherwise [`Response::Error`]. Nodes running in permissive
+    /// mode (no `HOLOFS_CLIENT_WHITELIST` configured) accept any
+    /// pubkey — this frame is a no-op in that mode.
+    Handshake {
+        client_pubkey: [u8; 32],
+        client_nonce: [u8; 32],
+    },
+    /// bilateral handshake, third frame (P0.3b). Client's signature
+    /// over the server_nonce it received in `HandshakeChallenge`,
+    /// proving control of the private half of `client_pubkey`. Node
+    /// verifies and, on success, replies with [`Response::Ack`] —
+    /// the connection is now authenticated and normal Put/Get/Purge
+    /// frames flow. Failure returns [`Response::Error`] and the
+    /// connection stays unauthenticated.
+    HandshakeComplete {
+        client_signature: [u8; 64],
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +167,16 @@ pub enum Response {
         wal_wait_ns: u64,
         count: u64,
     },
+    /// bilateral handshake, second frame (reply to
+    /// [`Request::Handshake`]). Node signs the client's nonce with
+    /// its identity key (same domain as `AuthChallengeOk` — see
+    /// `holofs_storage::identity::DOMAIN_AUTH`) and emits its own
+    /// server_nonce for the client to sign in the follow-up
+    /// [`Request::HandshakeComplete`].
+    HandshakeChallenge {
+        node_signature: [u8; 64],
+        server_nonce: [u8; 32],
+    },
     Error(String),
 }
 
@@ -162,6 +194,9 @@ const OP_PUT_BATCH: u8 = 0x09;
 const OP_CURRENT_EPOCH: u8 = 0x0a;
 const OP_PURGE_BY_HASH_UP_TO: u8 = 0x0b;
 const OP_PUT_TIMINGS: u8 = 0x0c;
+// bilateral handshake (P0.3b).
+const OP_HANDSHAKE: u8 = 0x0d;
+const OP_HANDSHAKE_COMPLETE: u8 = 0x0e;
 
 const RSP_PONG: u8 = 0x00;
 const RSP_ACK: u8 = 0x01;
@@ -173,6 +208,8 @@ const RSP_HASHES: u8 = 0x06;
 // epoch-GC: raw u64 write-epoch (ms since UNIX_EPOCH).
 const RSP_EPOCH: u8 = 0x07;
 const RSP_PUT_TIMINGS: u8 = 0x08;
+// bilateral handshake (P0.3b).
+const RSP_HANDSHAKE_CHALLENGE: u8 = 0x09;
 const RSP_ERR: u8 = 0xff;
 
 impl Request {
@@ -256,6 +293,18 @@ impl Request {
                 }
             }
             Request::PutTimings => b.push(OP_PUT_TIMINGS),
+            Request::Handshake {
+                client_pubkey,
+                client_nonce,
+            } => {
+                b.push(OP_HANDSHAKE);
+                b.extend_from_slice(client_pubkey);
+                b.extend_from_slice(client_nonce);
+            }
+            Request::HandshakeComplete { client_signature } => {
+                b.push(OP_HANDSHAKE_COMPLETE);
+                b.extend_from_slice(client_signature);
+            }
         }
         b
     }
@@ -342,6 +391,21 @@ impl Request {
                 Ok(Request::PurgeByHashUpTo { hashes, max_epoch })
             }
             OP_PUT_TIMINGS => Ok(Request::PutTimings),
+            OP_HANDSHAKE => {
+                let mut client_pubkey = [0u8; 32];
+                client_pubkey.copy_from_slice(c.take(32)?);
+                let mut client_nonce = [0u8; 32];
+                client_nonce.copy_from_slice(c.take(32)?);
+                Ok(Request::Handshake {
+                    client_pubkey,
+                    client_nonce,
+                })
+            }
+            OP_HANDSHAKE_COMPLETE => {
+                let mut client_signature = [0u8; 64];
+                client_signature.copy_from_slice(c.take(64)?);
+                Ok(Request::HandshakeComplete { client_signature })
+            }
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unknown op: {other:#x}"),
@@ -404,6 +468,14 @@ impl Response {
                 b.extend_from_slice(&wal_wait_ns.to_be_bytes());
                 b.extend_from_slice(&count.to_be_bytes());
             }
+            Response::HandshakeChallenge {
+                node_signature,
+                server_nonce,
+            } => {
+                b.push(RSP_HANDSHAKE_CHALLENGE);
+                b.extend_from_slice(node_signature);
+                b.extend_from_slice(server_nonce);
+            }
             Response::Error(msg) => {
                 b.push(RSP_ERR);
                 let bytes = msg.as_bytes();
@@ -464,6 +536,16 @@ impl Response {
                 wal_wait_ns: c.u64()?,
                 count: c.u64()?,
             }),
+            RSP_HANDSHAKE_CHALLENGE => {
+                let mut node_signature = [0u8; 64];
+                node_signature.copy_from_slice(c.take(64)?);
+                let mut server_nonce = [0u8; 32];
+                server_nonce.copy_from_slice(c.take(32)?);
+                Ok(Response::HandshakeChallenge {
+                    node_signature,
+                    server_nonce,
+                })
+            }
             RSP_ERR => {
                 let n = c.u32()? as usize;
                 let bytes = c.take(n)?;
@@ -610,6 +692,32 @@ mod tests {
     fn response_auth_challenge_ok_roundtrip() {
         let r = Response::AuthChallengeOk {
             signature: [0xCD; 64],
+        };
+        assert_eq!(Response::decode(&r.encode()).unwrap(), r);
+    }
+
+    #[test]
+    fn request_handshake_roundtrip() {
+        let r = Request::Handshake {
+            client_pubkey: [0x11; 32],
+            client_nonce: [0x22; 32],
+        };
+        assert_eq!(Request::decode(&r.encode()).unwrap(), r);
+    }
+
+    #[test]
+    fn request_handshake_complete_roundtrip() {
+        let r = Request::HandshakeComplete {
+            client_signature: [0x33; 64],
+        };
+        assert_eq!(Request::decode(&r.encode()).unwrap(), r);
+    }
+
+    #[test]
+    fn response_handshake_challenge_roundtrip() {
+        let r = Response::HandshakeChallenge {
+            node_signature: [0x44; 64],
+            server_nonce: [0x55; 32],
         };
         assert_eq!(Response::decode(&r.encode()).unwrap(), r);
     }
