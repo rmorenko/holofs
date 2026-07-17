@@ -342,29 +342,49 @@ pub const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     // ---- escrow page intro + form labels ----------------
     ("escrow.intro_p1",
         ["Split any file into n shares so that any k of them can reconstruct \
-          it (Shamir-style secret sharing on RLNC). Distribute the shares \
-          across trusted people or places — fewer than k shares leak no \
-          information (information-theoretic, not just hard-to-break).",
+          it (threshold-RLNC erasure code — this is NOT Shamir secret \
+          sharing). Use the shares as an availability backup, not as a \
+          secrecy primitive: fewer than k shares still leak ≈(k−1)/k of \
+          the plaintext, so anything with self-checking structure (seed \
+          phrases, keys, IDs) can be brute-forced from the last dimension. \
+          For real secrecy, encrypt the file first (encrypt-then-share) \
+          and split the ciphertext instead.",
          "Разбейте любой файл на n долей так, чтобы любые k из них могли его \
-          восстановить (Шамировское разделение секрета на RLNC). \
-          Распределите доли между доверенными людьми или местами — меньше k \
-          долей не дают никакой информации о файле (теоретико-информационно, \
-          а не «трудно взломать»).",
+          восстановить (пороговый RLNC-erasure-код — это НЕ разделение \
+          секрета Шамира). Используйте доли как резерв доступности, а не \
+          как средство сохранения секрета: меньше k долей всё ещё \
+          утекают ≈(k−1)/k открытого текста, так что любые данные с \
+          самопроверкой (seed-фразы, ключи, ID) добираются перебором \
+          последнего измерения. Для настоящей секретности сначала \
+          зашифруйте файл (encrypt-then-share) и режьте уже шифротекст.",
          "Eine Datei in n Anteile aufteilen, so dass beliebige k davon sie \
-          rekonstruieren können (Shamir-Geheimnisteilung auf RLNC). Anteile \
-          an vertraute Personen oder Orte verteilen — weniger als k Anteile \
-          verraten keinerlei Information (informationstheoretisch, nicht nur \
-          schwer zu brechen).",
+          rekonstruieren können (Threshold-RLNC-Erasure-Code — dies ist \
+          KEIN Shamir-Secret-Sharing). Anteile als Verfügbarkeits-Backup \
+          nutzen, nicht als Geheimhaltungsprimitiv: weniger als k Anteile \
+          verraten immer noch ≈(k−1)/k des Klartexts, sodass alles mit \
+          Selbstprüfstruktur (Seed-Phrasen, Schlüssel, IDs) über die \
+          letzte Dimension durchprobiert werden kann. Für echte \
+          Geheimhaltung die Datei zuerst verschlüsseln \
+          (encrypt-then-share) und den Chiffretext aufteilen.",
          "Fractionner un fichier en n parts pour que k d'entre elles \
-          permettent de le reconstruire (partage de secret façon Shamir sur \
-          RLNC). Distribuer les parts à des personnes ou lieux de confiance \
-          — moins de k parts ne révèlent aucune information (théorie de \
-          l'information, pas juste « difficile à casser »).",
+          permettent de le reconstruire (code d'effacement RLNC à seuil \
+          — ce n'est PAS du partage de secret de Shamir). Utilisez les \
+          parts comme sauvegarde de disponibilité, pas comme primitive de \
+          confidentialité : moins de k parts laissent encore fuir \
+          ≈(k−1)/k du texte en clair, donc tout ce qui a une structure \
+          auto-vérifiante (phrases mnémoniques, clés, identifiants) se \
+          force sur la dernière dimension. Pour un vrai secret, chiffrer \
+          d'abord le fichier (encrypt-then-share) et fractionner le \
+          chiffré.",
          "Divide un archivo en n partes de modo que cualquier k de ellas \
-          permitan reconstruirlo (compartición de secreto tipo Shamir sobre \
-          RLNC). Distribuye las partes entre personas o lugares de confianza \
-          — menos de k partes no filtran información alguna \
-          (teoría-informacional, no solo difícil de romper)."]),
+          permitan reconstruirlo (código de borrado RLNC con umbral — \
+          esto NO es compartición de secreto de Shamir). Usa las partes \
+          como respaldo de disponibilidad, no como primitiva de \
+          secreto: menos de k partes aún filtran ≈(k−1)/k del texto \
+          plano, así que cualquier cosa con estructura auto-verificable \
+          (frases semilla, claves, IDs) se puede fuerza-bruta desde la \
+          última dimensión. Para secreto real, cifra primero el archivo \
+          (encrypt-then-share) y divide el cifrado."]),
     ("escrow.intro_p2",
         ["Shares live in gateway memory only. After the gateway restarts \
           they vanish, so download them immediately.",

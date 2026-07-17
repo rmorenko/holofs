@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Holofs analytics: perceptual fingerprint, MinHash, chunk diff, Shamir-style key escrow."
+description = "Holofs analytics: perceptual fingerprint, MinHash, chunk diff, threshold-RLNC key escrow."
 
 [dependencies]
 holofs-core.workspace = true

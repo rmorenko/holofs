@@ -26,7 +26,7 @@ fn is_png(bytes: &[u8]) -> bool {
 // === /escrow round-trip ===================================================
 
 /// Split a file into k-of-n shares, download k of them, recover the
-/// original bytes via /escrow/recover. The classic Shamir-style
+/// original bytes via /escrow/recover. The classic k-of-n threshold
 /// integration test — exercises every escrow handler in one shot.
 #[tokio::test]
 async fn escrow_split_then_recover_round_trips_bytes() -> Result<()> {

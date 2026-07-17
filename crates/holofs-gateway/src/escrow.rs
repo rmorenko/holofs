@@ -1,4 +1,5 @@
-//! holographic key escrow (Shamir-style RLNC).
+//! holographic key escrow (threshold RLNC erasure — NOT Shamir; see
+//! `crates/holofs-analytics/src/escrow.rs` §Security for why).
 //!
 //! `escrow_split` chops a file into `n` RLNC shares, any `k` of
 //! which can reconstruct the original. Shares are held in a

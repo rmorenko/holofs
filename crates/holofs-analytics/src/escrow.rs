@@ -1,4 +1,5 @@
-//! Holographic Key Escrow — Shamir-style secret sharing on RLNC.
+//! Holographic Key Escrow — threshold erasure via RLNC (NOT Shamir; see
+//! `## Security` below).
 //!
 //! The user uploads a file (private key, seed phrase, important document)
 //! and K/N parameters (e.g. 3 of 5). The system encodes the file as `n`
