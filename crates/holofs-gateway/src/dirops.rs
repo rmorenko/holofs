@@ -514,4 +514,51 @@ impl Gateway {
         }
         Ok(out)
     }
+
+    /// Enumerate every non-directory catalog entry, flat, in
+    /// BTreeMap order. Powers the `holofs-admin export-all` bulk
+    /// backup path (P0.2) — the CLI walks this list once and issues
+    /// one HTTP GET per entry.
+    ///
+    /// Directory markers are excluded because bulk-import re-derives
+    /// them by re-PUTting objects whose names contain `/`. Returned
+    /// tuple is `(name, kind, total_size_bytes)`:
+    /// `total_size_bytes` is the sum of every declared shard length
+    /// per channel/layer — an upper bound on the payload the
+    /// consumer of `/<name>` will need to buffer, useful for the
+    /// backup driver's progress bar.
+    pub async fn list_all_objects(&self) -> Vec<CatalogEntry> {
+        let cat = self.catalog.read().await;
+        let mut out = Vec::with_capacity(cat.entries.len());
+        for (name, manifest) in &cat.entries {
+            if manifest.kind == ObjectKind::Directory {
+                continue;
+            }
+            let size: u64 = manifest
+                .sym_len
+                .iter()
+                .map(|s| *s as u64)
+                .sum::<u64>()
+                .saturating_mul(manifest.channels as u64);
+            out.push(CatalogEntry {
+                name: name.clone(),
+                kind: manifest.kind,
+                size,
+            });
+        }
+        out
+    }
+}
+
+/// One row of [`Gateway::list_all_objects`]. Meant to be
+/// serialised into an admin bulk-listing response and consumed by
+/// the `holofs-admin export-all` driver.
+#[derive(Debug, Clone)]
+pub struct CatalogEntry {
+    /// Full catalog path, e.g. `docs/2026/note.txt`.
+    pub name: String,
+    /// Object kind — image / audio / text / opaque.
+    pub kind: ObjectKind,
+    /// Upper-bound plaintext size in bytes (sum of `sym_len` × channels).
+    pub size: u64,
 }

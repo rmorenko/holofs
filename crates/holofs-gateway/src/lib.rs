@@ -38,7 +38,10 @@ mod versions;
 
 pub use decode::DecodedObject;
 pub use diff::{DiffCell, DiffLayer, DiffReport};
-pub use dirops::{BatchDeleteOutcome, BatchDeleteResult, MkdirResult, RemoveResult, RenameResult, RmdirResult};
+pub use dirops::{
+    BatchDeleteOutcome, BatchDeleteResult, CatalogEntry, MkdirResult, RemoveResult, RenameResult,
+    RmdirResult,
+};
 pub use error::GatewayError;
 pub use escrow::{
     EscrowRecoverResult, EscrowShareBytes, EscrowShareInfo, EscrowSplitResult,

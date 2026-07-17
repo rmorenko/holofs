@@ -32,6 +32,12 @@ rand.workspace = true
 chrono.workspace = true
 prometheus-parse.workspace = true
 futures-util.workspace = true
+# holofs-admin backup/restore commands.
+tar.workspace = true
+
+[dev-dependencies]
+# Snapshot/restore round-trip tests in `bin/holofs-admin.rs`.
+tempfile = "3"
 
 [[bin]]
 name = "holofs"

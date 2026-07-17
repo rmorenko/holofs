@@ -420,6 +420,56 @@ pub async fn admin_add_node(
         .into_response()
 }
 
+/// `GET /admin/catalog_names` — flat enumeration of every
+/// non-directory catalog entry, JSON-encoded. Consumed by
+/// `holofs-admin export-all` to drive per-object HTTP GETs against
+/// the gateway. Admin-token gated because a full catalog listing is
+/// operationally sensitive (reveals object namespaces and sizes even
+/// if the objects themselves are gated elsewhere).
+///
+/// Response shape:
+///
+/// ```json
+/// [
+///   {"name": "photos/beach.jpg", "kind": "image", "size": 4194304},
+///   {"name": "docs/notes.txt",   "kind": "text",  "size": 1024},
+///   …
+/// ]
+/// ```
+pub async fn admin_catalog_names(Extension(gw): Extension<Arc<Gateway>>) -> Response {
+    let entries = gw.list_all_objects().await;
+    let mut buf = String::from("[");
+    for (i, e) in entries.iter().enumerate() {
+        if i > 0 {
+            buf.push(',');
+        }
+        buf.push_str(&format!(
+            "{{\"name\":\"{}\",\"kind\":\"{}\",\"size\":{}}}",
+            json_escape(&e.name),
+            object_kind_json_label(e.kind),
+            e.size,
+        ));
+    }
+    buf.push(']');
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        buf,
+    )
+        .into_response()
+}
+
+fn object_kind_json_label(kind: holofs_model::manifest::ObjectKind) -> &'static str {
+    use holofs_model::manifest::ObjectKind;
+    match kind {
+        ObjectKind::Image => "image",
+        ObjectKind::Text => "text",
+        ObjectKind::Audio => "audio",
+        ObjectKind::Opaque => "opaque",
+        ObjectKind::Directory => "directory",
+    }
+}
+
 /// `GET /api/health/events` — Server-Sent Events stream pushing one
 /// [`HealthSnapshot`] every 3 seconds. The browser's `EventSource`
 /// keeps the connection open and the Leptos reactive component

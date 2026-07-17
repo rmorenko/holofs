@@ -737,11 +737,26 @@ For a 100 MB upload, the gateway emits ~925 MB to the node pool. Plan for
 Per node (`HOLOFS_STORAGE_DIR`):
 
 ```
-manifests/         per-object manifests (HOLOFSM6)
-catalog/HOLOFSD1   the directory index (atomic write)
-shards/aa/bb……    .shard files, content-addressed
-identity/secret    Ed25519 private key
-whitelist.holofs   admin-signed peer list
+shards/aa/bb…                per-shard files, content-addressed
+wal-NNNNNNNN.seg             append-only WAL (V2, footer-verified)
+wal-cNNNNNNNN.seg            compacted WAL snapshot (post-P0.1a compactor)
+identity.key                 Ed25519 node private key
+```
+
+Per gateway (`HOLOFS_STORAGE_DIR`):
+
+```
+catalog.redb                 transactional catalog KV (post-P0.1c)
+gateway_identity.key         Ed25519 gateway private key (post-P0.3b)
+catalog.holo.migrated-<ts>   safety backup of the legacy pre-redb catalog (if migrated)
+```
+
+Cluster-wide (any host with the admin key):
+
+```
+cluster.signed               admin-signed peer list — nodes' addr + pubkey + zone
+authorised-gateways.signed   ingress whitelist consumed by `--client-whitelist`
+admin.key                    Ed25519 admin private key (offline; NOT on cluster hosts)
 ```
 
 ### 8.2. Backup model
@@ -756,22 +771,75 @@ triggers RLNC repair from siblings. Backup matters for:
 
 ### 8.3. Recommended backup plan
 
-| Data                 | Frequency       | Tooling                   | Where               |
-|----------------------|-----------------|---------------------------|---------------------|
-| Identity + whitelist | On every change | `restic`, `aws s3 sync`   | Encrypted off-site  |
-| Catalog snapshot     | Hourly          | `cp catalog/HOLOFSD1 → …` | S3 / NFS / tape     |
-| Shard dir            | Optional        | `restic` or zfs snapshots | Cold storage        |
+| Data                 | Frequency       | Tooling                                    | Where               |
+|----------------------|-----------------|--------------------------------------------|---------------------|
+| Identity + whitelist | On every change | `restic`, `aws s3 sync`                    | Encrypted off-site  |
+| Object-level export  | Daily           | `holofs-admin export-all`                  | S3 / NFS / tape     |
+| Per-host snapshot    | Hourly          | `holofs-admin snapshot --storage <dir>`    | S3 / cold storage   |
+| Shard dir            | Optional        | `restic` or `zfs snapshot` on `<storage>/` | Cold storage        |
 
-> **Object-level export is not built in.** The prior paragraph in
-> this section described a `holofs-admin export <name>` /
-> `holofs-admin import` command pair. **Those commands do not exist**
-> in the CLI (`holofs-admin.rs` ships `gen-key`, `pubkey`,
-> `sign-whitelist`, `verify-whitelist`, `show-whitelist` only). To
-> back up "specific high-value objects" today, either
-> (a) `curl -o` the object out over the gateway HTTP API and push the
-> resulting blob to an off-site bucket, or (b) rely on the shard-dir
-> + catalog snapshot below. A first-class export command is on the
-> roadmap.
+Two backup granularities are supported, complementary:
+
+- **Object-level** (`export-all` / `import-all`) — HTTP-driven, cluster-
+  agnostic. Restore into any cluster (fresh, differently-sized, differently-
+  configured). Slow for millions of objects, portable across cluster
+  topology changes.
+- **Per-host snapshot** (`snapshot` / `snapshot-restore`) — tar of the
+  raw `<storage>/` directory. Fast, byte-exact, but must be restored into
+  the SAME cluster topology (same node count, same addrs) — otherwise the
+  Ed25519 identity + `wal-*.seg` per-node state won't line up.
+
+#### Object-level backup
+
+```sh
+# Push every catalog entry to a directory (writes index.json + objects/*.bin).
+holofs-admin export-all \
+  --gateway http://gateway.internal:8787 \
+  --admin-token "$HOLOFS_ADMIN_TOKEN" \
+  --output-dir /backup/2026-07-17/
+
+# Restore into a fresh cluster: PUTs every object back over the same
+# name. Idempotent — reruns overwrite in place.
+holofs-admin import-all \
+  --gateway http://new-gateway.internal:8787 \
+  --input-dir /backup/2026-07-17/
+```
+
+Single object out-of-band:
+
+```sh
+holofs-admin export --gateway http://gw:8787 --name docs/note.txt --output note.bin
+holofs-admin import --gateway http://gw:8787 --name docs/note.txt --input note.bin
+```
+
+The bulk driver enumerates the catalog via `GET /admin/catalog_names`
+(admin-token-gated) and issues one HTTP GET per object. `index.json`
+maps `name → objects/NNNNNNNN.bin`, so restore is a plain JSON-driven
+loop. Rsync/cloud-sync target the whole `--output-dir` tree; only
+changed files re-transfer.
+
+#### Per-host snapshot
+
+Run on each node + on the gateway host. Safe against a live process —
+tar reads whatever was flushed to disk at the moment of scan; anything
+in-flight is recovered by the WAL replay on restore.
+
+```sh
+# On every node:
+holofs-admin snapshot --storage /var/lib/holofs/node-01 --output /backup/nodes/node-01.tar
+
+# On the gateway:
+holofs-admin snapshot --storage /var/lib/holofs/gateway --output /backup/gateway.tar
+
+# Restore path (bring up new hosts, populate storage-dirs):
+holofs-admin snapshot-restore --input /backup/nodes/node-01.tar --storage /var/lib/holofs/node-01
+```
+
+Snapshot semantics are per-host, not globally consistent. RLNC redundancy
+absorbs per-node snapshot skew: a shard in flight when node A was tarred
+but before node B was tarred may be missing on the restored A while
+present on the restored B — decode still succeeds as long as ≥ K shards
+per (channel, layer) survive across the cluster.
 
 ### 8.4. Restore procedures
 
@@ -779,8 +847,8 @@ triggers RLNC repair from siblings. Backup matters for:
 |---------------------------------------|-----------|
 | Single node disk lost                 | Wipe disk; restart node; cluster auto-repairs shards. |
 | Multiple nodes lost, < margin         | No action needed — RLNC decode tolerates it. |
-| Catalog corrupt on gateway            | Copy `catalog/HOLOFSD1` from a peer gateway or the latest hourly backup; restart. |
-| Whole cluster lost                    | Provision new cluster; re-PUT each object over HTTP from the off-site bucket, or restore the shard-dir + catalog snapshot from cold storage. No `holofs-admin import` yet — see the caveat above. |
+| Catalog corrupt on gateway            | `holofs-admin snapshot-restore --input /backup/gateway.tar --storage /var/lib/holofs/gateway` from latest snapshot; restart. Or bring up a fresh gateway and `holofs-admin import-all` from an object-level backup. |
+| Whole cluster lost                    | Provision new hosts; `snapshot-restore` per node + gateway to bring cluster identical to the snapshot moment. For a differently-sized replacement cluster, run `holofs-admin import-all` from the latest object-level export instead. |
 | Whitelist key compromise              | Generate new admin key; re-sign whitelist; hot-reload (see [§10.4](#104-hot-reload-whitelist)). |
 
 ---
@@ -789,12 +857,13 @@ triggers RLNC repair from siblings. Backup matters for:
 
 ### 9.1. RTO / RPO targets
 
-| Failure                       | RTO       | RPO     | Trigger                              |
-|-------------------------------|-----------|---------|--------------------------------------|
-| Single node                   | < 1 min   | 0       | Auto (monitor + repair)              |
-| Single zone (≤ ⅕ of nodes)    | < 5 min   | 0       | Auto (margin still positive)         |
-| Two zones simultaneously       | < 1 hr    | Hours   | Manual: re-provision + import        |
-| Whole cluster                 | < 8 hr    | ≤ 1 hr  | Manual: full restore from S3 backups |
+| Failure                       | RTO       | RPO     | Trigger                                                |
+|-------------------------------|-----------|---------|--------------------------------------------------------|
+| Single node                   | < 1 min   | 0       | Auto (monitor + repair)                                |
+| Single zone (≤ ⅕ of nodes)    | < 5 min   | 0       | Auto (margin still positive)                           |
+| Two zones simultaneously      | < 1 hr    | Hours   | Manual: re-provision + `snapshot-restore` per replaced host |
+| Whole cluster (same topology) | < 4 hr    | ≤ 1 hr  | Manual: `snapshot-restore` per host from off-site tars |
+| Whole cluster (new topology)  | < 8 hr    | ≤ 24 hr | Manual: `import-all` from latest object-level export   |
 
 ### 9.2. Decision tree
 
@@ -803,22 +872,31 @@ flowchart TD
     A[Alert: nodes down] --> B{Margin > 0?}
     B -- Yes --> C[No action — let repair drain]
     B -- No  --> D{Catalog reachable?}
-    D -- Yes --> E[Restore lost zones from manifest hints]
-    D -- No  --> F[Bootstrap new cluster + re-PUT objects from off-site bucket]
+    D -- Yes --> E[Restore lost zones from manifest hints + auto-repair]
+    D -- No  --> F{Same-topology replacement possible?}
+    F -- Yes --> G[snapshot-restore per host from hourly tars]
+    F -- No  --> H[Fresh cluster + holofs-admin import-all from daily object export]
 ```
 
 ### 9.3. Drills
 
 Run quarterly. Suggested scenarios:
 
-1. **Zone-kill drill** — `kubectl drain` all pods in one zone label; assert
-   no object becomes unreachable and repair completes in < 10 min.
-2. **Cold-restore drill** — from a fresh k8s cluster, restore
-   `<storage>/` from the backup bucket (`restic restore` / `rclone
-   copy`), start the gateway, confirm `/api/stats` and a spot GET;
-   measure RTO.
-3. **Key rotation drill** — sign a new whitelist with admin key, hot-reload
-   without downtime.
+1. **Zone-kill drill** — `kubectl drain` all pods in one zone label;
+   assert no object becomes unreachable and repair completes in
+   < 10 min. Auto-repair-on-read (P0.1a/b) + WAL replay do the work.
+2. **Snapshot-restore drill** — from a fresh k8s cluster with the
+   same node count + addrs, run `snapshot-restore` on each host from
+   the previous hour's tar bucket, start the gateway, confirm
+   `/api/stats` matches pre-drill counts + a spot GET returns the
+   expected bytes. Measure RTO.
+3. **Object-level cold-restore drill** — from a fresh cluster with a
+   different node count / topology, run `holofs-admin import-all`
+   from the latest daily object export. Verify count + a random
+   spot-GET sample. Measure RTO (slower than snapshot-restore —
+   O(objects × PUT latency) — but survives topology changes.)
+4. **Key rotation drill** — sign a new whitelist with admin key,
+   hot-reload without downtime.
 
 ---
 
