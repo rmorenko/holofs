@@ -2124,16 +2124,61 @@ impl NodeCapacity {
         self.total_bytes > 0
     }
 
-    /// Used percentage 0.0–100.0, with `0.0` for unknown. Uses
+    /// **Logical** used-% 0.0–100.0, with `0.0` for unknown. Uses
     /// `live_bytes` (steady-state footprint) over `total_bytes` —
     /// see [`Response::Capacity`] docstrings for why WAL churn is
     /// deliberately excluded here.
+    ///
+    /// This is the metric surfaced to operators (dashboards, CLI
+    /// tables). It answers "how much of this disk is worth
+    /// preserving through a compaction pass?" and is what humans
+    /// intuitively call "used space".
+    ///
+    /// **NOT for auto-rebalance decisions** — see
+    /// [`Self::physical_used_pct`] for the reason.
     #[must_use]
     pub fn used_pct(&self) -> f64 {
         if !self.is_known() {
             return 0.0;
         }
         (self.live_bytes as f64 / self.total_bytes as f64) * 100.0
+    }
+
+    /// **Physical** used-% 0.0–100.0, with `0.0` for unknown. Uses
+    /// `total_bytes - free_bytes` — actual disk occupancy from
+    /// `statvfs`. Includes WAL churn AND any un-purged shards on the
+    /// filesystem that are no longer referenced by the RAM index.
+    ///
+    /// # Why the auto-rebalancer uses this and not [`Self::used_pct`]
+    ///
+    /// The [P1.4b review round found] that using `live_bytes / total`
+    /// as the rebalance metric produces a loop-storm after `drain-node`
+    /// without `--purge`: `drain_node` re-emits shards elsewhere and
+    /// updates the catalog, but leaves the physical shards on the
+    /// drained node's disk (that's the whole point of `--purge` being
+    /// opt-in). The drained node's `live_bytes` therefore doesn't drop
+    /// even though its logical footprint dropped to zero, and the
+    /// next auto-rebalance tick sees the same skew and drains the
+    /// node again — an infinite loop. Physical `(total - free)` DOES
+    /// drop after `--purge` and only after `--purge`, so a rebalancer
+    /// driven by it never re-fires against a node that already
+    /// migrated its share.
+    ///
+    /// The operator-facing `used_pct` stays semantically "what a
+    /// compaction pass would keep" because that's what human intuition
+    /// wants for dashboards.
+    ///
+    /// [P1.4b review round found]: PRODUCTION-READINESS-v2.md item #3
+    #[must_use]
+    pub fn physical_used_pct(&self) -> f64 {
+        if !self.is_known() {
+            return 0.0;
+        }
+        // Guard against a nonsense reading (free > total) — the
+        // statvfs source clamps this in `disk_space.rs` but a
+        // pathological FS could still trip it.
+        let used = self.total_bytes.saturating_sub(self.free_bytes);
+        (used as f64 / self.total_bytes as f64) * 100.0
     }
 }
 

@@ -146,10 +146,24 @@ jobs:
     needs: [build-binaries, sbom]
     runs-on: ubuntu-latest
     steps:
+      # Downloads every artifact whose name matches `holofs-*`:
+      #   - per-arch tarballs (holofs-x86_64-…, holofs-aarch64-…)
+      #   - holofs-site-bundle
+      #   - holofs-sbom (unpacks as `sbom/*.cdx.json` in the workspace root)
       - uses: actions/download-artifact@v4
         with:
           pattern: holofs-*
           merge-multiple: true
+      # Package the SBOM tarball BEFORE cosign so the signing loop
+      # below covers it too — the original P2.3 order created
+      # holofs-sbom.tar.gz AFTER the cosign pass, silently shipping
+      # an unsigned SBOM (called out by the v2 review). Also gives
+      # us a compact single-file SBOM asset for release surface.
+      - name: Package SBOM tarball for release
+        run: |
+          set -euo pipefail
+          tar -czf holofs-sbom.tar.gz -C sbom .
+          ls -la holofs-sbom.tar.gz
       # Cosign v2.x — pinned to a semver-known-good release rather than
       # main-of-the-day to avoid a supply-chain rug pull on the signer
       # tool itself. `cosign-installer` is the sigstore-maintained
@@ -168,6 +182,9 @@ jobs:
         # Rekor transparency log gets the entry automatically — the
         # verifier queries it during `cosign verify-blob` without
         # needing extra flags.
+        #
+        # `holofs-*.tar.gz` includes the SBOM tarball packaged
+        # above, so this loop signs it in the same round.
         shell: bash
         run: |
           set -euo pipefail
@@ -179,17 +196,6 @@ jobs:
               "$f"
           done
           ls -la holofs-*.tar.gz*
-      # Bundle SBOM artifact into the release too — attaches
-      # sbom/*.cdx.json under the release assets.
-      - name: Pull SBOM artifact into publish workspace
-        uses: actions/download-artifact@v4
-        with:
-          name: holofs-sbom
-          path: sbom
-      - name: Package SBOM tarball for release
-        run: |
-          tar -czf holofs-sbom.tar.gz -C sbom .
-          ls -la holofs-sbom.tar.gz
       - uses: softprops/action-gh-release@v2
         with:
           files: |

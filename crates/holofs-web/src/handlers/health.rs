@@ -48,8 +48,8 @@ pub async fn api_stats(Extension(gw): Extension<Arc<Gateway>>) -> Response {
 /// {
 ///   "nodes": [
 ///     {"idx":0,"addr":"127.0.0.1:9101","free_bytes":123,"total_bytes":456,
-///      "live_bytes":78,"used_pct":17.11,"capacity_known":true,
-///      "age_secs":42},
+///      "live_bytes":78,"used_pct":17.11,"physical_used_pct":72.80,
+///      "capacity_known":true,"age_secs":42},
 ///     …
 ///   ],
 ///   "cluster": {
@@ -60,6 +60,18 @@ pub async fn api_stats(Extension(gw): Extension<Arc<Gateway>>) -> Response {
 ///   }
 /// }
 /// ```
+///
+/// Two used-% fields:
+///
+/// - `used_pct` — logical, `live_bytes / total_bytes`. Human-facing
+///   "how much of this disk carries data worth preserving through
+///   a compaction pass". Diverges from physical after a
+///   drain-node-without-purge (see the type-level doc on
+///   `NodeCapacity::physical_used_pct`).
+/// - `physical_used_pct` — actual disk occupancy from `statvfs`.
+///   Includes WAL churn and any un-purged shards. **This is the
+///   metric the auto-rebalancer drives off**, so it's what the
+///   `cluster.{min,max}_used_pct` skew stats also reflect.
 ///
 /// `skew_ratio = max_used / max(min_used, 1)` — matches the WARN
 /// threshold in the capacity poller. Absent (null) when fewer than
@@ -81,15 +93,18 @@ pub async fn api_capacity(Extension(gw): Extension<Arc<Gateway>>) -> Response {
                 let age = now.saturating_duration_since(entry.updated_at).as_secs();
                 let known = entry.capacity.is_known();
                 let used_pct = entry.capacity.used_pct();
+                let physical_used_pct = entry.capacity.physical_used_pct();
                 body.push_str(&format!(
                     "{{\"idx\":{idx},\"addr\":\"{}\",\"free_bytes\":{},\
                      \"total_bytes\":{},\"live_bytes\":{},\"used_pct\":{:.2},\
-                     \"capacity_known\":{},\"age_secs\":{}}}",
+                     \"physical_used_pct\":{:.2},\"capacity_known\":{},\
+                     \"age_secs\":{}}}",
                     addr.replace('"', "\\\""),
                     entry.capacity.free_bytes,
                     entry.capacity.total_bytes,
                     entry.capacity.live_bytes,
                     used_pct,
+                    physical_used_pct,
                     known,
                     age,
                 ));
@@ -101,7 +116,8 @@ pub async fn api_capacity(Extension(gw): Extension<Arc<Gateway>>) -> Response {
                 body.push_str(&format!(
                     "{{\"idx\":{idx},\"addr\":\"{}\",\"free_bytes\":0,\
                      \"total_bytes\":0,\"live_bytes\":0,\"used_pct\":0.00,\
-                     \"capacity_known\":false,\"age_secs\":null}}",
+                     \"physical_used_pct\":0.00,\"capacity_known\":false,\
+                     \"age_secs\":null}}",
                     addr.replace('"', "\\\"")
                 ));
             }

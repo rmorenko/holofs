@@ -46,22 +46,24 @@ uses if the env var is unset.
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `HOLOFS_MONITOR_INTERVAL` | ★ 1 s | Health-monitor tick period (Ping every node, flip `admin_kills`). |
-| `HOLOFS_AUDIT_INTERVAL` | ★ 15 s | PoR auditor tick period (per-shard sample audit). |
-| `HOLOFS_SCRUB_INTERVAL` | ★ 60 s | Background scrub cadence. `0` disables scrub (auto-repair-on-read still active). |
+| `HOLOFS_MONITOR_INTERVAL` | ★ 15 s | Health-monitor tick period (Ping every node, flip `admin_kills`). |
+| `HOLOFS_AUDIT_INTERVAL` | ★ 60 s | PoR auditor tick period (per-shard sample audit). |
+| `HOLOFS_SCRUB_INTERVAL` | ★ 600 s (10 min) | Background scrub cadence. `0` disables scrub (auto-repair-on-read still active). |
+| `HOLOFS_REPUTATION_PERSIST_INTERVAL` | ★ 30 s | Node-reputation snapshot cadence to `reputation.json`. |
 | `HOLOFS_CAPACITY_POLL_INTERVAL_SECS` | ★ 60 | P1.4b capacity poller cadence. Floor 5 s. |
 | `HOLOFS_REBALANCE_INTERVAL_SECS` | ★ 300 (5 min) | P1.4b auto-rebalance daemon cadence. `0` disables. |
-| `HOLOFS_REBALANCE_TRIGGER_PCT` | ★ 85 | Used-pct threshold that triggers a rebalance round. |
-| `HOLOFS_REBALANCE_COLD_CEILING_PCT` | ★ 60 | Coldest-node ceiling — if the emptiest known node is above this, rebalance skips the round rather than shuffling between two nearly-full nodes. |
+| `HOLOFS_REBALANCE_TRIGGER_PCT` | ★ 85 | Physical used-% threshold (disk actual, not `live_bytes`) that triggers a rebalance round. |
+| `HOLOFS_REBALANCE_COLD_CEILING_PCT` | ★ 60 | Coldest-node ceiling — if the emptiest known node is above this (physical), rebalance skips the round rather than shuffling between two nearly-full nodes. |
+| `HOLOFS_RETENTION_GC_INTERVAL_SECS` | ★ 3600 (1 h) | P2.2 retention-GC daemon cadence. Deletes objects whose `RetentionPolicy::ExpiresAt` deadline has passed. `0` disables. Floor 60 s. |
 
 ### Networking + limits
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `HOLOFS_POOL_PER_NODE` | ★ 16 | Max concurrent TCP connections per node in the RPC pool. |
-| `HOLOFS_POOL_IDLE_SECS` | ★ 90 | Pool connection idle timeout. |
+| `HOLOFS_POOL_PER_NODE` | ★ 32 | Max idle connections per addr in the RPC pool. |
+| `HOLOFS_POOL_IDLE_SECS` | ★ 30 | Pool connection idle timeout. |
 | `HOLOFS_POOL_DISABLE` | ★ off | Disable connection pooling (one-shot TCP per RPC). Emergency escape hatch — enables per-RPC TLS handshake cost. |
-| `HOLOFS_RPC_TIMEOUT_MS` | ★ 30_000 | Per-RPC read/write deadline. |
+| `HOLOFS_RPC_TIMEOUT_MS` | ★ 8_000 | Per-RPC read/write deadline. `0` disables the deadline. |
 | `HOLOFS_RATE_LIMIT_RPS_PER_IP` | ★ off | Per-client-IP request/sec ceiling. `0` disables entirely. |
 | `HOLOFS_RATE_LIMIT_BURST` | ★ 2 × rps | Token-bucket burst size. |
 | `HOLOFS_UPLOAD_MAX_SIZE` | ★ 50 MiB | Ceiling on any single PUT body. |
@@ -94,7 +96,7 @@ HOLOFS_ENCODE_QUEUE_MAX=128
 HOLOFS_MEDIUM_CONCURRENCY=128
 HOLOFS_LONG_CONCURRENCY=32
 HOLOFS_WAL_COMPACT_INTERVAL_SECS=300
-HOLOFS_SCRUB_INTERVAL=120               # halve the default read-repair cadence
+HOLOFS_SCRUB_INTERVAL=300               # halve the default (600) read-repair cadence
 ```
 
 Set `HOLOFS_OTLP_ENDPOINT` to your collector before you touch
@@ -125,7 +127,7 @@ Bias for durability + capacity churn:
 
 ```
 HOLOFS_NODE_FSYNC=1                     # trade throughput for zero-loss on crash
-HOLOFS_SCRUB_INTERVAL=30                # find corruption before the operator does
+HOLOFS_SCRUB_INTERVAL=120               # find corruption before the operator does (default 600)
 HOLOFS_CAPACITY_POLL_INTERVAL_SECS=30   # tighter observability
 HOLOFS_REBALANCE_INTERVAL_SECS=600      # slower reaction — archival load is smooth
 HOLOFS_REBALANCE_TRIGGER_PCT=75         # trigger earlier since growth is monotonic

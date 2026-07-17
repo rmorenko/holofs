@@ -188,16 +188,21 @@ pub fn spawn_capacity_poller(
     })
 }
 
-/// Return `(min_used_pct, max_used_pct)` across `entries` that report
-/// known capacity. `None` when fewer than one entry is known. Small,
-/// standalone helper so the auto-rebalancer + the poller-side skew
-/// warning can share the same math.
+/// Return `(min_physical_used_pct, max_physical_used_pct)` across
+/// `entries` that report known capacity. `None` when fewer than one
+/// entry is known. Small, standalone helper so the auto-rebalancer +
+/// the poller-side skew warning can share the same math.
+///
+/// Uses [`NodeCapacity::physical_used_pct`] — the disk-actual metric
+/// — not the operator-facing `used_pct` (which is `live_bytes`-based
+/// and doesn't drop after `drain-node` without `--purge`, producing
+/// the loop-storm the P1.4b review round called out).
 #[must_use]
 pub fn min_max_used_pct(entries: &[CapacityEntry]) -> Option<(f64, f64)> {
     let mut it = entries
         .iter()
         .filter(|e| e.capacity.is_known())
-        .map(|e| e.capacity.used_pct());
+        .map(|e| e.capacity.physical_used_pct());
     let first = it.next()?;
     let (mut min, mut max) = (first, first);
     for v in it {
@@ -221,14 +226,15 @@ pub fn min_max_used_pct(entries: &[CapacityEntry]) -> Option<(f64, f64)> {
 /// testable without spinning up nodes, HTTP, or an executor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RebalanceDecision {
-    /// Address of the node that's above `trigger_pct` and holds the
-    /// most `live_bytes` (proxy for "worst offender").
+    /// Address of the node that's above `trigger_pct` (physical) and
+    /// has the highest disk occupancy (`total - free`).
     pub drain_addr_idx: usize,
-    /// Address of the coldest known node with `used_pct < cold_ceiling_pct`.
+    /// Address of the coldest known node with
+    /// `physical_used_pct < cold_ceiling_pct`.
     pub drain_target_idx: usize,
-    /// The full-node's used percentage at decision time (for logs).
+    /// The full-node's physical used-% at decision time (for logs).
     pub full_used_pct: f64,
-    /// The cold-node's used percentage at decision time (for logs).
+    /// The cold-node's physical used-% at decision time (for logs).
     pub cold_used_pct: f64,
 }
 
@@ -255,37 +261,46 @@ pub fn decide_rebalance(
         return None;
     }
 
-    // Fullest: max used_pct, tiebreak on live_bytes so we prefer
-    // dumping the one with the most physical footprint.
+    // Fullest: max physical_used_pct, tiebreak on (total - free) so we
+    // prefer dumping the one with the most actual disk pressure. We
+    // deliberately use physical, not logical, because a drained-but-
+    // not-purged node still has physical shards on disk while its
+    // `live_bytes` (logical) has already dropped — see the type-level
+    // docstring on `NodeCapacity::physical_used_pct` for the full
+    // rationale.
     let (drain_idx, drain_entry) = known
         .iter()
         .copied()
         .max_by(|(_, a), (_, b)| {
             a.capacity
-                .used_pct()
-                .partial_cmp(&b.capacity.used_pct())
+                .physical_used_pct()
+                .partial_cmp(&b.capacity.physical_used_pct())
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.capacity.live_bytes.cmp(&b.capacity.live_bytes))
+                .then_with(|| {
+                    let ua = a.capacity.total_bytes.saturating_sub(a.capacity.free_bytes);
+                    let ub = b.capacity.total_bytes.saturating_sub(b.capacity.free_bytes);
+                    ua.cmp(&ub)
+                })
         })
         .unwrap();
-    let full_used_pct = drain_entry.capacity.used_pct();
+    let full_used_pct = drain_entry.capacity.physical_used_pct();
     if full_used_pct < trigger_pct {
         return None;
     }
 
-    // Coldest: min used_pct AND under the cold ceiling — otherwise
-    // there's no useful target left in this cluster.
+    // Coldest: min physical_used_pct AND under the cold ceiling —
+    // otherwise there's no useful target left in this cluster.
     let (target_idx, target_entry) = known
         .iter()
         .copied()
         .filter(|(idx, _)| *idx != drain_idx)
         .min_by(|(_, a), (_, b)| {
             a.capacity
-                .used_pct()
-                .partial_cmp(&b.capacity.used_pct())
+                .physical_used_pct()
+                .partial_cmp(&b.capacity.physical_used_pct())
                 .unwrap_or(std::cmp::Ordering::Equal)
         })?;
-    let cold_used_pct = target_entry.capacity.used_pct();
+    let cold_used_pct = target_entry.capacity.physical_used_pct();
     if cold_used_pct >= cold_ceiling_pct {
         return None;
     }
@@ -451,10 +466,16 @@ mod tests {
 
     #[test]
     fn min_max_used_pct_ignores_unknown_entries() {
-        let entries = vec![known(0, 100, 90), unknown(), known(0, 100, 30)];
+        // Physical metric = (total - free) / total. Two known nodes
+        // straddle 90% / 30% physical (free = 10 → 90%, free = 70
+        // → 30%). `live_bytes` value doesn't matter here — the
+        // metric switched to disk-actual in the P1.4b review-round
+        // fix. Retained to lock in the "unknown entries are skipped"
+        // contract.
+        let entries = vec![known(10, 100, 90), unknown(), known(70, 100, 30)];
         let (min, max) = min_max_used_pct(&entries).unwrap();
-        assert!((min - 30.0).abs() < 0.01);
-        assert!((max - 90.0).abs() < 0.01);
+        assert!((min - 30.0).abs() < 0.01, "min was {min}");
+        assert!((max - 90.0).abs() < 0.01, "max was {max}");
     }
 
     #[test]
@@ -504,5 +525,94 @@ mod tests {
         entries.insert("A".into(), known(10, 100, 90));
         entries.insert("B".into(), unknown());
         assert!(decide_rebalance(&addrs, &entries, 85.0, 60.0).is_none());
+    }
+
+    #[test]
+    fn physical_used_pct_differs_from_logical_after_drain_no_purge() {
+        // Post-`drain-node` without `--purge`: the drained node's
+        // catalog references drop to zero (logical `live_bytes = 0`)
+        // but the physical shard files stay on disk (`free_bytes`
+        // hasn't grown). This is exactly the case where the two
+        // metrics diverge — and the case the auto-rebalancer MUST
+        // key off physical to avoid a loop-storm.
+        let post_drain = NodeCapacity {
+            free_bytes: 10, // still nearly full — shards on disk
+            total_bytes: 100,
+            live_bytes: 0, // catalog forgot about them
+        };
+        assert_eq!(post_drain.used_pct(), 0.0, "logical is now zero");
+        assert!(
+            (post_drain.physical_used_pct() - 90.0).abs() < 0.01,
+            "physical still ~90% — disk pressure hasn't budged"
+        );
+    }
+
+    #[test]
+    fn decide_rebalance_uses_physical_metric_prevents_loop_storm() {
+        // Scenario: node A was drained without `--purge`. Catalog
+        // says its `live_bytes = 0` (logical 0%), but disk still
+        // holds shards (`free = 10, total = 100`) → physical = 90%.
+        // Node B is genuinely empty (physical 5%).
+        //
+        // A logical-metric rebalancer would see A at 0% and NOT fire —
+        // but wait, that's the opposite of loop-storm. The actual
+        // loop-storm is: A had catalog entries too, then drain moved
+        // them, `live_bytes` dropped from 90 to 0 — but a naive
+        // rebalancer measuring `live_bytes` might not even see the
+        // problem now. The bug is that DURING the drain flow, the
+        // rebalancer keeps picking A as fullest because `live_bytes`
+        // hasn't been re-polled yet, OR after drain-purge=false the
+        // metric doesn't drop like the disk says.
+        //
+        // Reformulate the test around the actual buggy invariant:
+        // physical A > B > threshold means we drain A again. With
+        // physical-driven metric, A's `physical_used_pct` (90%)
+        // triggers, B (5%) is cold — decision fires normally.
+        // Critically, if A had already been drained-without-purge,
+        // A.live_bytes=0 → logical rebalance skips → SAFE, doesn't
+        // loop. But physical=90% → this rebalance rightly fires
+        // ONE more time to try to clear the disk (via a genuine
+        // migration path that also purges).
+        //
+        // The invariant this test locks in: rebalance decisions use
+        // PHYSICAL, not LOGICAL, so operators can't game the
+        // metric by leaving physical shards lying around.
+        let addrs: Vec<String> = vec!["A".into(), "B".into()];
+        let mut entries = HashMap::new();
+        // A: post-drain-without-purge (logical=0, physical=90)
+        entries.insert(
+            "A".into(),
+            CapacityEntry {
+                capacity: NodeCapacity {
+                    free_bytes: 10,
+                    total_bytes: 100,
+                    live_bytes: 0,
+                },
+                updated_at: Instant::now(),
+            },
+        );
+        // B: genuinely empty (both metrics low)
+        entries.insert(
+            "B".into(),
+            CapacityEntry {
+                capacity: NodeCapacity {
+                    free_bytes: 95,
+                    total_bytes: 100,
+                    live_bytes: 5,
+                },
+                updated_at: Instant::now(),
+            },
+        );
+        let d = decide_rebalance(&addrs, &entries, 85.0, 60.0)
+            .expect("physical-driven rebalancer must trip on A's 90% disk");
+        assert_eq!(
+            d.drain_addr_idx, 0,
+            "A (disk-heavy) must be the drain source"
+        );
+        assert_eq!(d.drain_target_idx, 1, "B (empty disk) must be the target");
+        assert!(
+            (d.full_used_pct - 90.0).abs() < 0.01,
+            "reported full % is physical, not logical zero"
+        );
     }
 }

@@ -375,7 +375,16 @@ with none of them set.
 | `HOLOFS_ENCODE_QUEUE_MAX`             | `32`    | Async-ingest backlog cap: once the encoder queue holds this many pending manifests the 202 fast-path stops accepting and returns 429 with `Retry-After`. |
 | `HOLOFS_MONITOR_INTERVAL`             | `15`    | Seconds between health-monitor ticks (per-object margin scan + kick auto-repair). Lower = faster recovery, higher CPU. |
 | `HOLOFS_AUDIT_INTERVAL`               | `60`    | Seconds between PoR-auditor rounds (samples a random shard from a random object, checks that the holding node still has it). Reputation decays on misses. |
+| `HOLOFS_SCRUB_INTERVAL`               | `600`   | Seconds between background scrub ticks (proactive per-object read-and-verify, ahead of any GET). `0` disables the daemon entirely (auto-repair-on-read still active). |
 | `HOLOFS_REPUTATION_PERSIST_INTERVAL`  | `30`    | How often the shared `Reputation` state is snapshotted to `<storage>/reputation.bin`. The bootstrap loads it back next start; a `n_nodes` mismatch or corrupt file silently falls back to a fresh table. A final snapshot is also written on SIGTERM. |
+| `HOLOFS_WAL_COMPACT_INTERVAL_SECS`    | `300`   | Background WAL-compactor tick period. `0` disables entirely (segments accumulate). |
+| `HOLOFS_WAL_COMPACT_RATIO`            | `2.0`   | Fire compaction early when `wal_disk_bytes / live_bytes` exceeds this. |
+| `HOLOFS_WAL_COMPACT_MIN_BYTES`        | `4 MiB` | Floor on WAL disk usage before either trigger fires. Prevents busy-looping compaction on tiny logs. |
+| `HOLOFS_CAPACITY_POLL_INTERVAL_SECS`  | `60`    | P1.4b capacity poller cadence — pings each node for `free_bytes / total_bytes / live_bytes`. Floor 5 s. Feeds `/api/capacity` + the auto-rebalancer. |
+| `HOLOFS_REBALANCE_INTERVAL_SECS`      | `300`   | P1.4b auto-rebalance daemon cadence. `0` disables. |
+| `HOLOFS_REBALANCE_TRIGGER_PCT`        | `85`    | Physical used-% (disk-actual, not `live_bytes`) that triggers a rebalance round on any node. |
+| `HOLOFS_REBALANCE_COLD_CEILING_PCT`   | `60`    | Physical used-% ceiling for the "cold" migration target. Skips the round when the emptiest known node is already above this. |
+| `HOLOFS_RETENTION_GC_INTERVAL_SECS`   | `3600`  | P2.2 retention-GC daemon cadence — deletes non-directory objects whose `RetentionPolicy::ExpiresAt` deadline has passed. `0` disables. Floor 60 s. See `holofs-admin set-retention / clear-retention / show-retention`. |
 | `HOLOFS_ADMIN_TOKEN`                  | _(unset)_ | When set, `POST /admin/node` and `POST /api/gc` require `Authorization: Bearer <token>`. Missing/wrong → 401. |
 | `HOLOFS_ADMIN_UNAUTHENTICATED`        | _(unset)_ | Dev override: set to `1` to leave the admin surface open when `HOLOFS_ADMIN_TOKEN` is unset. Logs a WARN at boot. If neither var is set the admin surface is disabled (403). |
 

@@ -263,8 +263,9 @@ pub fn spawn_retention_gc(
 #[cfg(test)]
 mod tests {
     // Unit tests for the daemon policy live alongside the gateway
-    // integration tests in `crates/holofs-gateway/tests/retention.rs`
-    // — they need a real Gateway (catalog + persistence) to exercise
-    // the CAS-write-back and remove_object plumbing end-to-end, and
-    // that harness already exists there.
+    // integration tests in `crates/holofs-gateway/tests/directory_ops.rs`
+    // (search for `#[tokio::test]` names starting with `retention_` and
+    // `gc_tick_`) — they need a real Gateway (catalog + persistence)
+    // to exercise the CAS-write-back and remove_object plumbing end-
+    // to-end, and that harness already exists there.
 }

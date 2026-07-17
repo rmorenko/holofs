@@ -67,6 +67,8 @@ jobs:
         run: python3 scripts/check-locale-parity.py
       - name: security-critical content parity (EN body hash gate)
         run: python3 scripts/check-security-parity.py
+      - name: env-defaults parity (tuning.md ↔ manifest ↔ code)
+        run: python3 scripts/check-env-defaults.py
 
   # === Clippy lints =========================================================
   # `holofs-web` has mutually-exclusive `ssr` and `hydrate` features, so we
