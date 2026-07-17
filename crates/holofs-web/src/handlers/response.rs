@@ -16,8 +16,8 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use holofs_gateway::{
-    ApiStats, DecodedObject, FingerprintInfo, IngestResult, KindCounts, MkdirResult,
-    RemoveResult, RenameResult, RmdirResult,
+    ApiStats, DecodedObject, FingerprintInfo, IngestResult, KindCounts, MkdirResult, RemoveResult,
+    RenameResult, RmdirResult,
 };
 use holofs_model::manifest::ObjectKind;
 

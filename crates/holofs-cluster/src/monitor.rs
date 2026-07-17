@@ -390,6 +390,7 @@ fn probe_manifest(nodes: Vec<String>) -> Manifest {
         created_at_unix: 0,
         encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
         state: holofs_model::manifest::ManifestState::Ready,
+        retention: None,
     }
 }
 
@@ -481,6 +482,7 @@ mod tests {
             created_at_unix: 0,
             encoding: ObjectEncoding::Rlnc,
             state: ManifestState::Ready,
+            retention: None,
         }
     }
 

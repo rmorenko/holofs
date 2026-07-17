@@ -24,17 +24,14 @@ use holofs_gateway::Gateway;
 
 use super::response::{mkdir_to_response, rename_to_response, rmdir_to_response};
 use super::util::{
-    bad_request, bad_request_owned, error_to_response, is_valid_put_name,
-    parse_urlencoded_field, pick_return_to, redirect_to,
+    bad_request, bad_request_owned, error_to_response, is_valid_put_name, parse_urlencoded_field,
+    pick_return_to, redirect_to,
 };
 
 /// `POST /api/mkdir/*path` — create a `Directory` marker at `path`.
 /// Returns JSON `{path, object_id}` on success, 409 on conflict, 400
 /// on bad input.
-pub async fn mkdir(
-    Path(name): Path<String>,
-    Extension(gw): Extension<Arc<Gateway>>,
-) -> Response {
+pub async fn mkdir(Path(name): Path<String>, Extension(gw): Extension<Arc<Gateway>>) -> Response {
     if !is_valid_put_name(&name) {
         return bad_request("reserved or empty top segment");
     }
@@ -49,10 +46,7 @@ pub async fn mkdir(
 /// page. Joins `parent` + `name`, runs the same mkdir, then
 /// 303-redirects back to `/?p=<parent>` so the browser reloads with
 /// the new tile visible.
-pub async fn mkdir_form(
-    Extension(gw): Extension<Arc<Gateway>>,
-    body: Bytes,
-) -> Response {
+pub async fn mkdir_form(Extension(gw): Extension<Arc<Gateway>>, body: Bytes) -> Response {
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => return bad_request("non-utf8 body"),
@@ -80,10 +74,7 @@ pub async fn mkdir_form(
 /// `DELETE /api/rmdir/*path` — remove an empty directory entry.
 /// Returns `{path, object_id}`; 409 if the directory still has
 /// children.
-pub async fn rmdir(
-    Path(name): Path<String>,
-    Extension(gw): Extension<Arc<Gateway>>,
-) -> Response {
+pub async fn rmdir(Path(name): Path<String>, Extension(gw): Extension<Arc<Gateway>>) -> Response {
     if !is_valid_put_name(&name) {
         return bad_request("reserved or empty top segment");
     }
@@ -97,10 +88,7 @@ pub async fn rmdir(
 /// `DELETE /<name>` for the ✕ button on file rows. Redirects to
 /// `return_to` (or the parent dir) on success. Mirrors [`rmdir_form`]
 /// but resolves to `remove_object` instead of `rmdir`. .
-pub async fn rm_form(
-    Extension(gw): Extension<Arc<Gateway>>,
-    body: Bytes,
-) -> Response {
+pub async fn rm_form(Extension(gw): Extension<Arc<Gateway>>, body: Bytes) -> Response {
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => return bad_request("non-utf8 body"),
@@ -112,7 +100,10 @@ pub async fn rm_form(
         return bad_request("reserved or empty top segment");
     }
     let return_to_field = parse_urlencoded_field(body_str, "return_to").unwrap_or_default();
-    let parent = path.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+    let parent = path
+        .rsplit_once('/')
+        .map(|(p, _)| p.to_string())
+        .unwrap_or_default();
     let target = pick_return_to(&return_to_field, &parent);
     match gw.remove_object(&path).await {
         Ok(_) => redirect_to(&target),
@@ -123,10 +114,7 @@ pub async fn rm_form(
 /// `POST /api/rmdir` (form-urlencoded `path=`) — form-friendly variant
 /// for the delete button on directory cards. Redirects back to the
 /// parent directory on success.
-pub async fn rmdir_form(
-    Extension(gw): Extension<Arc<Gateway>>,
-    body: Bytes,
-) -> Response {
+pub async fn rmdir_form(Extension(gw): Extension<Arc<Gateway>>, body: Bytes) -> Response {
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => return bad_request("non-utf8 body"),
@@ -138,7 +126,10 @@ pub async fn rmdir_form(
         return bad_request("reserved or empty top segment");
     }
     let return_to_field = parse_urlencoded_field(body_str, "return_to").unwrap_or_default();
-    let parent = path.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+    let parent = path
+        .rsplit_once('/')
+        .map(|(p, _)| p.to_string())
+        .unwrap_or_default();
     let target = pick_return_to(&return_to_field, &parent);
     match gw.rmdir(&path).await {
         Ok(_) => redirect_to(&target),
@@ -156,10 +147,7 @@ pub async fn rmdir_form(
 /// text to no-JS clients (the review flagged it explicitly). JS
 /// clients still get sensible behaviour because
 /// `mutation-forms.js` follows the 303 or reloads the current URL.
-pub async fn mv(
-    Extension(gw): Extension<Arc<Gateway>>,
-    body: Bytes,
-) -> Response {
+pub async fn mv(Extension(gw): Extension<Arc<Gateway>>, body: Bytes) -> Response {
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => return bad_request("non-utf8 body"),
@@ -211,10 +199,7 @@ pub async fn mv(
 /// Per-name failures are reported inside `outcomes` — the whole batch
 /// only fails on persist-catalog / cluster-side errors that would
 /// leave the catalog inconsistent.
-pub async fn batch_delete(
-    Extension(gw): Extension<Arc<Gateway>>,
-    body: Bytes,
-) -> Response {
+pub async fn batch_delete(Extension(gw): Extension<Arc<Gateway>>, body: Bytes) -> Response {
     #[derive(serde::Deserialize)]
     struct Req {
         names: Vec<String>,

@@ -81,12 +81,7 @@ pub(crate) fn encoding_failed(name: &str) -> Response {
 /// `/api/*` handler so payloads always advertise
 /// `application/json`.
 pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    (
-        status,
-        [(header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
+    (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 /// 303 redirect to an absolute or relative URL. The form-friendly
@@ -142,20 +137,19 @@ pub(crate) fn error_to_response(e: GatewayError) -> Response {
             "preview not supported for this kind".to_string(),
         ),
         GatewayError::IsDirectory => (StatusCode::CONFLICT, "is a directory".to_string()),
-        GatewayError::AlreadyExists => {
-            (StatusCode::CONFLICT, "already exists".to_string())
-        }
+        GatewayError::AlreadyExists => (StatusCode::CONFLICT, "already exists".to_string()),
         GatewayError::EncodingInProgress => {
             // Handled above; unreachable but kept exhaustive.
             (StatusCode::CONFLICT, "encoding in progress".to_string())
         }
         GatewayError::AsyncQueueFull => {
             // Handled above; unreachable but kept exhaustive.
-            (StatusCode::SERVICE_UNAVAILABLE, "async ingest queue is full".to_string())
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "async ingest queue is full".to_string(),
+            )
         }
-        GatewayError::NotADirectory => {
-            (StatusCode::CONFLICT, "not a directory".to_string())
-        }
+        GatewayError::NotADirectory => (StatusCode::CONFLICT, "not a directory".to_string()),
         GatewayError::DirectoryNotEmpty => {
             (StatusCode::CONFLICT, "directory not empty".to_string())
         }
@@ -178,10 +172,19 @@ pub(crate) fn error_to_response(e: GatewayError) -> Response {
 /// these would shadow a real route, so PUT/DELETE/mkdir refuse
 /// them.
 const RESERVED_TOP_SEGMENTS: &[&str] = &[
-    "health", "escrow", "preview", "inspect", "similar", "diff", "admin", "api",
-    "metrics", "pkg",
+    "health",
+    "escrow",
+    "preview",
+    "inspect",
+    "similar",
+    "diff",
+    "admin",
+    "api",
+    "metrics",
+    "pkg",
     // in-app docs viewer + zoom variant of /inspect.
-    "help", "inspect-zoom",
+    "help",
+    "inspect-zoom",
     // static-asset prefix served by ServeDir.
     "assets",
     // wavelet-mix composer page.

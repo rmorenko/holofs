@@ -202,8 +202,7 @@ pub async fn preview_stream(
         yield Ok::<_, Infallible>(Bytes::from(tail.into_bytes()));
     };
 
-    let content_type =
-        format!("multipart/x-mixed-replace; boundary={boundary}");
+    let content_type = format!("multipart/x-mixed-replace; boundary={boundary}");
     let mut resp = Response::new(Body::from_stream(body_stream));
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -365,9 +364,7 @@ pub async fn put_object(
         Some(other) => {
             return (
                 StatusCode::BAD_REQUEST,
-                format!(
-                    "unknown ?encoding={other} — expected rlnc (default) or replicated"
-                ),
+                format!("unknown ?encoding={other} — expected rlnc (default) or replicated"),
             )
                 .into_response();
         }
@@ -420,10 +417,7 @@ fn parse_put_query(raw: Option<&str>) -> Result<PutQuery, String> {
                 );
             }
             "r" => {
-                out.r = Some(
-                    v.parse::<u8>()
-                        .map_err(|e| format!("bad ?r={v}: {e}"))?,
-                );
+                out.r = Some(v.parse::<u8>().map_err(|e| format!("bad ?r={v}: {e}"))?);
             }
             // Unknown keys are ignored — future-proof for
             // additional PUT knobs without breaking clients that

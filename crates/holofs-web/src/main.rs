@@ -29,15 +29,15 @@ use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{info, Level};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+use holofs_web::admin_auth::{require_admin_token, AdminAuth};
+use holofs_web::backpressure::with_permit;
 use holofs_web::bootstrap::{bootstrap_cluster, Bootstrap};
 use holofs_web::cli::{Cli, LogFormat};
 use holofs_web::diff::GetDiff;
 use holofs_web::handlers;
 use holofs_web::health::{GetHealthIndex, GetObjectHealth};
-use holofs_web::inspect::{GetInspect, GetInspectZoom};
 use holofs_web::help::{GetDoc, ListDocs};
-use holofs_web::admin_auth::{require_admin_token, AdminAuth};
-use holofs_web::backpressure::with_permit;
+use holofs_web::inspect::{GetInspect, GetInspectZoom};
 use holofs_web::rate_limit::{run_with_rate_limit, RateLimit};
 use holofs_web::similar::GetSimilar;
 use holofs_web::timeout::{run_with_deadline, LONG, MEDIUM, SHORT};
@@ -189,6 +189,8 @@ async fn main() {
         .route("/admin/add_node", post(handlers::admin_add_node))
         .route("/admin/drain_node", post(handlers::admin_drain_node))
         .route("/admin/catalog_names", get(handlers::admin_catalog_names))
+        .route("/admin/retention", post(handlers::admin_retention))
+        .route("/admin/retention/*path", get(handlers::admin_retention_get))
         .route_layer(from_fn(move |req, next| {
             run_with_deadline(SHORT, to_short.clone(), req, next)
         }))
@@ -533,8 +535,8 @@ async fn wait_for_shutdown_signal() {
 /// distributed tracer (Jaeger / Tempo / Honeycomb — anything speaking
 /// OTLP gRPC). Unset → local logging only, no runtime cost.
 fn init_tracing(cli: &Cli) {
-    let filter = EnvFilter::try_new(&cli.log)
-        .unwrap_or_else(|_| EnvFilter::new("info,holofs_web=debug"));
+    let filter =
+        EnvFilter::try_new(&cli.log).unwrap_or_else(|_| EnvFilter::new("info,holofs_web=debug"));
 
     let otel_layer = build_otel_layer();
 
@@ -575,7 +577,8 @@ fn init_tracing(cli: &Cli) {
 /// - `HOLOFS_OTLP_SERVICE_NAME` — `service.name` resource attribute
 ///   (default `holofs-web`). Populates the "Service" filter in
 ///   Jaeger / Tempo / Honeycomb.
-fn build_otel_layer<S>() -> Option<tracing_opentelemetry::OpenTelemetryLayer<S, opentelemetry_sdk::trace::Tracer>>
+fn build_otel_layer<S>(
+) -> Option<tracing_opentelemetry::OpenTelemetryLayer<S, opentelemetry_sdk::trace::Tracer>>
 where
     S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
 {
@@ -636,11 +639,7 @@ where
 
 /// Fallback for paths the Leptos router does not match: serve a static file
 /// from the site root, otherwise let the App render (404 view).
-async fn fallback(
-    uri: Uri,
-    State(options): State<LeptosOptions>,
-    req: Request<Body>,
-) -> Response {
+async fn fallback(uri: Uri, State(options): State<LeptosOptions>, req: Request<Body>) -> Response {
     use tokio::fs;
 
     let path = uri.path().trim_start_matches('/');

@@ -270,3 +270,133 @@ async fn pagination_next_cursor_set_when_limit_is_reached() {
     assert!(page2.items.is_empty());
     assert!(page2.next_cursor.is_none());
 }
+
+// --- P2.2 per-object retention ---
+
+use holofs_model::manifest::RetentionPolicy;
+
+#[tokio::test]
+async fn retention_set_get_roundtrip() {
+    let gw = build_gateway();
+    seed_objects(&gw, &["foo"]).await;
+
+    // Fresh objects have no retention.
+    let p = gw.get_retention("foo").await.unwrap();
+    assert_eq!(p, None);
+
+    // Set a policy.
+    gw.set_retention(
+        "foo",
+        Some(RetentionPolicy::ExpiresAt {
+            expires_at_unix: 1_700_000_000,
+        }),
+    )
+    .await
+    .expect("set_retention");
+    let p = gw.get_retention("foo").await.unwrap();
+    assert_eq!(
+        p,
+        Some(RetentionPolicy::ExpiresAt {
+            expires_at_unix: 1_700_000_000
+        })
+    );
+
+    // Clear it.
+    gw.set_retention("foo", None).await.expect("clear");
+    let p = gw.get_retention("foo").await.unwrap();
+    assert_eq!(p, None);
+}
+
+#[tokio::test]
+async fn retention_get_refuses_directory() {
+    let gw = build_gateway();
+    gw.mkdir("stuff").await.unwrap();
+    let err = gw.get_retention("stuff").await.expect_err("dir");
+    assert!(matches!(err, GatewayError::IsDirectory));
+}
+
+#[tokio::test]
+async fn retention_set_refuses_unknown_name() {
+    let gw = build_gateway();
+    let err = gw
+        .set_retention(
+            "nope",
+            Some(RetentionPolicy::ExpiresAt {
+                expires_at_unix: 100,
+            }),
+        )
+        .await
+        .expect_err("unknown");
+    assert!(matches!(err, GatewayError::NotFound));
+}
+
+#[tokio::test]
+async fn gc_tick_deletes_only_expired_objects() {
+    let gw = build_gateway();
+    seed_objects(&gw, &["fresh", "old"]).await;
+    // "fresh" expires in the future, "old" in the past.
+    gw.set_retention(
+        "fresh",
+        Some(RetentionPolicy::ExpiresAt {
+            expires_at_unix: 2_000_000_000,
+        }),
+    )
+    .await
+    .unwrap();
+    gw.set_retention(
+        "old",
+        Some(RetentionPolicy::ExpiresAt {
+            expires_at_unix: 1_000,
+        }),
+    )
+    .await
+    .unwrap();
+
+    // Tick at "now = 1_700_000_000" — "old" should trip, "fresh"
+    // should NOT.
+    let report = gw.gc_expired_objects_tick(1_700_000_000).await;
+    assert_eq!(report.outcomes.len(), 1);
+    assert_eq!(report.outcomes[0].name, "old");
+    assert!(report.outcomes[0].deleted);
+    assert!(!report.hit_per_tick_cap);
+
+    // Catalog: "fresh" survives, "old" gone.
+    let names: Vec<String> = {
+        let cat = gw.catalog().read().await;
+        cat.entries.keys().cloned().collect()
+    };
+    assert!(names.contains(&"fresh".to_string()));
+    assert!(!names.contains(&"old".to_string()));
+}
+
+#[tokio::test]
+async fn gc_tick_skips_objects_without_retention() {
+    let gw = build_gateway();
+    seed_objects(&gw, &["a", "b"]).await;
+    // Neither has retention → no deletions no matter how far in
+    // the future the tick's `now_unix` is.
+    let report = gw.gc_expired_objects_tick(u64::MAX).await;
+    assert!(
+        report.outcomes.is_empty(),
+        "objects without retention must be immune to GC"
+    );
+    let names: Vec<String> = {
+        let cat = gw.catalog().read().await;
+        cat.entries.keys().cloned().collect()
+    };
+    assert!(names.contains(&"a".to_string()));
+    assert!(names.contains(&"b".to_string()));
+}
+
+#[tokio::test]
+async fn gc_tick_skips_directories() {
+    // Directory manifests have no retention path anyway — the
+    // enumerator filters them. Sanity-check that a directory doesn't
+    // accidentally trip the sweep even if we tried to abuse it.
+    let gw = build_gateway();
+    gw.mkdir("things").await.unwrap();
+    let report = gw.gc_expired_objects_tick(u64::MAX).await;
+    assert!(report.outcomes.is_empty());
+    let cat = gw.catalog().read().await;
+    assert!(cat.get("things").is_some());
+}

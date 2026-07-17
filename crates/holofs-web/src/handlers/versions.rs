@@ -51,10 +51,7 @@ pub async fn restore_version_form(
 /// 303-redirects to `return_to` (defaults to `/versions/<name>`).
 /// The deleted version's uniquely-owned shards are GC'd from the
 /// cluster in the same call.
-pub async fn delete_version_form(
-    Extension(gw): Extension<Arc<Gateway>>,
-    body: String,
-) -> Response {
+pub async fn delete_version_form(Extension(gw): Extension<Arc<Gateway>>, body: String) -> Response {
     let Some(name) = parse_urlencoded_field(&body, "name") else {
         return bad_request("missing 'name'");
     };

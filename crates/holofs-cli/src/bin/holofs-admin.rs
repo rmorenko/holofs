@@ -53,6 +53,9 @@ fn main() {
         "snapshot-restore" => cmd_snapshot_restore(&args[1..]),
         "drain-node" => cmd_drain_node(&args[1..]),
         "capacity" => cmd_capacity(&args[1..]),
+        "set-retention" => cmd_set_retention(&args[1..]),
+        "clear-retention" => cmd_clear_retention(&args[1..]),
+        "show-retention" => cmd_show_retention(&args[1..]),
         "rotate-kek" => cmd_rotate_kek(&args[1..]),
         "--help" | "-h" | "help" => {
             print_usage();
@@ -117,6 +120,17 @@ cluster capacity (P1.4b — observability + auto-rebalance signal):\n\
                                         (default 85) AND the coldest node is below\n\
                                         HOLOFS_REBALANCE_COLD_CEILING_PCT (default 60).\n\
                                         No admin-token needed — /api/capacity is read-only.\n\
+\n\
+per-object retention (P2.2 — GC daemon deletes on expiry):\n\
+  set-retention   --gateway URL --admin-token TOK --name NAME --expires-at-unix N\n\
+                                        set an absolute deletion deadline. `N` is Unix epoch\n\
+                                        seconds. Setting in the past is legal — object becomes\n\
+                                        eligible on the next GC tick. See\n\
+                                        HOLOFS_RETENTION_GC_INTERVAL_SECS (default 3600).\n\
+  clear-retention --gateway URL --admin-token TOK --name NAME\n\
+                                        remove any retention policy from NAME.\n\
+  show-retention  --gateway URL --admin-token TOK --name NAME\n\
+                                        print the current policy as JSON. `null` = no policy.\n\
 \n\
 at-rest key rotation (P1.7 — envelope encryption, offline per node):\n\
   rotate-kek --storage DIR\n\
@@ -916,6 +930,176 @@ fn cmd_capacity(args: &[String]) {
             _ => println!("cluster skew: known_nodes={known} (need >=2 known nodes to compare)"),
         }
     }
+}
+
+// === per-object retention (P2.2) ==================================
+
+fn cmd_set_retention(args: &[String]) {
+    let mut gateway: Option<String> = None;
+    let mut admin_token: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut expires_at_unix: Option<u64> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--gateway" => {
+                gateway = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--admin-token" => {
+                admin_token = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--name" => {
+                name = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--expires-at-unix" => {
+                expires_at_unix = Some(
+                    args[i + 1]
+                        .parse()
+                        .unwrap_or_else(|e| die(format!("--expires-at-unix: {e}"))),
+                );
+                i += 2;
+            }
+            other => die(format!("unexpected flag: {other}")),
+        }
+    }
+    let gateway = gateway.unwrap_or_else(|| flag_required("--gateway"));
+    let admin_token = admin_token.unwrap_or_else(|| flag_required("--admin-token"));
+    let name = name.unwrap_or_else(|| flag_required("--name"));
+    let expires_at_unix = expires_at_unix.unwrap_or_else(|| {
+        eprintln!("--expires-at-unix is required (use `clear-retention` to remove)");
+        std::process::exit(2);
+    });
+
+    let body = format!(
+        "name={}&expires_at_unix={}",
+        urlencoding_encode(&name),
+        expires_at_unix,
+    );
+    let out = admin_post("/admin/retention", &gateway, &admin_token, body);
+    println!("{out}");
+}
+
+fn cmd_clear_retention(args: &[String]) {
+    let mut gateway: Option<String> = None;
+    let mut admin_token: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--gateway" => {
+                gateway = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--admin-token" => {
+                admin_token = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--name" => {
+                name = Some(args[i + 1].clone());
+                i += 2;
+            }
+            other => die(format!("unexpected flag: {other}")),
+        }
+    }
+    let gateway = gateway.unwrap_or_else(|| flag_required("--gateway"));
+    let admin_token = admin_token.unwrap_or_else(|| flag_required("--admin-token"));
+    let name = name.unwrap_or_else(|| flag_required("--name"));
+
+    let body = format!("name={}&clear=true", urlencoding_encode(&name));
+    let out = admin_post("/admin/retention", &gateway, &admin_token, body);
+    println!("{out}");
+}
+
+fn cmd_show_retention(args: &[String]) {
+    let mut gateway: Option<String> = None;
+    let mut admin_token: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--gateway" => {
+                gateway = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--admin-token" => {
+                admin_token = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--name" => {
+                name = Some(args[i + 1].clone());
+                i += 2;
+            }
+            other => die(format!("unexpected flag: {other}")),
+        }
+    }
+    let gateway = gateway.unwrap_or_else(|| flag_required("--gateway"));
+    let admin_token = admin_token.unwrap_or_else(|| flag_required("--admin-token"));
+    let name = name.unwrap_or_else(|| flag_required("--name"));
+
+    let url = format!(
+        "{}/admin/retention/{}",
+        gateway.trim_end_matches('/'),
+        name.trim_start_matches('/')
+    );
+    let client = http_client();
+    let resp = client
+        .get(&url)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {admin_token}"),
+        )
+        .send()
+        .unwrap_or_else(|e| die(format!("GET {url}: {e}")));
+    let status = resp.status();
+    let text = resp.text().unwrap_or_default();
+    if !status.is_success() {
+        die(format!("GET {url}: HTTP {} — {text}", status.as_u16()));
+    }
+    println!("{text}");
+}
+
+/// Shared POST helper for the admin/retention endpoints. Sends
+/// `body` as urlencoded, returns response body as String or dies on
+/// non-2xx.
+fn admin_post(path: &str, gateway: &str, token: &str, body: String) -> String {
+    let url = format!("{}{path}", gateway.trim_end_matches('/'));
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(body)
+        .send()
+        .unwrap_or_else(|e| die(format!("POST {url}: {e}")));
+    let status = resp.status();
+    let text = resp.text().unwrap_or_default();
+    if !status.is_success() {
+        die(format!("POST {url}: HTTP {} — {text}", status.as_u16()));
+    }
+    text
+}
+
+/// Minimal URL-encoder for form-body values. Escapes only the
+/// small set of characters that would break a `application/x-www-
+/// form-urlencoded` roundtrip; catalog names are validated at PUT
+/// time so we don't need a full-fat RFC 3986 encoder.
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(*b as char);
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 // === at-rest key rotation (P1.7) ==================================

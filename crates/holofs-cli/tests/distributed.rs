@@ -105,6 +105,7 @@ fn build_manifest(nodes: Vec<String>) -> Manifest {
         created_at_unix: 0,
         encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
             state: holofs_model::manifest::ManifestState::Ready,
+            retention: None,
         }
 }
 
@@ -336,6 +337,7 @@ async fn smoke_512x512_shard_budget_and_roundtrip() {
         created_at_unix: 0,
         encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
             state: holofs_model::manifest::ManifestState::Ready,
+            retention: None,
         };
     // Synthetic 512×512 RGB with high-frequency noise on top of
     // the smooth base — smooth-only images push most detail-band

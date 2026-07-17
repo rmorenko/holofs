@@ -331,7 +331,6 @@ pub fn write_atomic(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
 /// function above can live right next to `save_atomic` without
 /// needing to jump around the file.
 impl Directory {
-
     /// Load a catalog from a file. Missing file → empty catalog.
     pub fn load_or_empty(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
@@ -380,7 +379,10 @@ impl Directory {
         // shard_refs is derivable — build it once from the loaded
         // entries so `orphan_hashes` works from boot without a
         // wire-format bump. O(N × avg_shards) — a one-time boot cost.
-        let mut dir = Directory { entries, shard_refs: HashMap::new() };
+        let mut dir = Directory {
+            entries,
+            shard_refs: HashMap::new(),
+        };
         dir.rebuild_shard_index();
         Ok(dir)
     }
@@ -421,6 +423,7 @@ mod tests {
             created_at_unix: 1_700_000_000 + seed as u64,
             encoding: crate::manifest::ObjectEncoding::Rlnc,
             state: crate::manifest::ManifestState::Ready,
+            retention: None,
         }
     }
 
@@ -511,11 +514,7 @@ mod tests {
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .contains(".tmp.")
-            })
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(
             leftovers.is_empty(),
@@ -683,14 +682,10 @@ mod tests {
         a.insert("y".into(), manifest_with_hashes(1, &[h(2), h(3)]));
 
         let mut b = Directory::new();
-        b.entries.insert(
-            "x".into(),
-            Arc::new(manifest_with_hashes(0, &[h(1), h(2)])),
-        );
-        b.entries.insert(
-            "y".into(),
-            Arc::new(manifest_with_hashes(1, &[h(2), h(3)])),
-        );
+        b.entries
+            .insert("x".into(), Arc::new(manifest_with_hashes(0, &[h(1), h(2)])));
+        b.entries
+            .insert("y".into(), Arc::new(manifest_with_hashes(1, &[h(2), h(3)])));
         b.rebuild_shard_index();
 
         for candidate in [h(1), h(2), h(3), h(9)] {

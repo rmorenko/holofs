@@ -152,6 +152,7 @@ impl Gateway {
             created_at_unix: 0,
             encoding: ObjectEncoding::Rlnc,
             state: ManifestState::Ready,
+            retention: None,
         }
     }
 
@@ -207,6 +208,7 @@ impl Gateway {
             created_at_unix: 0,
             encoding: ObjectEncoding::Rlnc,
             state: ManifestState::Ready,
+            retention: None,
         })
     }
 
@@ -241,6 +243,7 @@ impl Gateway {
             created_at_unix: 0,
             encoding: ObjectEncoding::Rlnc,
             state: ManifestState::Ready,
+            retention: None,
         }
     }
 
@@ -649,6 +652,7 @@ impl Gateway {
             created_at_unix: now_unix(),
             encoding: ObjectEncoding::Rlnc,
             state: ManifestState::Encoding,
+            retention: None,
         };
 
         let t0 = Instant::now();

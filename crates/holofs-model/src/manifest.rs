@@ -206,6 +206,15 @@ pub struct Manifest {
     /// and earlier) decode as `Ready` — this field only appears on
     /// `HOLOFSMA` on the wire.
     pub state: ManifestState,
+
+    /// P2.2 per-object retention policy. `None` = no expiry, which
+    /// is the default for every object created before P2.2 and every
+    /// PUT that doesn't explicitly set retention. `Some(policy)` =
+    /// the retention GC daemon may delete this object when the
+    /// policy's condition trips. Legacy manifests (`HOLOFSMA` and
+    /// earlier) decode as `None` — this field only appears on
+    /// `HOLOFSMB` on the wire.
+    pub retention: Option<RetentionPolicy>,
 }
 
 impl Manifest {
@@ -286,6 +295,7 @@ impl Manifest {
             created_at_unix: 0,
             encoding: ObjectEncoding::Rlnc,
             state: ManifestState::Ready,
+            retention: None,
         }
     }
 
@@ -315,6 +325,7 @@ impl Manifest {
             created_at_unix,
             encoding: ObjectEncoding::Rlnc,
             state: ManifestState::Ready,
+            retention: None,
         }
     }
 
@@ -372,15 +383,79 @@ impl Manifest {
     }
 }
 
+/// P2.2 — per-object retention policy. `None` = no expiry (default,
+/// backward-compatible with pre-P2.2 manifests). `Some(policy)` = the
+/// retention GC daemon (see `holofs_gateway::retention_gc`) may
+/// delete this object based on the policy's rules.
+///
+/// # Wire format
+///
+/// The manifest encoder emits one discriminant byte + variant-
+/// specific payload after the async-ingest `state` byte:
+///
+/// ```text
+/// [1 byte retention_kind]
+///   0 = None (no tail)
+///   1 = ExpiresAt { expires_at_unix: u64 BE }
+/// ```
+///
+/// New variants append their own discriminant + payload without
+/// bumping the magic further — the discriminant is an extension
+/// point identical in shape to `ObjectEncoding::tag`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionPolicy {
+    /// Absolute deadline: the GC daemon deletes this object once
+    /// wall-clock ≥ `expires_at_unix`. Unix epoch **seconds**.
+    /// Setting `expires_at_unix` in the past is allowed — the object
+    /// becomes eligible on the next GC tick (idempotent). Clients
+    /// that want "expire N days from now" compute `now() + N * 86400`
+    /// on their side and store that.
+    ExpiresAt {
+        /// Unix epoch seconds at which the object should be deleted.
+        expires_at_unix: u64,
+    },
+}
+
+impl RetentionPolicy {
+    /// Discriminant byte for [`Self`]. `0` means "no policy" (encoded
+    /// when the manifest's `retention` is `None`), so live variants
+    /// start at `1`.
+    #[must_use]
+    pub fn tag(&self) -> u8 {
+        match self {
+            RetentionPolicy::ExpiresAt { .. } => 1,
+        }
+    }
+
+    /// `true` when wall-clock `now_unix` (Unix epoch seconds) has
+    /// crossed this policy's deletion trigger. Free-standing so the
+    /// GC daemon can decide without materialising a wall-clock inside
+    /// the type.
+    #[must_use]
+    pub const fn is_expired(&self, now_unix: u64) -> bool {
+        match self {
+            RetentionPolicy::ExpiresAt { expires_at_unix } => now_unix >= *expires_at_unix,
+        }
+    }
+}
+
 /// Current on-disk magic. Bumped `HOLOFSM8` → `HOLOFSM9` to append
 /// the `ObjectEncoding` tail (one byte for the variant, plus
 /// variant-specific payload); then bumped `HOLOFSM9` → `HOLOFSMA`
-/// to append the async-ingest `state` byte. Pure-append schema
-/// extensions each time: readers see the new bytes, legacy readers
+/// to append the async-ingest `state` byte; then bumped `HOLOFSMA`
+/// → `HOLOFSMB` to append the P2.2 `retention` tail (discriminant
+/// byte + variant payload — see [`RetentionPolicy`]). Pure-append
+/// schema extensions each time: readers see the new bytes, legacy
+/// readers
 /// decode through and default missing fields (`encoding = Rlnc`,
-/// `state = Ready`).
-const MAGIC: &[u8; 8] = b"HOLOFSMA";
-/// Previous MAGIC — has every field of `HOLOFSMA` *except* the
+/// `state = Ready` for pre-async manifests and `retention = None`
+/// for pre-P2.2 manifests).
+const MAGIC: &[u8; 8] = b"HOLOFSMB";
+/// Previous MAGIC — has every field of `HOLOFSMB` *except* the
+/// trailing `retention` tail (discriminant byte + variant payload).
+/// Records under this magic decode with `retention = None`.
+const MAGIC_LEGACY_VA: &[u8; 8] = b"HOLOFSMA";
+/// Pre-async MAGIC — has every field of `HOLOFSMA` *except* the
 /// trailing `state` byte introduced by the async-ingest work.
 /// Records under this magic decode with `state = Ready`.
 const MAGIC_LEGACY_V9: &[u8; 8] = b"HOLOFSM9";
@@ -484,9 +559,27 @@ impl Manifest {
                 b.extend_from_slice(&block_size.to_be_bytes());
             }
         }
-        // Async-ingest lifecycle byte. Present only under HOLOFSMA;
-        // pre-async catalogs decode with `state = Ready`.
+        // Async-ingest lifecycle byte. Present under HOLOFSMA and
+        // HOLOFSMB; pre-async catalogs decode with `state = Ready`.
         b.push(self.state.tag());
+        // P2.2 retention tail. Discriminant `0` = None (no payload).
+        // Under HOLOFSMB every writer emits at least the discriminant
+        // byte, so pre-P2.2 readers won't mis-parse the tail as a
+        // trailing async-ingest state — the magic bumped precisely
+        // for this. Kept as a pure-append extension: new
+        // RetentionPolicy variants add their own discriminant + tail
+        // without another magic bump.
+        match self.retention {
+            None => b.push(0),
+            Some(policy) => {
+                b.push(policy.tag());
+                match policy {
+                    RetentionPolicy::ExpiresAt { expires_at_unix } => {
+                        b.extend_from_slice(&expires_at_unix.to_be_bytes());
+                    }
+                }
+            }
+        }
         b
     }
 
@@ -496,19 +589,31 @@ impl Manifest {
         let mut magic = [0u8; 8];
         magic.copy_from_slice(magic_bytes);
         let is_current = magic == *MAGIC;
+        let is_legacy_va = magic == *MAGIC_LEGACY_VA;
         let is_legacy_v9 = magic == *MAGIC_LEGACY_V9;
         let is_legacy_v8 = magic == *MAGIC_LEGACY_V8;
         let is_legacy_v7 = magic == *MAGIC_LEGACY_V7;
         let is_legacy_v6 = magic == *MAGIC_LEGACY;
-        if !is_current && !is_legacy_v9 && !is_legacy_v8 && !is_legacy_v7 && !is_legacy_v6 {
+        if !is_current
+            && !is_legacy_va
+            && !is_legacy_v9
+            && !is_legacy_v8
+            && !is_legacy_v7
+            && !is_legacy_v6
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "not a holofs manifest",
             ));
         }
-        // `HOLOFSM9` and `HOLOFSMA` share the encoding tail; both
-        // predecessors of the async work.
-        let has_encoding_tail = is_current || is_legacy_v9;
+        // `HOLOFSM9`, `HOLOFSMA`, and `HOLOFSMB` share the encoding
+        // tail — all three predecessors of the async work carry
+        // `ObjectEncoding` explicitly.
+        let has_encoding_tail = is_current || is_legacy_va || is_legacy_v9;
+        // Async-ingest `state` byte and P2.2 `retention` tail live
+        // under the two most recent magics.
+        let has_state_tail = is_current || is_legacy_va;
+        let has_retention_tail = is_current;
         let object_id = c.u64()?;
         let k = c.u16()?;
         let nlayers = c.u8()?;
@@ -604,7 +709,7 @@ impl Manifest {
 
         // trailing u64 timestamp. Present in HOLOFSM8
         // and HOLOFSM9; legacy HOLOFSM6/HOLOFSM7 records end before it.
-        let created_at_unix = if is_current || is_legacy_v8 {
+        let created_at_unix = if is_current || is_legacy_va || is_legacy_v9 || is_legacy_v8 {
             c.u64()?
         } else {
             0
@@ -635,13 +740,34 @@ impl Manifest {
         } else {
             ObjectEncoding::Rlnc
         };
-        // Async-ingest state byte only under HOLOFSMA. Everything
-        // older is by definition `Ready` because those magics
-        // predate the async path.
-        let state = if is_current {
+        // Async-ingest state byte only under HOLOFSMA and HOLOFSMB.
+        // Everything older is by definition `Ready` because those
+        // magics predate the async path.
+        let state = if has_state_tail {
             ManifestState::from_tag(c.u8()?)
         } else {
             ManifestState::Ready
+        };
+
+        // P2.2 retention tail. `has_retention_tail` gates whether we
+        // consume any bytes at all — legacy magics have no trailing
+        // discriminant to read. Under the current magic the
+        // discriminant `0` means "no policy"; unknown discriminants
+        // are treated as `None` (forward-compat: a future writer
+        // that adds a new variant won't crash older readers, they
+        // just miss the policy — the daemon on the older side won't
+        // then delete anything it doesn't understand).
+        let retention = if has_retention_tail {
+            match c.u8()? {
+                0 => None,
+                1 => {
+                    let expires_at_unix = c.u64()?;
+                    Some(RetentionPolicy::ExpiresAt { expires_at_unix })
+                }
+                _other => None,
+            }
+        } else {
+            None
         };
 
         Ok(Manifest {
@@ -669,6 +795,7 @@ impl Manifest {
             created_at_unix,
             encoding,
             state,
+            retention,
         })
     }
 }
@@ -748,6 +875,7 @@ mod tests {
             created_at_unix: 1_700_000_000,
             encoding: ObjectEncoding::Rlnc,
             state: ManifestState::Ready,
+            retention: None,
         };
         let bytes = m.encode();
         let back = Manifest::decode(&bytes).unwrap();
@@ -807,6 +935,7 @@ mod tests {
             // Same story for encoding selector.
             encoding: ObjectEncoding::Rlnc,
             state: ManifestState::Ready,
+            retention: None,
         };
         let mut bytes = m.encode();
         // Pretend this is a HOLOFSM6 record: rewrite the magic AND chop
@@ -870,7 +999,9 @@ mod tests {
         let n_per_layer: u32 = 4;
         let mut m = Manifest::directory(0xBEEF, 0);
         m.placement = Placement::RendezvousZoneAware;
-        m.nodes = (0..8u8).map(|i| format!("127.0.0.1:{}", 9000 + i as u16)).collect();
+        m.nodes = (0..8u8)
+            .map(|i| format!("127.0.0.1:{}", 9000 + i as u16))
+            .collect();
         m.zones = vec![0, 0, 1, 1, 2, 2, 3, 3];
         m.channels = 1;
         m.nlayers = 1;
@@ -903,4 +1034,81 @@ mod tests {
         assert_eq!(back.encoding, ObjectEncoding::Rlnc);
     }
 
+    // --- P2.2 retention roundtrip + backward compat ---
+
+    #[test]
+    fn retention_roundtrip_none_and_expires_at() {
+        // Both `retention = None` (the pre-P2.2 default) and an
+        // explicit `ExpiresAt` policy must survive encode → decode
+        // byte-for-byte identical.
+        let mut m = Manifest::directory(0xDEADBEEF, 1_700_000_000);
+        m.retention = None;
+        let back = Manifest::decode(&m.encode()).unwrap();
+        assert_eq!(back.retention, None);
+
+        m.retention = Some(RetentionPolicy::ExpiresAt {
+            expires_at_unix: 0x1234_5678_9ABC_DEF0,
+        });
+        let back = Manifest::decode(&m.encode()).unwrap();
+        assert_eq!(
+            back.retention,
+            Some(RetentionPolicy::ExpiresAt {
+                expires_at_unix: 0x1234_5678_9ABC_DEF0
+            })
+        );
+    }
+
+    #[test]
+    fn legacy_va_manifest_decodes_with_no_retention() {
+        // A `HOLOFSMA` manifest predates the retention tail. Decoder
+        // must default `retention = None` without consuming any
+        // bytes past the state byte — otherwise a legacy catalog
+        // fails to load on upgrade, which is the P2.2 backward-
+        // compat contract.
+        let m = Manifest::directory(0xC0FFEE, 1_700_000_555);
+        let mut bytes = m.encode();
+        bytes[..8].copy_from_slice(b"HOLOFSMA");
+        // Drop the retention tail (single discriminant byte with
+        // value 0 = None; that byte is the ONE the HOLOFSMA layout
+        // doesn't carry).
+        assert_eq!(
+            *bytes.last().unwrap(),
+            0,
+            "test invariant: current encode ends with retention_kind=0"
+        );
+        bytes.pop();
+        let back = Manifest::decode(&bytes).unwrap();
+        assert_eq!(back.retention, None);
+        // And every field that HOLOFSMA does carry decodes cleanly.
+        assert_eq!(back.created_at_unix, 1_700_000_555);
+        assert_eq!(back.state, ManifestState::Ready);
+    }
+
+    #[test]
+    fn retention_unknown_discriminant_forward_compat() {
+        // A future writer that adds a new RetentionPolicy variant
+        // will emit a discriminant this older decoder doesn't know.
+        // The decoder must fall back to `None` rather than crash.
+        let m = Manifest::directory(0xF00D, 1_700_000_999);
+        let mut bytes = m.encode();
+        // Overwrite the trailing retention_kind=0 with a made-up
+        // discriminant. NO payload follows in this crafted case, but
+        // the current decoder must not try to consume any.
+        *bytes.last_mut().unwrap() = 0xEE;
+        let back = Manifest::decode(&bytes).unwrap();
+        assert_eq!(
+            back.retention, None,
+            "unknown retention discriminant must decode as None (forward compat)"
+        );
+    }
+
+    #[test]
+    fn is_expired_boundary() {
+        let p = RetentionPolicy::ExpiresAt {
+            expires_at_unix: 1000,
+        };
+        assert!(!p.is_expired(999));
+        assert!(p.is_expired(1000), "boundary is inclusive");
+        assert!(p.is_expired(10_000));
+    }
 }

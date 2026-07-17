@@ -247,6 +247,7 @@ mod tests {
             created_at_unix: 1_700_000_000 + seed as u64,
             encoding: ObjectEncoding::Rlnc,
             state: ManifestState::Ready,
+            retention: None,
         }
     }
 

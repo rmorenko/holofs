@@ -27,10 +27,7 @@ use super::util::{
 /// (optional override), `file` (binary). The destination path
 /// becomes `parent/<name or file.name>`. Redirects back to
 /// `/?p=<parent>` on success.
-pub async fn upload_form(
-    Extension(gw): Extension<Arc<Gateway>>,
-    mut form: Multipart,
-) -> Response {
+pub async fn upload_form(Extension(gw): Extension<Arc<Gateway>>, mut form: Multipart) -> Response {
     let mut parent = String::new();
     let mut name_override: Option<String> = None;
     let mut file_bytes: Option<Vec<u8>> = None;

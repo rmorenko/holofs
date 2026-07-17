@@ -66,6 +66,7 @@ fn image_manifest(object_id: u64) -> Manifest {
         created_at_unix: 0,
         encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
             state: holofs_model::manifest::ManifestState::Ready,
+            retention: None,
         }
 }
 

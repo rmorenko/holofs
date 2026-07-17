@@ -78,10 +78,7 @@ pub async fn mix_preview(
 /// builds the hybrid and ingests it into the catalog at `dest`,
 /// then 303-redirects to the catalog with `?open=<parent>` so the
 /// new entry is visible.
-pub async fn mix_save(
-    Extension(gw): Extension<Arc<Gateway>>,
-    body: Bytes,
-) -> Response {
+pub async fn mix_save(Extension(gw): Extension<Arc<Gateway>>, body: Bytes) -> Response {
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => return bad_request("non-utf8 body"),
@@ -92,9 +89,7 @@ pub async fn mix_save(
     let Some(b) = parse_urlencoded_field(body_str, "b") else {
         return bad_request("missing 'b'");
     };
-    let split: u8 = match parse_urlencoded_field(body_str, "split")
-        .and_then(|s| s.parse().ok())
-    {
+    let split: u8 = match parse_urlencoded_field(body_str, "split").and_then(|s| s.parse().ok()) {
         Some(n) => n,
         None => return bad_request("missing or invalid 'split'"),
     };
@@ -114,7 +109,10 @@ pub async fn mix_save(
     gw.embed_object_in_background(dest.clone());
     // Land the user on the tree view with the destination's parent
     // expanded — same pattern as mkdir form.
-    let parent = dest.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+    let parent = dest
+        .rsplit_once('/')
+        .map(|(p, _)| p.to_string())
+        .unwrap_or_default();
     let target = if parent.is_empty() {
         format!("/?open={}", url_encode_simple(&dest))
     } else {
@@ -132,7 +130,10 @@ pub async fn spotlight_png(
     RawQuery(raw): RawQuery,
     Extension(gw): Extension<Arc<Gateway>>,
 ) -> Response {
-    let Some(name) = raw.as_deref().and_then(|s| parse_urlencoded_field(s, "name")) else {
+    let Some(name) = raw
+        .as_deref()
+        .and_then(|s| parse_urlencoded_field(s, "name"))
+    else {
         return bad_request("missing 'name'");
     };
     let parse = |k: &str, dflt: f32| -> f32 {

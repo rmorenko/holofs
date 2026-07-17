@@ -1151,6 +1151,7 @@ mod tests {
                     created_at_unix: 0,
                     encoding: ObjectEncoding::Rlnc,
                     state: ManifestState::Ready,
+                    retention: None,
                 },
             );
         }
@@ -1206,6 +1207,7 @@ mod tests {
                 created_at_unix: 0,
                 encoding: ObjectEncoding::Rlnc,
                 state: ManifestState::Ready,
+                retention: None,
             };
             seed.apply_batch(
                 vec![("to-delete.txt".to_string(), m.encode())],

@@ -553,6 +553,151 @@ pub async fn admin_add_node(Extension(gw): Extension<Arc<Gateway>>, body: Bytes)
         .into_response()
 }
 
+/// `POST /admin/retention` — P2.2 per-object retention policy.
+///
+/// Form body:
+///
+/// - `name=<catalog path>` (required).
+/// - `expires_at_unix=<u64>` (optional) — set an absolute deletion
+///   deadline in Unix epoch seconds. `0` or unset with `clear=true`
+///   clears any existing policy. Setting a value in the past is
+///   allowed — the object becomes eligible on the next GC tick
+///   (idempotent).
+/// - `clear=true` — clear the current policy. Mutually exclusive
+///   with `expires_at_unix`.
+///
+/// Response: JSON `{"name":"...", "policy":{"expires_at_unix":<u64>}}`
+/// (or `"policy":null` after a clear).
+///
+/// Admin-token gated. The retention GC daemon runs on the gateway
+/// itself; there's no per-request expiry check here.
+pub async fn admin_retention(Extension(gw): Extension<Arc<Gateway>>, body: Bytes) -> Response {
+    let body_str = match std::str::from_utf8(&body) {
+        Ok(s) => s,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/plain")],
+                "non-utf8 body",
+            )
+                .into_response();
+        }
+    };
+    let name = parse_urlencoded_field(body_str, "name").unwrap_or_default();
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(header::CONTENT_TYPE, "text/plain")],
+            "missing field name",
+        )
+            .into_response();
+    }
+    let expires_at_raw = parse_urlencoded_field(body_str, "expires_at_unix");
+    let clear = matches!(
+        parse_urlencoded_field(body_str, "clear").as_deref(),
+        Some("true") | Some("1") | Some("yes")
+    );
+
+    // Validate mutual exclusion + parse. Reject rather than silently
+    // clear-when-both — an ambiguous request usually means an
+    // operator scripting bug.
+    let policy: Option<holofs_model::manifest::RetentionPolicy> =
+        match (expires_at_raw.as_deref(), clear) {
+            (Some(_), true) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    [(header::CONTENT_TYPE, "text/plain")],
+                    "cannot set expires_at_unix and clear=true simultaneously",
+                )
+                    .into_response();
+            }
+            (Some(raw), false) => match raw.parse::<u64>() {
+                Ok(0) => None, // convenience: treat 0 as clear
+                Ok(v) => {
+                    Some(holofs_model::manifest::RetentionPolicy::ExpiresAt { expires_at_unix: v })
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        [(header::CONTENT_TYPE, "text/plain")],
+                        format!("invalid expires_at_unix: {e}"),
+                    )
+                        .into_response();
+                }
+            },
+            (None, true) => None,
+            (None, false) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    [(header::CONTENT_TYPE, "text/plain")],
+                    "provide expires_at_unix=<u64> or clear=true",
+                )
+                    .into_response();
+            }
+        };
+
+    match gw.set_retention(&name, policy).await {
+        Ok(_) => {
+            let policy_json = match policy {
+                None => "null".to_string(),
+                Some(holofs_model::manifest::RetentionPolicy::ExpiresAt { expires_at_unix }) => {
+                    format!("{{\"expires_at_unix\":{expires_at_unix}}}")
+                }
+            };
+            log_event(
+                &AuditEvent::now("retention_set", format!("name={name}"), "ok")
+                    .with_details(format!("{{\"policy\":{policy_json}}}")),
+            );
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                format!(
+                    "{{\"name\":\"{}\",\"policy\":{policy_json}}}",
+                    json_escape(&name)
+                ),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            log_event(&AuditEvent::now(
+                "retention_set",
+                format!("name={name}"),
+                "error",
+            ));
+            error_to_response(e)
+        }
+    }
+}
+
+/// `GET /admin/retention/*path` — read the current retention policy
+/// for `path`. Response: JSON `{"name":"...", "policy": {…} | null}`.
+/// Admin-token gated for symmetry with the setter.
+pub async fn admin_retention_get(
+    Extension(gw): Extension<Arc<Gateway>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    match gw.get_retention(&name).await {
+        Ok(policy) => {
+            let policy_json = match policy {
+                None => "null".to_string(),
+                Some(holofs_model::manifest::RetentionPolicy::ExpiresAt { expires_at_unix }) => {
+                    format!("{{\"expires_at_unix\":{expires_at_unix}}}")
+                }
+            };
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                format!(
+                    "{{\"name\":\"{}\",\"policy\":{policy_json}}}",
+                    json_escape(&name)
+                ),
+            )
+                .into_response()
+        }
+        Err(e) => error_to_response(e),
+    }
+}
+
 /// `POST /admin/drain_node` — flip `admin_kills[idx] = true` and
 /// rebalance every catalog entry so shards HRW-assigned to `idx`
 /// land on live neighbours. Optional `purge=true` sends

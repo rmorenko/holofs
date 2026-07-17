@@ -84,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         created_at_unix: 0,
         encoding: holofs_model::manifest::ObjectEncoding::Rlnc,
             state: ManifestState::Ready,
+            retention: None,
         };
 
     // === Prepare an image: argv → assets/sample.png → synthetic ===========

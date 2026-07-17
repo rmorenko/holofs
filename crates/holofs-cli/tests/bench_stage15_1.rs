@@ -102,6 +102,7 @@ fn build_manifest(nodes: Vec<String>) -> Manifest {
         created_at_unix: 0,
         encoding: ObjectEncoding::Rlnc,
             state: ManifestState::Ready,
+            retention: None,
     }
 }
 

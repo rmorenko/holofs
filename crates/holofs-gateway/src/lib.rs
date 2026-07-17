@@ -18,6 +18,7 @@
 pub mod capacity;
 pub mod catalog_store;
 mod decode;
+pub mod retention;
 mod diff;
 mod dirops;
 mod error;

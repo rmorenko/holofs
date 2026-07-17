@@ -191,11 +191,10 @@ pub async fn bootstrap_cluster(
         let identity_path = std::env::var_os("HOLOFS_GATEWAY_IDENTITY_KEY")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| config.storage.join("gateway_identity.key"));
-        let gw_identity =
-            holofs_storage::identity::NodeIdentity::load_or_create(&identity_path)
-                .map_err(|e| -> Box<dyn std::error::Error> {
-                    format!("gateway identity {}: {e}", identity_path.display()).into()
-                })?;
+        let gw_identity = holofs_storage::identity::NodeIdentity::load_or_create(&identity_path)
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!("gateway identity {}: {e}", identity_path.display()).into()
+            })?;
         info!(
             gateway_identity = %identity_path.display(),
             gateway_pubkey = %hex(&gw_identity.pubkey()),
@@ -218,7 +217,9 @@ pub async fn bootstrap_cluster(
         let n = addrs.len();
         (addrs, zs, n)
     } else {
-        let base_port: u16 = crate::runtime_config::RuntimeConfig::get().embed_cluster.base_port;
+        let base_port: u16 = crate::runtime_config::RuntimeConfig::get()
+            .embed_cluster
+            .base_port;
         info!(
             mode = "embedded",
             storage = %config.storage.display(),
@@ -231,21 +232,20 @@ pub async fn bootstrap_cluster(
         for i in 0..N_NODES {
             let dir = config.storage.join(format!("node_{i:02}"));
             let port = base_port + i as u16;
-            let (bound, _store, handle) =
-                spawn_node_persistent_with_tls(
-                    (Ipv4Addr::LOCALHOST, port).into(),
-                    &dir,
-                    node_server_cfg.clone(),
-                )
-                    .await
-                    .map_err(|e| -> Box<dyn std::error::Error> {
-                        format!(
-                            "failed to bind port {port} for node_{i:02}: {e}\n\
+            let (bound, _store, handle) = spawn_node_persistent_with_tls(
+                (Ipv4Addr::LOCALHOST, port).into(),
+                &dir,
+                node_server_cfg.clone(),
+            )
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!(
+                    "failed to bind port {port} for node_{i:02}: {e}\n\
                              hint: another holofs binary already running? Stop it or set \
                              HOLOFS_EMBED_BASE_PORT=N to change the base."
-                        )
-                        .into()
-                    })?;
+                )
+                .into()
+            })?;
             addrs.push(bound.to_string());
             node_task_handles.push(handle);
         }
@@ -254,9 +254,7 @@ pub async fn bootstrap_cluster(
         let zs: Vec<u8> = (0..N_NODES).map(|i| (i / zone_size) as u8).collect();
         info!(
             n_nodes = N_NODES,
-            n_zones,
-            zone_size,
-            "embedded cluster ready"
+            n_zones, zone_size, "embedded cluster ready"
         );
         (addrs, zs, N_NODES)
     };
@@ -305,8 +303,7 @@ pub async fn bootstrap_cluster(
         );
     }
     let catalog_store = std::sync::Arc::new(
-        CatalogStore::open(&catalog_dir)
-            .map_err(|e| anyhow::anyhow!("catalog store open: {e}"))?,
+        CatalogStore::open(&catalog_dir).map_err(|e| anyhow::anyhow!("catalog store open: {e}"))?,
     );
     let mut directory = Directory::new();
     let loaded = catalog_store
@@ -387,8 +384,7 @@ pub async fn bootstrap_cluster(
 
     // rewired cluster boots successfully.
     let reputation_path = config.storage.join("reputation.bin");
-    let (reputation_state, rep_loaded) =
-        Reputation::load_or_new(&reputation_path, n_nodes, 1.0);
+    let (reputation_state, rep_loaded) = Reputation::load_or_new(&reputation_path, n_nodes, 1.0);
     if rep_loaded {
         info!(
             path = %reputation_path.display(),
@@ -437,7 +433,10 @@ pub async fn bootstrap_cluster(
     } else {
         warn!("Arc<Gateway> refcount already > 1 after construction; backpressure caps stayed at defaults");
     }
-    info!(medium_cap, long_cap, encode_cap, encode_queue_max, "N3 backpressure caps applied");
+    info!(
+        medium_cap,
+        long_cap, encode_cap, encode_queue_max, "N3 backpressure caps applied"
+    );
     // wire the CLIP semantic-search index when the operator
     // opted in. We don't pre-load the model here — that happens lazily
     // on first PUT / first search to keep boot cheap.
@@ -462,7 +461,10 @@ pub async fn bootstrap_cluster(
             .unwrap_or(0);
         if keep_last > 0 {
             gateway.set_versions_keep_last(keep_last).await;
-            info!(?versions_root, keep_last, "version history enabled (retention capped)");
+            info!(
+                ?versions_root,
+                keep_last, "version history enabled (retention capped)"
+            );
         } else {
             info!(?versions_root, "version history enabled");
         }
@@ -485,7 +487,11 @@ pub async fn bootstrap_cluster(
             None => {
                 let a = synth(w, h);
                 (
-                    encode_png(&[a[0].clone(), a[1].clone(), a[2].clone()], w as u32, h as u32),
+                    encode_png(
+                        &[a[0].clone(), a[1].clone(), a[2].clone()],
+                        w as u32,
+                        h as u32,
+                    ),
                     "synthetic mandala",
                 )
             }
@@ -500,7 +506,11 @@ pub async fn bootstrap_cluster(
 
         let mandala_bytes = {
             let a = synth(w, h);
-            encode_png(&[a[0].clone(), a[1].clone(), a[2].clone()], w as u32, h as u32)
+            encode_png(
+                &[a[0].clone(), a[1].clone(), a[2].clone()],
+                w as u32,
+                h as u32,
+            )
         };
         info!(source = "synthetic mandala", "seeding mandala.png");
         gateway
@@ -539,21 +549,16 @@ pub async fn bootstrap_cluster(
     let mon_gf = Arc::clone(&gf);
     let mon_rep = Arc::clone(&reputation);
     let mon_shutdown = shutdown.clone();
-    let monitor = supervised_spawn(
-        "monitor",
-        shutdown.clone(),
-        restarts_monitor,
-        move || {
-            let gf = Arc::clone(&mon_gf);
-            let cat = Arc::clone(&mon_catalog);
-            let rep = Arc::clone(&mon_rep);
-            let sd = mon_shutdown.clone();
-            let cfg = monitor_cfg.clone();
-            async move {
-                run_periodic(gf, cat, cfg, Some(rep), log_event, sd).await;
-            }
-        },
-    );
+    let monitor = supervised_spawn("monitor", shutdown.clone(), restarts_monitor, move || {
+        let gf = Arc::clone(&mon_gf);
+        let cat = Arc::clone(&mon_catalog);
+        let rep = Arc::clone(&mon_rep);
+        let sd = mon_shutdown.clone();
+        let cfg = monitor_cfg.clone();
+        async move {
+            run_periodic(gf, cat, cfg, Some(rep), log_event, sd).await;
+        }
+    });
 
     let audit_interval: u64 = crate::runtime_config::RuntimeConfig::get()
         .reliability
@@ -571,20 +576,15 @@ pub async fn bootstrap_cluster(
     let aud_catalog = Arc::clone(&catalog);
     let aud_rep = Arc::clone(&reputation);
     let aud_shutdown = shutdown.clone();
-    let auditor = supervised_spawn(
-        "auditor",
-        shutdown.clone(),
-        restarts_auditor,
-        move || {
-            let cat = Arc::clone(&aud_catalog);
-            let rep = Arc::clone(&aud_rep);
-            let sd = aud_shutdown.clone();
-            let cfg = audit_cfg.clone();
-            async move {
-                audit::run_periodic(cat, rep, cfg, log_audit, sd).await;
-            }
-        },
-    );
+    let auditor = supervised_spawn("auditor", shutdown.clone(), restarts_auditor, move || {
+        let cat = Arc::clone(&aud_catalog);
+        let rep = Arc::clone(&aud_rep);
+        let sd = aud_shutdown.clone();
+        let cfg = audit_cfg.clone();
+        async move {
+            audit::run_periodic(cat, rep, cfg, log_audit, sd).await;
+        }
+    });
 
     // N5: throttled reputation persistence. Snapshot every
     // `HOLOFS_REPUTATION_PERSIST_INTERVAL` seconds (default 30s ==
@@ -665,37 +665,48 @@ pub async fn bootstrap_cluster(
             interval_secs = scrub_interval_secs,
             "background shard scrub configured"
         );
-        Some(supervised_spawn("scrub", shutdown.clone(), restarts_scrub, move || {
-            let gw = Arc::clone(&scrub_gw);
-            let sd = scrub_shutdown.clone();
-            async move {
-                // First tick fires after the interval so we don't hammer
-                // the cluster at boot before audit has even started.
-                let mut ticker = tokio::time::interval(interval);
-                ticker.tick().await; // immediate, but the next is interval-from-now
-                loop {
-                    tokio::select! {
-                        _ = sd.cancelled() => return,
-                        _ = ticker.tick() => {}
-                    }
-                    let report = gw.scrub_tick().await;
-                    if report.objects_repaired > 0 || report.objects_repair_failed > 0 {
-                        info!(
-                            scanned = report.objects_scanned,
-                            repaired = report.objects_repaired,
-                            failed = report.objects_repair_failed,
-                            "scrub tick"
-                        );
+        Some(supervised_spawn(
+            "scrub",
+            shutdown.clone(),
+            restarts_scrub,
+            move || {
+                let gw = Arc::clone(&scrub_gw);
+                let sd = scrub_shutdown.clone();
+                async move {
+                    // First tick fires after the interval so we don't hammer
+                    // the cluster at boot before audit has even started.
+                    let mut ticker = tokio::time::interval(interval);
+                    ticker.tick().await; // immediate, but the next is interval-from-now
+                    loop {
+                        tokio::select! {
+                            _ = sd.cancelled() => return,
+                            _ = ticker.tick() => {}
+                        }
+                        let report = gw.scrub_tick().await;
+                        if report.objects_repaired > 0 || report.objects_repair_failed > 0 {
+                            info!(
+                                scanned = report.objects_scanned,
+                                repaired = report.objects_repaired,
+                                failed = report.objects_repair_failed,
+                                "scrub tick"
+                            );
+                        }
                     }
                 }
-            }
-        }))
+            },
+        ))
     } else {
         info!("background shard scrub disabled (HOLOFS_SCRUB_INTERVAL=0)");
         None
     };
 
-    info!(width = w, height = h, k = K, layers = NLAYERS, "frame parameters");
+    info!(
+        width = w,
+        height = h,
+        k = K,
+        layers = NLAYERS,
+        "frame parameters"
+    );
 
     // P1.4b — spawn the capacity poller (refreshes gateway.capacity_map
     // every ~60 s) and, when enabled, the auto-rebalancer daemon
@@ -738,15 +749,31 @@ pub async fn bootstrap_cluster(
     ) {
         info!(
             rebalance_interval_secs,
-            rebalance_trigger_pct,
-            rebalance_cold_ceiling_pct,
-            "auto-rebalance daemon started"
+            rebalance_trigger_pct, rebalance_cold_ceiling_pct, "auto-rebalance daemon started"
         );
     } else {
         info!(
             "auto-rebalance daemon disabled \
              (HOLOFS_REBALANCE_INTERVAL_SECS=0 or HOLOFS_REBALANCE_TRIGGER_PCT<=0)"
         );
+    }
+
+    // P2.2 — retention GC daemon. Ticks every N seconds, walks the
+    // catalog, deletes every non-directory object whose retention
+    // policy tripped by wall-clock. Env
+    // `HOLOFS_RETENTION_GC_INTERVAL_SECS=0` disables entirely.
+    let retention_interval_secs: u64 = std::env::var("HOLOFS_RETENTION_GC_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(holofs_gateway::retention::DEFAULT_RETENTION_GC_INTERVAL_SECS);
+    if let Some(_h) = holofs_gateway::retention::spawn_retention_gc(
+        Arc::clone(&gateway),
+        Arc::clone(&catalog),
+        retention_interval_secs,
+    ) {
+        info!(retention_interval_secs, "retention GC daemon started");
+    } else {
+        info!("retention GC daemon disabled (HOLOFS_RETENTION_GC_INTERVAL_SECS=0)");
     }
 
     // Install the global client TLS config so every gateway RPC honours it.
@@ -793,43 +820,43 @@ fn build_tls(
     if !opts.enabled {
         return Ok((None, None, None));
     }
-    let (server_mat, client_mat, signer) =
-        match (&opts.cert_path, &opts.key_path, &opts.ca_path) {
-            (Some(c), Some(k), Some(ca)) => {
-                let mat = TlsMaterial::load(c, k, ca, None)?;
-                info!(
-                    cert = %c.display(),
-                    ca = %ca.display(),
-                    mtls = opts.mtls,
-                    "TLS: loaded operator-supplied PEM material"
-                );
-                (mat.clone(), mat, None)
-            }
-            (None, None, None) => {
-                let (server_mat, signer) = TlsMaterial::self_signed(
-                    "holofs-node",
-                    &["127.0.0.1".to_string(), "localhost".to_string()],
-                )?;
-                let client_mat = if opts.mtls {
-                    let gw_leaf =
-                        signer.issue_leaf("holofs-gateway", &["127.0.0.1".to_string()])?;
-                    TlsMaterial {
-                        ca: server_mat.ca.clone(),
-                        leaf: gw_leaf,
-                    }
-                } else {
-                    server_mat.clone()
-                };
-                info!(mtls = opts.mtls, "TLS: generated self-signed CA + leaves (embedded mode)");
-                (server_mat, client_mat, Some(signer))
-            }
-            _ => {
-                return Err(
-                    "partial TLS config: provide all of --tls-cert, --tls-key, --tls-ca-cert"
-                        .into(),
-                )
-            }
-        };
+    let (server_mat, client_mat, signer) = match (&opts.cert_path, &opts.key_path, &opts.ca_path) {
+        (Some(c), Some(k), Some(ca)) => {
+            let mat = TlsMaterial::load(c, k, ca, None)?;
+            info!(
+                cert = %c.display(),
+                ca = %ca.display(),
+                mtls = opts.mtls,
+                "TLS: loaded operator-supplied PEM material"
+            );
+            (mat.clone(), mat, None)
+        }
+        (None, None, None) => {
+            let (server_mat, signer) = TlsMaterial::self_signed(
+                "holofs-node",
+                &["127.0.0.1".to_string(), "localhost".to_string()],
+            )?;
+            let client_mat = if opts.mtls {
+                let gw_leaf = signer.issue_leaf("holofs-gateway", &["127.0.0.1".to_string()])?;
+                TlsMaterial {
+                    ca: server_mat.ca.clone(),
+                    leaf: gw_leaf,
+                }
+            } else {
+                server_mat.clone()
+            };
+            info!(
+                mtls = opts.mtls,
+                "TLS: generated self-signed CA + leaves (embedded mode)"
+            );
+            (server_mat, client_mat, Some(signer))
+        }
+        _ => {
+            return Err(
+                "partial TLS config: provide all of --tls-cert, --tls-key, --tls-ca-cert".into(),
+            )
+        }
+    };
     let server_cfg = server_mat
         .server_config(opts.mtls)
         .map_err(|e| -> Box<dyn std::error::Error> { format!("server config: {e}").into() })?;

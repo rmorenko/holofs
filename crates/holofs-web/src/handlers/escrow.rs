@@ -29,10 +29,7 @@ use super::util::{bad_request, bad_request_owned, error_to_response};
 
 /// `POST /escrow/split` — multipart `file` + `k` + `n` → in-memory shares.
 /// Renders an HTML result page listing each `.holoshare` download link.
-pub async fn escrow_split(
-    Extension(gw): Extension<Arc<Gateway>>,
-    mut form: Multipart,
-) -> Response {
+pub async fn escrow_split(Extension(gw): Extension<Arc<Gateway>>, mut form: Multipart) -> Response {
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut filename = String::from("secret.bin");
     let mut k: usize = 3;
@@ -208,7 +205,11 @@ document.documentElement.dataset.theme=t;}}catch(e){{}}}})();</script>\
 }
 
 fn escrow_share_response(share: EscrowShareBytes) -> Response {
-    let EscrowShareBytes { idx, total_n, bytes } = share;
+    let EscrowShareBytes {
+        idx,
+        total_n,
+        bytes,
+    } = share;
     let filename = format!("share_{idx:02}_of_{total_n}.holoshare");
     Response::builder()
         .status(StatusCode::OK)
