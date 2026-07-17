@@ -600,6 +600,9 @@ impl Gateway {
     /// whitelist to bring the topology into agreement. This is why
     /// the endpoint stays admin-gated and returns a diagnostic
     /// message documenting the follow-up step.
+    /// P1.4 outcome from [`Gateway::drain_node`]. Kept a plain struct
+    /// so the HTTP handler can format it as JSON without pulling
+    /// serde into `holofs-gateway`.
     pub async fn rebalance_add_node(
         &self,
         new_addr: String,
@@ -620,6 +623,126 @@ impl Gateway {
             holofs_core::K,
         )
         .await
+    }
+
+    /// P1.4: admin-triggered drain. Removes `drain_idx` from the
+    /// effective live set (via `admin_kills[drain_idx] = true`) and
+    /// runs [`holofs_cluster::rebalance::drain_node`] against every
+    /// catalog manifest so `place_shard` for existing objects starts
+    /// sending its HRW share to a live neighbour. Same
+    /// snapshot+CAS pattern as [`Self::rebalance_add_node`].
+    ///
+    /// If `purge` is `true`, sends `Request::Wipe` to the drained
+    /// node after a successful sweep — reclaims the disk before the
+    /// operator physically decommissions the host. Skipped if any
+    /// per-object drain failed (safer to leave the shards in place;
+    /// a partial drain + full wipe could lose data).
+    ///
+    /// **Limitation:** flips only the runtime `admin_kills` flag —
+    /// `ClusterInfo.node_addrs` still lists the drained node, so a
+    /// gateway restart brings it back into consideration unless the
+    /// operator ALSO signs a new whitelist without the node and
+    /// hot-reloads. Document alongside the drain call in `holofs-admin`.
+    pub async fn drain_node(
+        &self,
+        drain_idx: usize,
+        purge: bool,
+    ) -> DrainOutcome {
+        use holofs_core::rng::Rng;
+
+        // Guard: idx out of range for the CURRENT ClusterInfo.
+        if drain_idx >= self.cluster.node_addrs.len() {
+            return DrainOutcome {
+                admin_kill_set: false,
+                reports: Vec::new(),
+                purged: false,
+                error: Some(format!(
+                    "drain_idx {drain_idx} outside cluster.node_addrs (len={})",
+                    self.cluster.node_addrs.len()
+                )),
+            };
+        }
+
+        // 1. Flip admin_kill BEFORE the sweep so any concurrent PUT
+        //    that lands mid-drain routes around drain_idx.
+        {
+            let mut kills = self.admin_kills.lock().await;
+            if drain_idx >= kills.len() {
+                return DrainOutcome {
+                    admin_kill_set: false,
+                    reports: Vec::new(),
+                    purged: false,
+                    error: Some(format!(
+                        "drain_idx {drain_idx} outside admin_kills (len={})",
+                        kills.len()
+                    )),
+                };
+            }
+            kills[drain_idx] = true;
+        }
+
+        // 2. Snapshot live_before under the just-flipped state —
+        //    NOTE `effective_live` already filters admin_kills, so
+        //    live_before must re-include drain_idx for the
+        //    cluster-side drain_node to detect "which shards land
+        //    HERE right now".
+        let mut live_before: Vec<usize> = self
+            .live
+            .iter()
+            .copied()
+            .collect();
+        if !live_before.contains(&drain_idx) {
+            live_before.push(drain_idx);
+        }
+        live_before.sort();
+        live_before.dedup();
+
+        // Deterministic RNG seed from drain_idx + node addr so a
+        // repeat drain against the same target is reproducible.
+        let seed_addr = &self.cluster.node_addrs[drain_idx];
+        let seed = seed_addr
+            .bytes()
+            .fold(drain_idx as u64, |acc, b| acc.wrapping_mul(31).wrapping_add(u64::from(b)));
+        let mut rng = Rng::new(seed);
+
+        let reports = holofs_cluster::rebalance::drain_node(
+            &self.gf,
+            &mut rng,
+            Arc::clone(&self.catalog),
+            drain_idx,
+            live_before,
+            holofs_core::K,
+        )
+        .await;
+
+        // 3. Purge — only if every per-object drain succeeded. A
+        //    partial drain followed by a full wipe on the drained
+        //    node would strand shards that hadn't yet been migrated
+        //    (their fresh copies never landed on live neighbours).
+        let any_failure = reports.iter().any(|r| r.result.is_err());
+        let purged = if purge && !any_failure {
+            let drain_addr = self.cluster.node_addrs[drain_idx].clone();
+            match holofs_client::wipe_node(&drain_addr).await {
+                Ok(_n) => true,
+                Err(e) => {
+                    tracing::error!(
+                        addr = %drain_addr,
+                        error = %e,
+                        "drain_node: post-drain Wipe failed"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        DrainOutcome {
+            admin_kill_set: true,
+            reports,
+            purged,
+            error: None,
+        }
     }
 
     /// Owned handles to the per-bucket timeout counters, in
@@ -896,6 +1019,27 @@ impl Gateway {
         let mut sc = self.shard_cache.lock().await;
         sc.retain(|(n, _, _), _| n != name);
     }
+}
+
+/// Outcome of [`Gateway::drain_node`]. Kept minimal so the HTTP
+/// handler can inspect + format as JSON.
+#[derive(Debug)]
+pub struct DrainOutcome {
+    /// `true` if the pre-drain `admin_kills[drain_idx] = true` flip
+    /// took effect. `false` if the guard rejected the drain (invalid
+    /// idx, out-of-range).
+    pub admin_kill_set: bool,
+    /// Per-object rebalance reports, one per catalog entry (skipped
+    /// directories carry `Ok(RepairStats::default())`).
+    pub reports: Vec<holofs_cluster::rebalance::DrainNodeReport>,
+    /// `true` if the drained node's shards were wiped after a
+    /// successful sweep. `false` if `purge = false`, if any
+    /// per-object drain failed, or if the wipe RPC itself errored.
+    pub purged: bool,
+    /// `Some(reason)` iff the drain aborted before the sweep started
+    /// (bad idx, etc.). `None` on a normal drain — inspect
+    /// `reports` for per-object outcomes.
+    pub error: Option<String>,
 }
 
 #[cfg(test)]

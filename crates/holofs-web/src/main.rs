@@ -186,6 +186,7 @@ async fn main() {
     let admin_short_routes: Router<LeptosOptions> = Router::new()
         .route("/admin/node", post(handlers::toggle_node))
         .route("/admin/add_node", post(handlers::admin_add_node))
+        .route("/admin/drain_node", post(handlers::admin_drain_node))
         .route("/admin/catalog_names", get(handlers::admin_catalog_names))
         .route_layer(from_fn(move |req, next| {
             run_with_deadline(SHORT, to_short.clone(), req, next)

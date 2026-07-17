@@ -51,6 +51,7 @@ fn main() {
         "import-all" => cmd_import_all(&args[1..]),
         "snapshot" => cmd_snapshot(&args[1..]),
         "snapshot-restore" => cmd_snapshot_restore(&args[1..]),
+        "drain-node" => cmd_drain_node(&args[1..]),
         "--help" | "-h" | "help" => {
             print_usage();
         }
@@ -91,7 +92,17 @@ snapshot / restore (P0.2 — cluster-level, offline per host):\n\
                                         pack a node/gateway storage dir into an off-site tar\n\
   snapshot-restore --input FILE.tar --storage DIR [--force]\n\
                                         unpack a snapshot into a fresh storage dir\n\
-                                        (--force allows non-empty target; caller's problem)"
+                                        (--force allows non-empty target; caller's problem)\n\
+\n\
+cluster elasticity (P1.4 — drain + decommission):\n\
+  drain-node --gateway URL --admin-token TOK --idx N [--purge]\n\
+                                        flip admin_kills[N]=true + rebalance every catalog\n\
+                                        entry so shards HRW-assigned to N land on live\n\
+                                        neighbours. --purge additionally wipes shards from\n\
+                                        the drained node after a successful sweep.\n\
+                                        Follow-up: re-sign whitelist WITHOUT the drained\n\
+                                        node + hot-reload; then physically stop the node.\n\
+                                        See docs/operations.md §10.2."
     );
 }
 
@@ -675,6 +686,65 @@ pub(crate) fn restore_tar_to_dir(
         .unpack(storage)
         .map_err(|e| format!("unpack {}: {e}", storage.display()))?;
     Ok(())
+}
+
+// === cluster elasticity (P1.4) ====================================
+
+fn cmd_drain_node(args: &[String]) {
+    let mut gateway: Option<String> = None;
+    let mut admin_token: Option<String> = None;
+    let mut idx: Option<usize> = None;
+    let mut purge = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--gateway" => {
+                gateway = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--admin-token" => {
+                admin_token = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--idx" => {
+                idx = Some(args[i + 1].parse().unwrap_or_else(|e| {
+                    die(format!("--idx: {e}"));
+                }));
+                i += 2;
+            }
+            "--purge" => {
+                purge = true;
+                i += 1;
+            }
+            other => die(format!("unexpected flag: {other}")),
+        }
+    }
+    let gateway = gateway.unwrap_or_else(|| flag_required("--gateway"));
+    let admin_token = admin_token.unwrap_or_else(|| flag_required("--admin-token"));
+    let idx = idx.unwrap_or_else(|| {
+        eprintln!("--idx is required");
+        std::process::exit(2);
+    });
+
+    let url = format!("{}/admin/drain_node", gateway.trim_end_matches('/'));
+    let body = format!("idx={}&purge={}", idx, purge);
+    let client = http_client();
+    let resp = client
+        .post(&url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {admin_token}"))
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(body)
+        .send()
+        .unwrap_or_else(|e| die(format!("POST {url}: {e}")));
+    let status = resp.status();
+    let text = resp.text().unwrap_or_default();
+    if !status.is_success() {
+        die(format!("POST {url}: HTTP {} — {text}", status.as_u16()));
+    }
+    println!("{text}");
 }
 
 // === helpers =======================================================

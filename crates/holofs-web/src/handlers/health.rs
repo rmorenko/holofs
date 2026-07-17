@@ -420,6 +420,71 @@ pub async fn admin_add_node(
         .into_response()
 }
 
+/// `POST /admin/drain_node` — flip `admin_kills[idx] = true` and
+/// rebalance every catalog entry so shards HRW-assigned to `idx`
+/// land on live neighbours. Optional `purge=true` sends
+/// `Request::PurgeByHash` for every hash on the drained node after
+/// a successful sweep, reclaiming disk before physical
+/// decommission.
+///
+/// Form body: `idx=N` (required) `purge=true|false` (default false).
+/// Response: JSON `{ idx, drained_objects, failed_objects,
+///                   purged, error? }`.
+///
+/// Admin-token gated. Operators typically run this on a maintenance
+/// window and follow with a whitelist re-sign that omits the drained
+/// node, then hot-reload — see operations.md §10.
+pub async fn admin_drain_node(
+    Extension(gw): Extension<Arc<Gateway>>,
+    body: Bytes,
+) -> Response {
+    let body_str = match std::str::from_utf8(&body) {
+        Ok(s) => s,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/plain")],
+                "non-utf8 body",
+            )
+                .into_response();
+        }
+    };
+    let idx_str = parse_urlencoded_field(body_str, "idx").unwrap_or_default();
+    let purge_str = parse_urlencoded_field(body_str, "purge").unwrap_or_default();
+    let idx: usize = match idx_str.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/plain")],
+                "missing or invalid field idx",
+            )
+                .into_response();
+        }
+    };
+    let purge = matches!(purge_str.as_str(), "true" | "1" | "yes");
+
+    let outcome = gw.drain_node(idx, purge).await;
+    let ok = outcome.reports.iter().filter(|r| r.result.is_ok()).count();
+    let failed = outcome.reports.iter().filter(|r| r.result.is_err()).count();
+    let error_frag = match &outcome.error {
+        Some(e) => format!(",\"error\":\"{}\"", json_escape(e)),
+        None => String::new(),
+    };
+    let body = format!(
+        "{{\"idx\":{},\"admin_kill_set\":{},\"drained_objects\":{},\
+         \"failed_objects\":{},\"purged\":{},\
+         \"warning\":\"admin_kills is a runtime-only flag — restart the gateway with a whitelist that omits the drained node to make removal permanent\"{}}}",
+        idx, outcome.admin_kill_set, ok, failed, outcome.purged, error_frag,
+    );
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
 /// `GET /admin/catalog_names` — flat enumeration of every
 /// non-directory catalog entry, JSON-encoded. Consumed by
 /// `holofs-admin export-all` to drive per-object HTTP GETs against

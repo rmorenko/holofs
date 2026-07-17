@@ -929,25 +929,63 @@ gradually migrate shards as they come up.
 
 ### 10.2. Remove (decommission) a node
 
-There is no dedicated `drain` command — decommissioning is a whitelist
-edit + a node shutdown, with the cluster's repair loop backfilling the
-lost shards.
+Post-P1.4 flow — three explicit phases, each verifiable independently.
+The pre-P1.4 "just re-sign the whitelist and let scrub catch up" path
+also still works but leaves the cluster in reduced-margin state until
+the reactive repair sweep finishes; `drain-node` runs the repair
+proactively and lets the operator confirm zero unrepaired objects
+BEFORE the whitelist rotation.
 
 ```sh
-# 1. Re-sign whitelist without the departing node.
+# Phase 1 — DRAIN. Gateway marks the node as "logically dead"
+# (admin_kills[idx] = true so new PUTs bypass it), then rebalances
+# every catalog entry so the shards HRW-currently on this node are
+# re-emitted onto live neighbours. --purge additionally wipes the
+# drained node's disk after a successful sweep. Idempotent.
+holofs-admin drain-node \
+  --gateway http://gateway.internal:8787 \
+  --admin-token "$HOLOFS_ADMIN_TOKEN" \
+  --idx 10 \
+  --purge
+
+# Sample response:
+# {"idx":10,"admin_kill_set":true,"drained_objects":12345,
+#  "failed_objects":0,"purged":true,"warning":"admin_kills is a
+#  runtime-only flag — restart the gateway with a whitelist that omits
+#  the drained node to make removal permanent"}
+
+# If failed_objects > 0, investigate before proceeding. A partial
+# drain with --purge would strand un-rebalanced shards; the CLI
+# refuses to wipe when any object fails.
+
+# Phase 2 — WHITELIST rotation. Now that the shards are already on
+# live neighbours, sign a new whitelist WITHOUT the drained node.
 holofs-admin sign-whitelist \
   --admin admin.key \
   --node 10.0.1.11:9100=NODE1_PUBKEY_HEX:0 \
   ... \
-  --out whitelist.holofs
+  --out cluster.signed
 
-# 2. Distribute + SIGHUP every remaining node + gateway.
-# 3. Watch `holofs_repair_completed_total` climb as the scrub relocates
-#    the departed node's shards onto the survivors.
-# 4. Once /api/stats shows the objects fully repaired, shut down the
-#    old daemon.
+# Phase 3 — DISTRIBUTE + shut the daemon.
+# 3a. Restart the gateway with the new whitelist (hot-reload not yet
+#     wired for cluster topology — see roadmap in operations §5.9).
+# 3b. Physically stop the drained node's daemon.
 systemctl stop holofs-node@10
 ```
+
+**When to use each path.** `drain-node` is proactive — a maintenance-
+window operation that hands you a confirmable outcome before you
+change the whitelist. The pre-P1.4 "just re-sign" path is reactive —
+if you're comfortable letting scrub take hours on a large catalog and
+running in reduced-margin state meanwhile, it works. Recommended
+production path is drain-then-rotate.
+
+**Note on `admin_kills`.** The flag is process-local to the gateway
+that received the drain call. A gateway restart resets `admin_kills`
+to all-false; without the whitelist rotation (Phase 2) the drained
+node re-enters the effective live set on next boot. This is why
+Phase 2 is mandatory — Phase 1 is a runtime shortcut, Phase 3 is a
+persistent config change.
 
 ### 10.3. Replace a failed disk
 

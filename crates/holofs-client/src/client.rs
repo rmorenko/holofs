@@ -1631,6 +1631,172 @@ pub async fn repair_node(
     Ok(stats)
 }
 
+/// Drain-side counterpart to [`repair_node`] (P1.4). Regenerate every
+/// shard that HRW currently places on `drain_idx` onto the node HRW
+/// picks WITHOUT `drain_idx` in the live set, so a subsequent
+/// physical loss of `drain_idx` leaves the cluster decodable.
+///
+/// - `live_before_drain`: full live set INCLUDING `drain_idx`. Used to
+///   detect "which shard indices currently land on drain_idx" via
+///   `manifest.place_shard(..., live_before_drain) == drain_idx`.
+/// - `live_after_drain`: live set with `drain_idx` filtered out. Used
+///   both for donor selection (never fetch from the drained node) and
+///   for the new-placement target of every migrating shard.
+/// - `d`: donor count per (channel, layer). `d >= k` guarantees
+///   decodability of the fresh combinations.
+///
+/// Mutation: adds new shard hashes to `manifest.shard_hashes`, updates
+/// `manifest.merkle_root`. Old shards on `drain_idx` stay in the hash
+/// list but are unreachable after the caller flips
+/// `admin_kills[drain_idx] = true` and eventually purges the node.
+pub async fn drain_node_from_manifest(
+    gf: &Gf,
+    rng: &mut Rng,
+    manifest: &mut Manifest,
+    drain_idx: usize,
+    live_before_drain: &LiveNodes,
+    live_after_drain: &LiveNodes,
+    d: usize,
+) -> Result<RepairStats, ClientError> {
+    // Directory-manifest guard (mirrors `repair_node`).
+    if manifest.nodes.is_empty() {
+        return Ok(RepairStats::default());
+    }
+    assert!(
+        !live_after_drain.contains(&drain_idx),
+        "live_after_drain must not contain drain_idx",
+    );
+    let mut stats = RepairStats::default();
+    let k = manifest.k as usize;
+
+    for c in 0..manifest.channels {
+        for l in 0..manifest.nlayers {
+            let n_total = manifest.n_per_layer[l as usize] as usize;
+
+            // Find every shard index HRW currently places on
+            // drain_idx. These are the ones that need a new home.
+            let mut migrating: Vec<u32> = Vec::new();
+            for idx in 0..n_total as u32 {
+                if manifest.place_shard(c, l, idx, live_before_drain)? == drain_idx {
+                    migrating.push(idx);
+                }
+            }
+            if migrating.is_empty() {
+                continue;
+            }
+
+            // Collect donors from live neighbours (never from the
+            // drained node). Verify by hash — a poisoned peer that
+            // returns garbage doesn't get its bytes mixed in.
+            let expected: HashSet<Hash> = manifest.shard_hashes[c as usize][l as usize]
+                .iter()
+                .copied()
+                .collect();
+            let mut donors: Vec<Shard> = Vec::new();
+            'donors: for &node in live_after_drain.iter() {
+                let Some(addr) = manifest.nodes.get(node) else {
+                    continue;
+                };
+                match rpc(
+                    addr,
+                    Request::Get {
+                        object_id: manifest.object_id,
+                        channel: c,
+                        layer: l,
+                    },
+                )
+                .await?
+                {
+                    Response::Shards(v) => {
+                        for s in v {
+                            if expected.contains(&shard_hash(&s)) {
+                                donors.push(s);
+                            }
+                            if donors.len() >= d {
+                                break 'donors;
+                            }
+                        }
+                    }
+                    Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
+                    other => {
+                        return Err(ClientError::UnexpectedResponse {
+                            expected: "Shards",
+                            got: format!("{other:?}"),
+                        })
+                    }
+                }
+            }
+            if donors.is_empty() {
+                stats.layers_unrecoverable += 1;
+                continue;
+            }
+            donors.truncate(d);
+
+            let slen = manifest.sym_len[l as usize] as u64;
+            let bytes_per_shard = k as u64 + slen;
+            let need = migrating.len();
+            stats.bytes_downloaded += donors.len() as u64 * bytes_per_shard;
+            stats.bytes_baseline_full += (k as u64).min(donors.len() as u64) * bytes_per_shard;
+            stats.gf_muls_baseline += (k as u64) * (k as u64 + 1) * (slen + k as u64)
+                + (need as u64) * (k as u64) * slen;
+            stats.gf_muls_repair += (need as u64) * (donors.len() as u64) * (slen + k as u64);
+
+            // Mix `need` fresh combinations from the donors and PUT
+            // each to the NEW HRW placement (the node that will own
+            // the shard after drain_idx leaves).
+            let fresh = mix_donors(gf, &donors, need, rng);
+            for (shard, &orig_idx) in fresh.into_iter().zip(migrating.iter()) {
+                let new_owner = manifest.place_shard(c, l, orig_idx, live_after_drain)?;
+                let new_addr = manifest.nodes.get(new_owner).ok_or_else(|| {
+                    ClientError::RemoteError(format!(
+                        "drain_node: new-owner index {new_owner} outside manifest.nodes (len={})",
+                        manifest.nodes.len()
+                    ))
+                })?;
+                let h = shard_hash(&shard);
+                manifest.shard_hashes[c as usize][l as usize].push(h);
+                match rpc(
+                    new_addr,
+                    Request::Put {
+                        object_id: manifest.object_id,
+                        channel: c,
+                        layer: l,
+                        shard,
+                    },
+                )
+                .await?
+                {
+                    Response::Ack => {
+                        stats.shards_generated += 1;
+                    }
+                    Response::Error(msg) => return Err(ClientError::RemoteError(msg)),
+                    other => {
+                        return Err(ClientError::UnexpectedResponse {
+                            expected: "Ack",
+                            got: format!("{other:?}"),
+                        })
+                    }
+                }
+            }
+            stats.layers_repaired += 1;
+        }
+    }
+
+    // Merkle root: recompute over the FULL hash list (old + new).
+    // Old shards on drain_idx stay in the list; the reader accepts
+    // any K by-hash matches, so the old hashes are harmless once
+    // their physical shards are purged.
+    let mut leaves = Vec::new();
+    for per_c in &manifest.shard_hashes {
+        for per_l in per_c {
+            leaves.extend_from_slice(per_l);
+        }
+    }
+    manifest.merkle_root = merkle_root(&leaves);
+
+    Ok(stats)
+}
+
 /// repair path for `ObjectEncoding::Replicated` objects.
 ///
 /// For every `(channel, layer, block_id)` whose HRW-computed
@@ -1870,6 +2036,27 @@ pub async fn purge_node_by_hash(
         Response::Error(msg) => Err(ClientError::RemoteError(msg)),
         other => Err(ClientError::UnexpectedResponse { expected: "Ack from PurgeByHash", got: format!("{other:?}") }),
     }
+}
+
+/// P1.4 helper: nuke every shard on a node. Used by the drain flow
+/// after a successful catalog-wide rebalance to reclaim disk on the
+/// leaving node before the operator physically decommissions it.
+///
+/// Composes [`list_node_hashes`] + [`purge_node_by_hash`] — one
+/// round-trip to enumerate, one to purge. Any shards written after
+/// the list-hashes snapshot survive (they're not in the purge
+/// batch) — matches the GC path's "epoch-safe" contract even
+/// without explicit epoch bookkeeping, because the caller is
+/// expected to have flipped `admin_kills[drain_idx] = true` before
+/// invoking this so no fresh writes can land.
+pub async fn wipe_node(addr: &str) -> Result<usize, ClientError> {
+    let hashes = list_node_hashes(addr).await?;
+    let n = hashes.len();
+    if hashes.is_empty() {
+        return Ok(0);
+    }
+    purge_node_by_hash(addr, hashes).await?;
+    Ok(n)
 }
 
 /// epoch-GC: read a node's current wall-clock (ms since
