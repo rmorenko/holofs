@@ -557,6 +557,24 @@ decrypt shards — the attacker also needs the separately-mounted
 KEK. Rotation without re-encrypting existing data is now cheap
 (append DEK, restart daemon) instead of impossible.
 
+**⚠️ Default mode (`identity`) does NOT provide key-separation.**
+When `HOLOFS_AT_REST_KEK_SOURCE` is unset, the KEK is derived from
+`identity.key` via HKDF — the same file the daemon needs to be
+present for basic node auth. An attacker who steals the storage
+directory can therefore steal both the identity key AND (via the
+same file) recover the KEK, unwrap every DEK in `keyring.json`,
+and decrypt every sealed shard. This mode exists for pre-P1.7
+backwards-compat + local dev; the review-round v2 explicitly
+called it out as a **security caveat you must acknowledge in the
+threat model, not a passive default**.
+
+**For any real at-rest guarantee, use `source=file` or `source=env`**
+so the KEK lives outside the storage directory. The `file` source is
+recommended (Kubernetes Secret bind-mount above; systemd unit with
+`LoadCredential=kek:/run/keys/holofs-kek` on bare-metal). The `env`
+source is for CI / one-shot benchmarks only — env vars leak into
+process listings (`/proc/*/environ`), crash dumps, and journald.
+
 ---
 
 ## 6. Monitoring & alerting

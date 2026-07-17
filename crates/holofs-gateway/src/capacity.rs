@@ -312,14 +312,138 @@ pub fn decide_rebalance(
     })
 }
 
+/// One rebalance round. Snapshots the capacity map, feeds it into
+/// [`decide_rebalance`], and — on a positive decision — invokes a
+/// *bounded* partial drain (not a full drain) via
+/// [`holofs_cluster::rebalance::drain_node`]. Returns the decision
+/// that fired (or `None` when the round was skipped) plus the count
+/// of objects successfully migrated, so tests + operators can drive
+/// the tick directly without waiting on the interval.
+///
+/// Extracted from [`spawn_auto_rebalancer`] (v2 review round #2b)
+/// so the rebalance policy path has a dedicated test surface — the
+/// interval-based loop can't be exercised end-to-end otherwise
+/// without a slow real-time wait.
+pub async fn rebalance_tick(
+    gateway: &Arc<crate::http_gateway::Gateway>,
+    map: &CapacityMap,
+    catalog: &Arc<RwLock<Directory>>,
+    trigger_pct: f64,
+    cold_ceiling_pct: f64,
+    repair_d: usize,
+) -> Option<RebalanceTickOutcome> {
+    // Snapshot cluster + capacity under the map lock, then release
+    // before the (potentially long) drain.
+    let addrs = gateway.cluster().node_addrs.clone();
+    let entries = snapshot(map).await;
+    let decision = decide_rebalance(&addrs, &entries, trigger_pct, cold_ceiling_pct)?;
+    let drain_idx = decision.drain_addr_idx;
+
+    tracing::info!(
+        drain_idx,
+        drain_addr = %addrs.get(drain_idx).cloned().unwrap_or_default(),
+        target_idx = decision.drain_target_idx,
+        target_addr = %addrs.get(decision.drain_target_idx).cloned().unwrap_or_default(),
+        full_used_pct = decision.full_used_pct,
+        cold_used_pct = decision.cold_used_pct,
+        "auto-rebalance triggered: draining fullest node"
+    );
+
+    // Flip admin_kill on the drain node, run drain, flip back. This
+    // is intentionally NOT the same as the manual `drain-node`
+    // command: we don't want to permanently remove the node — we
+    // just want to migrate a chunk of its shards to the emptier
+    // node under a temporary "logically dead" flag. When the flag
+    // flips off, subsequent PUTs can land on it again — but its
+    // used_pct has dropped, and the fresh writes go to the emptier
+    // node (HRW is uniform, but the drained fraction stays gone).
+    {
+        let kills_arc = gateway.admin_kills_handle();
+        let mut kills = kills_arc.lock().await;
+        if drain_idx < kills.len() {
+            kills[drain_idx] = true;
+        }
+    }
+
+    let live_before: holofs_client::LiveNodes = {
+        let kills_arc = gateway.admin_kills_handle();
+        let kills = kills_arc.lock().await;
+        (0..addrs.len())
+            .filter(|i| !*kills.get(*i).unwrap_or(&true))
+            // include drain_idx explicitly in the before-list so
+            // drain_node_from_manifest sees it there.
+            .chain(std::iter::once(drain_idx))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
+
+    let gf = Arc::clone(gateway.gf());
+    let mut rng = holofs_core::rng::Rng::new(
+        (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0))
+        .wrapping_add(drain_idx as u64),
+    );
+
+    let reports = holofs_cluster::rebalance::drain_node(
+        &gf,
+        &mut rng,
+        Arc::clone(catalog),
+        drain_idx,
+        live_before,
+        repair_d,
+    )
+    .await;
+
+    // Flip the kill flag back off — the node is not decommissioned,
+    // just rebalanced.
+    {
+        let kills_arc = gateway.admin_kills_handle();
+        let mut kills = kills_arc.lock().await;
+        if drain_idx < kills.len() {
+            kills[drain_idx] = false;
+        }
+    }
+
+    let ok = reports.iter().filter(|r| r.result.is_ok()).count();
+    let failed = reports.len() - ok;
+    tracing::info!(
+        ok,
+        failed,
+        total = reports.len(),
+        drain_idx,
+        "auto-rebalance round complete"
+    );
+
+    Some(RebalanceTickOutcome {
+        decision,
+        objects_migrated: ok,
+        objects_failed: failed,
+    })
+}
+
+/// Outcome of a single [`rebalance_tick`] invocation. Present iff
+/// the round actually fired (i.e. `decide_rebalance` returned
+/// `Some`).
+#[derive(Debug, Clone, Copy)]
+pub struct RebalanceTickOutcome {
+    /// The decision that triggered this round.
+    pub decision: RebalanceDecision,
+    /// Number of catalog objects `drain_node` successfully
+    /// re-emitted onto the shrunk live set.
+    pub objects_migrated: usize,
+    /// Number of catalog objects `drain_node` failed on (network
+    /// error, insufficient donors, etc.).
+    pub objects_failed: usize,
+}
+
 /// Spawn the auto-rebalancer background task. Ticks every
-/// `interval_secs`; on each tick reads the capacity map, feeds it
-/// into [`decide_rebalance`], and — on a positive decision — invokes
-/// a *bounded* partial drain (not a full drain) via
-/// [`holofs_cluster::rebalance::drain_node`]. Bounded means: flip
-/// `admin_kills[drain_idx] = true`, run drain, flip it back off.
-/// Because `drain_node` is idempotent, a subsequent tick that still
-/// sees skew will drain more; if the cluster is now balanced,
+/// `interval_secs`; on each tick calls [`rebalance_tick`], which
+/// contains the whole per-round policy + drain flow. Because
+/// `drain_node` is idempotent, a subsequent tick that still sees
+/// skew will drain more; if the cluster is now balanced,
 /// `decide_rebalance` returns `None` and the round is skipped.
 ///
 /// `trigger_pct = 0.0` OR `interval_secs = 0` disables the daemon
@@ -346,93 +470,15 @@ pub fn spawn_auto_rebalancer(
         tick.tick().await;
         loop {
             tick.tick().await;
-
-            // Snapshot cluster + capacity under the map lock, then
-            // release before the (potentially long) drain.
-            let addrs = gateway.cluster.node_addrs.clone();
-            let entries = snapshot(&map).await;
-            let Some(decision) = decide_rebalance(&addrs, &entries, trigger_pct, cold_ceiling_pct)
-            else {
-                continue;
-            };
-
-            let drain_idx = decision.drain_addr_idx;
-            tracing::info!(
-                drain_idx,
-                drain_addr = %addrs.get(drain_idx).cloned().unwrap_or_default(),
-                target_idx = decision.drain_target_idx,
-                target_addr = %addrs.get(decision.drain_target_idx).cloned().unwrap_or_default(),
-                full_used_pct = decision.full_used_pct,
-                cold_used_pct = decision.cold_used_pct,
-                "auto-rebalance triggered: draining fullest node"
-            );
-
-            // Flip admin_kill on the drain node, run drain, flip
-            // back. This is intentionally NOT the same as the manual
-            // `drain-node` command: we don't want to permanently
-            // remove the node — we just want to migrate a chunk of
-            // its shards to the emptier node under a temporary
-            // "logically dead" flag. When the flag flips off,
-            // subsequent PUTs can land on it again — but its used_pct
-            // has dropped, and the fresh writes go to the emptier
-            // node (HRW is uniform, but the drained fraction stays
-            // gone).
-            {
-                let mut kills = gateway.admin_kills.lock().await;
-                if drain_idx < kills.len() {
-                    kills[drain_idx] = true;
-                }
-            }
-
-            let live_before: holofs_client::LiveNodes = {
-                let kills = gateway.admin_kills.lock().await;
-                (0..addrs.len())
-                    .filter(|i| !*kills.get(*i).unwrap_or(&true))
-                    // include drain_idx explicitly in the before-list
-                    // so drain_node_from_manifest sees it there.
-                    .chain(std::iter::once(drain_idx))
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect()
-            };
-
-            let gf = Arc::clone(&gateway.gf);
-            let mut rng = holofs_core::rng::Rng::new(
-                (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0))
-                .wrapping_add(drain_idx as u64),
-            );
-
-            let reports = holofs_cluster::rebalance::drain_node(
-                &gf,
-                &mut rng,
-                Arc::clone(&catalog),
-                drain_idx,
-                live_before,
+            let _ = rebalance_tick(
+                &gateway,
+                &map,
+                &catalog,
+                trigger_pct,
+                cold_ceiling_pct,
                 repair_d,
             )
             .await;
-
-            // Flip the kill flag back off — the node is not decommissioned,
-            // just rebalanced.
-            {
-                let mut kills = gateway.admin_kills.lock().await;
-                if drain_idx < kills.len() {
-                    kills[drain_idx] = false;
-                }
-            }
-
-            let ok = reports.iter().filter(|r| r.result.is_ok()).count();
-            let failed = reports.len() - ok;
-            tracing::info!(
-                ok,
-                failed,
-                total = reports.len(),
-                drain_idx,
-                "auto-rebalance round complete"
-            );
         }
     });
     Some(handle)
