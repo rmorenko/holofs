@@ -11,12 +11,13 @@
 //!   stream of [`crate::health::HealthSnapshot`] every 3 s.
 //!
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::Extension;
+use axum::extract::{Extension, Query};
 use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -178,11 +179,15 @@ pub async fn metrics(Extension(gw): Extension<Arc<Gateway>>) -> Response {
         by_kind.directory
     ));
 
-    body.push_str("# HELP holofs_shards_total Planned shards across every object × layer × channel.\n");
+    body.push_str(
+        "# HELP holofs_shards_total Planned shards across every object × layer × channel.\n",
+    );
     body.push_str("# TYPE holofs_shards_total gauge\n");
     body.push_str(&format!("holofs_shards_total {}\n", stats.shards_total));
 
-    body.push_str("# HELP holofs_shards_unique Distinct shard hashes recorded across the catalog.\n");
+    body.push_str(
+        "# HELP holofs_shards_unique Distinct shard hashes recorded across the catalog.\n",
+    );
     body.push_str("# TYPE holofs_shards_unique gauge\n");
     body.push_str(&format!("holofs_shards_unique {}\n", stats.shards_unique));
 
@@ -213,7 +218,10 @@ pub async fn metrics(Extension(gw): Extension<Arc<Gateway>>) -> Response {
 
     body.push_str("# HELP holofs_scrub_runs_total Background scrub-task tick count.\n");
     body.push_str("# TYPE holofs_scrub_runs_total counter\n");
-    body.push_str(&format!("holofs_scrub_runs_total {}\n", stats.scrub_runs_total));
+    body.push_str(&format!(
+        "holofs_scrub_runs_total {}\n",
+        stats.scrub_runs_total
+    ));
 
     body.push_str("# HELP holofs_scrub_repairs_total Objects the background scrub repaired before any user GET tripped them.\n");
     body.push_str("# TYPE holofs_scrub_repairs_total counter\n");
@@ -440,10 +448,7 @@ pub async fn gc_orphans(Extension(gw): Extension<Arc<Gateway>>) -> Response {
 /// `POST /admin/node` — toggle admin-kill for node `i` (form field).
 /// Used by the kill/revive buttons on `/health`; redirects back to
 /// `/health` (303).
-pub async fn toggle_node(
-    Extension(gw): Extension<Arc<Gateway>>,
-    body: Bytes,
-) -> Response {
+pub async fn toggle_node(Extension(gw): Extension<Arc<Gateway>>, body: Bytes) -> Response {
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {
@@ -466,11 +471,7 @@ pub async fn toggle_node(
     };
     match gw.toggle_admin_kill(idx).await {
         Ok(_) => {
-            log_event(&AuditEvent::now(
-                "toggle_node",
-                format!("idx={idx}"),
-                "ok",
-            ));
+            log_event(&AuditEvent::now("toggle_node", format!("idx={idx}"), "ok"));
             Response::builder()
                 .status(StatusCode::SEE_OTHER)
                 .header(header::LOCATION, "/health")
@@ -497,10 +498,7 @@ pub async fn toggle_node(
 /// the gateway's own `ClusterInfo.node_addrs` still needs a restart
 /// with the new whitelist to bring the cluster topology fully into
 /// agreement.
-pub async fn admin_add_node(
-    Extension(gw): Extension<Arc<Gateway>>,
-    body: Bytes,
-) -> Response {
+pub async fn admin_add_node(Extension(gw): Extension<Arc<Gateway>>, body: Bytes) -> Response {
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {
@@ -569,10 +567,7 @@ pub async fn admin_add_node(
 /// Admin-token gated. Operators typically run this on a maintenance
 /// window and follow with a whitelist re-sign that omits the drained
 /// node, then hot-reload — see operations.md §10.
-pub async fn admin_drain_node(
-    Extension(gw): Extension<Arc<Gateway>>,
-    body: Bytes,
-) -> Response {
+pub async fn admin_drain_node(Extension(gw): Extension<Arc<Gateway>>, body: Bytes) -> Response {
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {
@@ -642,20 +637,106 @@ pub async fn admin_drain_node(
 /// operationally sensitive (reveals object namespaces and sizes even
 /// if the objects themselves are gated elsewhere).
 ///
-/// Response shape:
+/// # Response shapes (backward-compatible)
 ///
-/// ```json
-/// [
-///   {"name": "photos/beach.jpg", "kind": "image", "size": 4194304},
-///   {"name": "docs/notes.txt",   "kind": "text",  "size": 1024},
-///   …
-/// ]
-/// ```
-pub async fn admin_catalog_names(Extension(gw): Extension<Arc<Gateway>>) -> Response {
-    let entries = gw.list_all_objects().await;
-    let n = entries.len();
-    let mut buf = String::from("[");
-    for (i, e) in entries.iter().enumerate() {
+/// - **No query params** → bare array of every entry, as before.
+///   Preserves the shape older `holofs-admin` binaries expect.
+///
+///   ```json
+///   [
+///     {"name": "photos/beach.jpg", "kind": "image", "size": 4194304},
+///     {"name": "docs/notes.txt",   "kind": "text",  "size": 1024}
+///   ]
+///   ```
+///
+/// - **With `?cursor=&limit=`** → paginated wrapper. `cursor` is an
+///   opaque, URL-safe base64 string returned as `next_cursor` on the
+///   previous page (empty / omitted on the first page). `limit`
+///   defaults to `DEFAULT_PAGE_LIMIT` and is clamped to
+///   `MAX_PAGE_LIMIT`.
+///
+///   ```json
+///   {
+///     "items": [
+///       {"name": "photos/beach.jpg", "kind": "image", "size": 4194304}
+///     ],
+///     "next_cursor": "ZG9jcy9ub3Rlcy50eHQ"
+///   }
+///   ```
+///
+///   `next_cursor` is `null` when the walk hit the end of the
+///   catalog. Callers iterate until they see `null`, not until
+///   `items` is empty (a page falling entirely on skipped directory
+///   manifests can hand back `items=[]` with a non-null cursor).
+pub async fn admin_catalog_names(
+    Extension(gw): Extension<Arc<Gateway>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    // Presence of *any* pagination-shaped query param opts into the
+    // wrapper response. Absence keeps the pre-P2.1 bare-array shape
+    // so unchanged clients (older `holofs-admin`, ad-hoc curl
+    // scripts) don't get a schema surprise.
+    let paginated = params.contains_key("cursor") || params.contains_key("limit");
+
+    if !paginated {
+        let entries = gw.list_all_objects().await;
+        let n = entries.len();
+        let mut buf = String::from("[");
+        for (i, e) in entries.iter().enumerate() {
+            if i > 0 {
+                buf.push(',');
+            }
+            buf.push_str(&format!(
+                "{{\"name\":\"{}\",\"kind\":\"{}\",\"size\":{}}}",
+                json_escape(&e.name),
+                object_kind_json_label(e.kind),
+                e.size,
+            ));
+        }
+        buf.push(']');
+        log_event(
+            &AuditEvent::now("catalog_names", "", "ok")
+                .with_details(format!("{{\"objects\":{n},\"paginated\":false}}")),
+        );
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            buf,
+        )
+            .into_response();
+    }
+
+    // --- Paginated branch. ---
+    let limit_raw: usize = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_PAGE_LIMIT)
+        .max(1);
+    let limit = limit_raw.min(MAX_PAGE_LIMIT);
+
+    // Decode cursor. Empty string / absent → start from beginning.
+    // Invalid base64 or non-UTF8 → 400.
+    let after_owned: Option<String> = match params.get("cursor").map(String::as_str) {
+        None | Some("") => None,
+        Some(raw) => match decode_cursor(raw) {
+            Ok(name) => Some(name),
+            Err(msg) => {
+                log_event(&AuditEvent::now("catalog_names", "", "error"));
+                return (
+                    StatusCode::BAD_REQUEST,
+                    [(header::CONTENT_TYPE, "text/plain")],
+                    format!("bad cursor: {msg}"),
+                )
+                    .into_response();
+            }
+        },
+    };
+    let after: Option<&str> = after_owned.as_deref();
+
+    let page = gw.list_all_objects_paginated(after, limit).await;
+    let n = page.items.len();
+    let mut buf = String::from("{\"items\":[");
+    for (i, e) in page.items.iter().enumerate() {
         if i > 0 {
             buf.push(',');
         }
@@ -666,10 +747,22 @@ pub async fn admin_catalog_names(Extension(gw): Extension<Arc<Gateway>>) -> Resp
             e.size,
         ));
     }
-    buf.push(']');
+    buf.push_str("],\"next_cursor\":");
+    match &page.next_cursor {
+        Some(name) => {
+            let enc = encode_cursor(name);
+            buf.push('"');
+            buf.push_str(&enc);
+            buf.push('"');
+        }
+        None => buf.push_str("null"),
+    }
+    buf.push('}');
     log_event(
-        &AuditEvent::now("catalog_names", "", "ok")
-            .with_details(format!("{{\"objects\":{n}}}")),
+        &AuditEvent::now("catalog_names", "", "ok").with_details(format!(
+            "{{\"objects\":{n},\"paginated\":true,\"limit\":{limit},\"has_next\":{}}}",
+            page.next_cursor.is_some()
+        )),
     );
     (
         StatusCode::OK,
@@ -677,6 +770,99 @@ pub async fn admin_catalog_names(Extension(gw): Extension<Arc<Gateway>>) -> Resp
         buf,
     )
         .into_response()
+}
+
+/// Default page size when `?limit=` is omitted. Matches the memory
+/// footprint of a ~200-byte-per-entry JSON row × 1000 = ~200 KiB,
+/// which is safe for admin operators over a home network.
+const DEFAULT_PAGE_LIMIT: usize = 1000;
+
+/// Hard ceiling on `?limit=`. Prevents an operator typo (`limit=9999999`)
+/// from making the gateway allocate megabytes for a single response.
+const MAX_PAGE_LIMIT: usize = 10_000;
+
+/// URL-safe base64 (no padding) encoder for the cursor. Cursor
+/// content is the last catalog name we returned; base64 shields it
+/// from URL-encoding surprises (`/` in path-like names, `=` in tag
+/// syntax) without pulling a new dep.
+fn encode_cursor(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let b0 = bytes[i];
+        let b1 = bytes[i + 1];
+        let b2 = bytes[i + 2];
+        out.push(A[(b0 >> 2) as usize] as char);
+        out.push(A[(((b0 & 0b11) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(A[(((b1 & 0b1111) << 2) | (b2 >> 6)) as usize] as char);
+        out.push(A[(b2 & 0b111111) as usize] as char);
+        i += 3;
+    }
+    match bytes.len() - i {
+        1 => {
+            let b0 = bytes[i];
+            out.push(A[(b0 >> 2) as usize] as char);
+            out.push(A[((b0 & 0b11) << 4) as usize] as char);
+        }
+        2 => {
+            let b0 = bytes[i];
+            let b1 = bytes[i + 1];
+            out.push(A[(b0 >> 2) as usize] as char);
+            out.push(A[(((b0 & 0b11) << 4) | (b1 >> 4)) as usize] as char);
+            out.push(A[((b1 & 0b1111) << 2) as usize] as char);
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Inverse of [`encode_cursor`]. Returns the decoded name on success
+/// or a descriptive error message on any malformed input.
+fn decode_cursor(s: &str) -> Result<String, String> {
+    fn digit(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let src = s.as_bytes();
+    let mut out = Vec::with_capacity(src.len() * 3 / 4);
+    let mut i = 0;
+    while i + 4 <= src.len() {
+        let d = |k: usize| digit(src[k]).ok_or_else(|| format!("bad char at {k}"));
+        let d0 = d(i)?;
+        let d1 = d(i + 1)?;
+        let d2 = d(i + 2)?;
+        let d3 = d(i + 3)?;
+        out.push((d0 << 2) | (d1 >> 4));
+        out.push((d1 << 4) | (d2 >> 2));
+        out.push((d2 << 6) | d3);
+        i += 4;
+    }
+    match src.len() - i {
+        0 => {}
+        1 => return Err("truncated cursor (single trailing char)".into()),
+        2 => {
+            let d0 = digit(src[i]).ok_or_else(|| format!("bad char at {i}"))?;
+            let d1 = digit(src[i + 1]).ok_or_else(|| format!("bad char at {}", i + 1))?;
+            out.push((d0 << 2) | (d1 >> 4));
+        }
+        3 => {
+            let d0 = digit(src[i]).ok_or_else(|| format!("bad char at {i}"))?;
+            let d1 = digit(src[i + 1]).ok_or_else(|| format!("bad char at {}", i + 1))?;
+            let d2 = digit(src[i + 2]).ok_or_else(|| format!("bad char at {}", i + 2))?;
+            out.push((d0 << 2) | (d1 >> 4));
+            out.push((d1 << 4) | (d2 >> 2));
+        }
+        _ => unreachable!(),
+    }
+    String::from_utf8(out).map_err(|e| format!("cursor is not utf-8: {e}"))
 }
 
 fn object_kind_json_label(kind: holofs_model::manifest::ObjectKind) -> &'static str {
@@ -718,4 +904,62 @@ pub async fn health_events(
     };
     // KeepAlive guards against proxies dropping idle connections.
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_cursor, encode_cursor};
+
+    #[test]
+    fn cursor_roundtrip_short_name() {
+        // Every input length mod 3 (0, 1, 2) exercises a different
+        // tail-padding branch in the encoder, so cover all three.
+        for name in &["", "a", "ab", "abc", "abcd", "abcde", "abcdef"] {
+            let enc = encode_cursor(name);
+            let dec = decode_cursor(&enc).expect("must round-trip");
+            assert_eq!(&dec, *name, "roundtrip failure for {name:?} (enc={enc})");
+        }
+    }
+
+    #[test]
+    fn cursor_roundtrip_paths_with_slashes_and_dots() {
+        // Catalog names look like `photos/2026/beach.jpg` — the
+        // `/`, `.`, and other URL-unfriendly chars must survive
+        // encode+decode without any URL-percent-encoding contortions.
+        for name in &[
+            "photos/2026/beach.jpg",
+            "docs/notes.txt",
+            "a/b/c/d/e/f/g",
+            "spaces are here.txt",
+            "utf8: файл.дат",
+            "..\\weird_win.bin",
+        ] {
+            let enc = encode_cursor(name);
+            let dec = decode_cursor(&enc).expect("must round-trip");
+            assert_eq!(&dec, *name);
+        }
+    }
+
+    #[test]
+    fn cursor_produces_only_url_safe_chars() {
+        // Base64 URL-safe alphabet: A-Za-z0-9-_ (no `+`, `/`, `=`).
+        // If any encoder branch leaked a stock-base64 char we'd need
+        // percent-encoding at HTTP layer — the whole point of the
+        // URL-safe variant is that we don't.
+        for name in &["path/with/slash", "abc123", "🙂"] {
+            let enc = encode_cursor(name);
+            for b in enc.bytes() {
+                assert!(
+                    b.is_ascii_alphanumeric() || b == b'-' || b == b'_',
+                    "encoded cursor {enc} contains non-URL-safe byte {b:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decode_cursor_rejects_malformed_input() {
+        assert!(decode_cursor("!!!").is_err(), "non-base64 chars → error");
+        assert!(decode_cursor("A").is_err(), "single-char tail is invalid");
+    }
 }

@@ -96,8 +96,7 @@ async fn rmdir_rejects_non_directory() {
             "docs/readme.txt".into(),
             holofs_model::manifest::Manifest::directory(0xAAAA, 0),
         );
-        cat.get_mut("docs/readme.txt").unwrap().kind =
-            holofs_model::manifest::ObjectKind::Text;
+        cat.get_mut("docs/readme.txt").unwrap().kind = holofs_model::manifest::ObjectKind::Text;
     }
     let err = gw
         .rmdir("docs/readme.txt")
@@ -142,4 +141,132 @@ async fn list_dir_on_unknown_prefix_is_not_found() {
     let gw = build_gateway();
     let err = gw.list_dir("nope").await.expect_err("unknown");
     assert!(matches!(err, GatewayError::NotFound));
+}
+
+// --- P2.1 catalog pagination ---
+
+/// Seed a fixed set of non-directory catalog entries in BTreeMap order.
+/// Uses the same reach-into-the-mutex trick as `rmdir_rejects_non_directory`
+/// so we don't need to run the full ingest pipeline for a pure catalog
+/// enumeration test.
+async fn seed_objects(gw: &Gateway, names: &[&str]) {
+    let mut cat = gw.catalog().write().await;
+    for name in names {
+        cat.insert(
+            (*name).into(),
+            holofs_model::manifest::Manifest::directory(0xDEAD, 0),
+        );
+        cat.get_mut(name).unwrap().kind = holofs_model::manifest::ObjectKind::Text;
+    }
+}
+
+#[tokio::test]
+async fn pagination_walks_full_catalog_in_batches() {
+    let gw = build_gateway();
+    // 5 non-directory entries + 2 real directories. The directory
+    // manifests must be skipped by the enumerator but still count for
+    // the range scan (i.e. must not short-circuit the cursor forward).
+    gw.mkdir("photos").await.unwrap();
+    gw.mkdir("docs").await.unwrap();
+    seed_objects(&gw, &["a", "b", "c", "d", "e"]).await;
+
+    let mut collected: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let limit = 2usize;
+    loop {
+        let page = gw
+            .list_all_objects_paginated(cursor.as_deref(), limit)
+            .await;
+        for item in &page.items {
+            collected.push(item.name.clone());
+        }
+        match page.next_cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+        // Safety valve: catalog has 7 entries, at most 4 pages of 2.
+        assert!(collected.len() <= 20, "runaway pagination loop");
+    }
+    assert_eq!(
+        collected,
+        vec!["a", "b", "c", "d", "e"],
+        "pagination must yield every non-directory entry in BTreeMap order"
+    );
+}
+
+#[tokio::test]
+async fn pagination_next_cursor_is_none_on_last_page() {
+    let gw = build_gateway();
+    seed_objects(&gw, &["only_one"]).await;
+    let page = gw.list_all_objects_paginated(None, 1000).await;
+    assert_eq!(page.items.len(), 1);
+    assert!(
+        page.next_cursor.is_none(),
+        "single-page walk must not hand back a next_cursor"
+    );
+}
+
+#[tokio::test]
+async fn pagination_empty_catalog_returns_empty_no_cursor() {
+    let gw = build_gateway();
+    let page = gw.list_all_objects_paginated(None, 100).await;
+    assert!(page.items.is_empty());
+    assert!(page.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn pagination_cursor_past_end_returns_empty() {
+    let gw = build_gateway();
+    seed_objects(&gw, &["alpha", "beta"]).await;
+    // Cursor after the last key (`"zzz" > "beta"`) — no entries left.
+    let page = gw.list_all_objects_paginated(Some("zzz"), 100).await;
+    assert!(page.items.is_empty());
+    assert!(page.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn pagination_skips_directories_transparently_in_one_page() {
+    // Directories are skipped "for free" — a page whose limit could
+    // theoretically span some directories AND some objects returns
+    // *only* the objects, and if the whole range fits under `limit`
+    // emitted entries, `next_cursor` is `None`.
+    //
+    // Layout in BTreeMap order:
+    //   "a_dir" (dir), "b_dir" (dir), "c_obj" (text)
+    // With limit=2, the walk emits "c_obj" only (1 < 2 → walk not
+    // saturated → cursor exhausted → next_cursor=None).
+    let gw = build_gateway();
+    gw.mkdir("a_dir").await.unwrap();
+    gw.mkdir("b_dir").await.unwrap();
+    seed_objects(&gw, &["c_obj"]).await;
+
+    let page = gw.list_all_objects_paginated(None, 2).await;
+    let got: Vec<&str> = page.items.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(got, vec!["c_obj"], "directory entries must be filtered out");
+    assert!(
+        page.next_cursor.is_none(),
+        "unsaturated walk (1 emitted < 2 limit) means the catalog is fully covered"
+    );
+}
+
+#[tokio::test]
+async fn pagination_next_cursor_set_when_limit_is_reached() {
+    // A saturated page (emitted == limit) MUST hand back a cursor —
+    // even if the actual last-visited entry is the very last object
+    // in the catalog. That extra one-round-trip cost is the price of
+    // "cursor==None means truly done" (see docstring). The caller's
+    // next call returns an empty page with next_cursor=None.
+    let gw = build_gateway();
+    seed_objects(&gw, &["x", "y"]).await;
+
+    let page1 = gw.list_all_objects_paginated(None, 2).await;
+    let got: Vec<&str> = page1.items.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(got, vec!["x", "y"]);
+    assert_eq!(page1.next_cursor.as_deref(), Some("y"));
+
+    let page2 = gw
+        .list_all_objects_paginated(page1.next_cursor.as_deref(), 2)
+        .await;
+    assert!(page2.items.is_empty());
+    assert!(page2.next_cursor.is_none());
 }

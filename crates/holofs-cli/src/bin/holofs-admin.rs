@@ -235,7 +235,8 @@ fn cmd_verify_whitelist(args: &[String]) {
         std::process::exit(2);
     }
     let path = &args[0];
-    let expected_admin: Option<[u8; PUBKEY_LEN]> = if args.len() >= 3 && args[1] == "--admin-pubkey" {
+    let expected_admin: Option<[u8; PUBKEY_LEN]> = if args.len() >= 3 && args[1] == "--admin-pubkey"
+    {
         parse_pubkey_hex(&args[2])
     } else {
         None
@@ -385,17 +386,15 @@ fn cmd_export(args: &[String]) {
         .send()
         .unwrap_or_else(|e| die(format!("GET {url}: {e}")));
     if !resp.status().is_success() {
-        die(format!(
-            "GET {url}: HTTP {}",
-            resp.status().as_u16()
-        ));
+        die(format!("GET {url}: HTTP {}", resp.status().as_u16()));
     }
     let bytes = resp
         .bytes()
         .unwrap_or_else(|e| die(format!("read body: {e}")));
     match &f.output {
         Some(path) => {
-            fs::write(path, &bytes).unwrap_or_else(|e| die(format!("write {}: {e}", path.display())));
+            fs::write(path, &bytes)
+                .unwrap_or_else(|e| die(format!("write {}: {e}", path.display())));
             eprintln!("wrote {} bytes to {}", bytes.len(), path.display());
         }
         None => {
@@ -420,7 +419,13 @@ fn cmd_import(args: &[String]) {
             buf
         }
     };
-    put_object(&gw, &name, body, f.content_type.as_deref(), f.admin_token.as_deref());
+    put_object(
+        &gw,
+        &name,
+        body,
+        f.content_type.as_deref(),
+        f.admin_token.as_deref(),
+    );
 }
 
 fn put_object(
@@ -446,10 +451,7 @@ fn put_object(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().unwrap_or_default();
-        die(format!(
-            "PUT {url}: HTTP {} — {body}",
-            status.as_u16()
-        ));
+        die(format!("PUT {url}: HTTP {} — {body}", status.as_u16()));
     }
     eprintln!("PUT {name} → {}", status.as_u16());
 }
@@ -480,20 +482,51 @@ fn cmd_export_all(args: &[String]) {
     let token = f
         .admin_token
         .unwrap_or_else(|| flag_required("--admin-token"));
-    let out_dir = f.output_dir.unwrap_or_else(|| flag_required("--output-dir").into());
+    let out_dir = f
+        .output_dir
+        .unwrap_or_else(|| flag_required("--output-dir").into());
     fs::create_dir_all(out_dir.join("objects"))
         .unwrap_or_else(|e| die(format!("mkdir {}: {e}", out_dir.display())));
     let client = http_client();
 
-    // 1. Enumerate catalog names.
-    let list_url = format!("{}/admin/catalog_names", gw.trim_end_matches('/'));
-    let listing: Vec<serde_json::Value> = client
-        .get(&list_url)
-        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
-        .send()
-        .unwrap_or_else(|e| die(format!("GET {list_url}: {e}")))
-        .json()
-        .unwrap_or_else(|e| die(format!("decode listing: {e}")));
+    // 1. Enumerate catalog names. P2.1 — request the paginated
+    //    variant so the response stays bounded even on a 100k-object
+    //    catalog. `next_cursor=null` signals end of iteration; the
+    //    initial call omits `cursor` to start from the beginning.
+    let base_list_url = format!("{}/admin/catalog_names", gw.trim_end_matches('/'));
+    let mut listing: Vec<serde_json::Value> = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        // limit=1000 matches the gateway's default; being explicit
+        // documents intent (this loop is paginating on purpose, not
+        // by accident of a schema change).
+        let mut url = format!("{base_list_url}?limit=1000");
+        if let Some(c) = cursor.as_deref() {
+            if !c.is_empty() {
+                url.push_str("&cursor=");
+                url.push_str(c);
+            }
+        }
+        let page: serde_json::Value = client
+            .get(&url)
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+            .unwrap_or_else(|e| die(format!("GET {url}: {e}")))
+            .json()
+            .unwrap_or_else(|e| die(format!("decode listing page: {e}")));
+        let items = page
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_else(|| die("paginated response missing `items` array".into()));
+        listing.extend(items);
+        match page.get("next_cursor") {
+            Some(serde_json::Value::String(s)) if !s.is_empty() => {
+                cursor = Some(s.clone());
+            }
+            _ => break,
+        }
+    }
 
     // 2. Fetch each object; write to objects/NNNNN.bin; record in
     //    index.json. Numbering is stable across runs against the same
@@ -518,10 +551,7 @@ fn cmd_export_all(args: &[String]) {
             .send()
             .unwrap_or_else(|e| die(format!("GET {get_url}: {e}")));
         if !resp.status().is_success() {
-            eprintln!(
-                "  ! skipping {name}: HTTP {}",
-                resp.status().as_u16()
-            );
+            eprintln!("  ! skipping {name}: HTTP {}", resp.status().as_u16());
             continue;
         }
         let bytes = resp
@@ -549,8 +579,8 @@ fn cmd_export_all(args: &[String]) {
         objects: entries,
     };
     let index_path = out_dir.join("index.json");
-    let json = serde_json::to_vec_pretty(&idx)
-        .unwrap_or_else(|e| die(format!("serialize index: {e}")));
+    let json =
+        serde_json::to_vec_pretty(&idx).unwrap_or_else(|e| die(format!("serialize index: {e}")));
     fs::write(&index_path, &json)
         .unwrap_or_else(|e| die(format!("write {}: {e}", index_path.display())));
 
@@ -565,13 +595,15 @@ fn cmd_export_all(args: &[String]) {
 fn cmd_import_all(args: &[String]) {
     let f = parse_http_flags(args);
     let gw = f.gateway.unwrap_or_else(|| flag_required("--gateway"));
-    let in_dir = f.input_dir.unwrap_or_else(|| flag_required("--input-dir").into());
+    let in_dir = f
+        .input_dir
+        .unwrap_or_else(|| flag_required("--input-dir").into());
     let token = f.admin_token;
     let index_path = in_dir.join("index.json");
     let raw = fs::read(&index_path)
         .unwrap_or_else(|e| die(format!("read {}: {e}", index_path.display())));
-    let idx: IndexFile = serde_json::from_slice(&raw)
-        .unwrap_or_else(|e| die(format!("parse index: {e}")));
+    let idx: IndexFile =
+        serde_json::from_slice(&raw).unwrap_or_else(|e| die(format!("parse index: {e}")));
     if idx.format_version != 1 {
         die(format!(
             "unsupported index format_version {}",
@@ -586,8 +618,7 @@ fn cmd_import_all(args: &[String]) {
     );
     for entry in &idx.objects {
         let path = in_dir.join("objects").join(&entry.file);
-        let body = fs::read(&path)
-            .unwrap_or_else(|e| die(format!("read {}: {e}", path.display())));
+        let body = fs::read(&path).unwrap_or_else(|e| die(format!("read {}: {e}", path.display())));
         let content_type = kind_to_content_type(&entry.kind);
         put_object(&gw, &entry.name, body, Some(content_type), token.as_deref());
     }
@@ -671,7 +702,10 @@ fn cmd_snapshot_restore(args: &[String]) {
 /// argv parsing or `std::process::exit`.
 pub(crate) fn snapshot_dir_to_tar(storage: &Path, output: &Path) -> Result<u64, String> {
     if !storage.is_dir() {
-        return Err(format!("--storage {} is not a directory", storage.display()));
+        return Err(format!(
+            "--storage {} is not a directory",
+            storage.display()
+        ));
     }
     let out_file =
         fs::File::create(output).map_err(|e| format!("create {}: {e}", output.display()))?;
@@ -688,13 +722,11 @@ pub(crate) fn snapshot_dir_to_tar(storage: &Path, output: &Path) -> Result<u64, 
 /// Pure helper: unpack `input` into `storage`. `force` skips the
 /// non-empty-directory refusal — callers who understand they're
 /// overlaying an existing dir opt in explicitly.
-pub(crate) fn restore_tar_to_dir(
-    input: &Path,
-    storage: &Path,
-    force: bool,
-) -> Result<(), String> {
+pub(crate) fn restore_tar_to_dir(input: &Path, storage: &Path, force: bool) -> Result<(), String> {
     if storage.exists() {
-        let non_empty = fs::read_dir(storage).map(|it| it.count() > 0).unwrap_or(false);
+        let non_empty = fs::read_dir(storage)
+            .map(|it| it.count() > 0)
+            .unwrap_or(false);
         if non_empty && !force {
             return Err(format!(
                 "--storage {} is not empty; pass --force to overwrite \
@@ -705,8 +737,7 @@ pub(crate) fn restore_tar_to_dir(
     } else {
         fs::create_dir_all(storage).map_err(|e| format!("mkdir {}: {e}", storage.display()))?;
     }
-    let in_file =
-        fs::File::open(input).map_err(|e| format!("open {}: {e}", input.display()))?;
+    let in_file = fs::File::open(input).map_err(|e| format!("open {}: {e}", input.display()))?;
     let mut archive = tar::Archive::new(in_file);
     archive
         .unpack(storage)
@@ -757,7 +788,10 @@ fn cmd_drain_node(args: &[String]) {
     let client = http_client();
     let resp = client
         .post(&url)
-        .header(reqwest::header::AUTHORIZATION, format!("Bearer {admin_token}"))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {admin_token}"),
+        )
         .header(
             reqwest::header::CONTENT_TYPE,
             "application/x-www-form-urlencoded",
@@ -802,8 +836,8 @@ fn cmd_capacity(args: &[String]) {
     if !status.is_success() {
         die(format!("GET {url}: HTTP {} — {text}", status.as_u16()));
     }
-    let payload: serde_json::Value = serde_json::from_str(&text)
-        .unwrap_or_else(|e| die(format!("GET {url}: parse body: {e}")));
+    let payload: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| die(format!("GET {url}: parse body: {e}")));
 
     // Table: idx | addr | used% | free/total GiB | live GiB | age
     // Widths chosen to keep the row under 100 cols on a typical
@@ -812,7 +846,10 @@ fn cmd_capacity(args: &[String]) {
         "{:>3}  {:<40}  {:>7}  {:>10}  {:>10}  {:>10}  {:>6}",
         "idx", "addr", "used%", "free/GiB", "total/GiB", "live/GiB", "age(s)"
     );
-    println!("{:-<3}  {:-<40}  {:->7}  {:->10}  {:->10}  {:->10}  {:->6}", "", "", "", "", "", "", "");
+    println!(
+        "{:-<3}  {:-<40}  {:->7}  {:->10}  {:->10}  {:->10}  {:->6}",
+        "", "", "", "", "", "", ""
+    );
     let nodes = payload
         .get("nodes")
         .and_then(|v| v.as_array())
@@ -829,22 +866,13 @@ fn cmd_capacity(args: &[String]) {
             .get("capacity_known")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let used_pct = node
-            .get("used_pct")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let free = node
-            .get("free_bytes")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let used_pct = node.get("used_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let free = node.get("free_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
         let total = node
             .get("total_bytes")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let live = node
-            .get("live_bytes")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let live = node.get("live_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
         let age = node.get("age_secs").and_then(|v| v.as_u64());
 
         let used_str = if known {
@@ -919,11 +947,14 @@ fn cmd_rotate_kek(args: &[String]) {
         "file" => holofs_storage::crypto::KekSource::File(
             std::env::var("HOLOFS_AT_REST_KEK_PATH")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| die("HOLOFS_AT_REST_KEK_SOURCE=file requires HOLOFS_AT_REST_KEK_PATH".into())),
+                .unwrap_or_else(|_| {
+                    die("HOLOFS_AT_REST_KEK_SOURCE=file requires HOLOFS_AT_REST_KEK_PATH".into())
+                }),
         ),
         "env" => holofs_storage::crypto::KekSource::EnvHex(
-            std::env::var("HOLOFS_AT_REST_KEK_HEX")
-                .unwrap_or_else(|_| die("HOLOFS_AT_REST_KEK_SOURCE=env requires HOLOFS_AT_REST_KEK_HEX".into())),
+            std::env::var("HOLOFS_AT_REST_KEK_HEX").unwrap_or_else(|_| {
+                die("HOLOFS_AT_REST_KEK_SOURCE=env requires HOLOFS_AT_REST_KEK_HEX".into())
+            }),
         ),
         _ => holofs_storage::crypto::KekSource::IdentitySeed,
     };
@@ -935,12 +966,9 @@ fn cmd_rotate_kek(args: &[String]) {
         .map(PathBuf::from)
         .unwrap_or_else(|_| storage.join("keyring.json"));
     let bootstrap_dek = holofs_storage::crypto::derive_shard_key(&identity.to_bytes());
-    let mut ring = holofs_storage::crypto::Keyring::load_or_bootstrap(
-        &keyring_path,
-        &kek,
-        bootstrap_dek,
-    )
-    .unwrap_or_else(|e| die(format!("open keyring {}: {e}", keyring_path.display())));
+    let mut ring =
+        holofs_storage::crypto::Keyring::load_or_bootstrap(&keyring_path, &kek, bootstrap_dek)
+            .unwrap_or_else(|e| die(format!("open keyring {}: {e}", keyring_path.display())));
 
     let before = ring.current_id();
     let new_id = ring.rotate(&kek);
@@ -995,8 +1023,8 @@ mod tests {
         )
         .unwrap();
 
-        let size = snapshot_dir_to_tar(src.path(), tarball.path())
-            .expect("snapshot should succeed");
+        let size =
+            snapshot_dir_to_tar(src.path(), tarball.path()).expect("snapshot should succeed");
         assert!(size > 0);
 
         // Empty target — restore should populate it.
@@ -1031,12 +1059,18 @@ mod tests {
         let err = restore_tar_to_dir(tarball.path(), dst.path(), false)
             .expect_err("should refuse non-empty target");
         assert!(err.contains("not empty"), "got: {err}");
-        assert!(dst.path().join("existing.txt").exists(), "must not have unpacked");
+        assert!(
+            dst.path().join("existing.txt").exists(),
+            "must not have unpacked"
+        );
 
         // With --force it goes through.
         restore_tar_to_dir(tarball.path(), dst.path(), true).unwrap();
         assert!(dst.path().join("a.txt").exists());
-        assert!(dst.path().join("existing.txt").exists(), "pre-existing file kept");
+        assert!(
+            dst.path().join("existing.txt").exists(),
+            "pre-existing file kept"
+        );
     }
 
     #[test]

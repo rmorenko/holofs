@@ -107,6 +107,8 @@ axum = { version = "0.7", default-features = false, features = [
   "matched-path",
   "tracing",
   "multipart",
+  # P2.1 — Query extractor for the pagination-aware admin endpoints.
+  "query",
 ] }
 tower = { version = "0.4", default-features = false }
 tower-http = { version = "0.5", default-features = false, features = [

@@ -94,8 +94,7 @@ impl Gateway {
     /// catalog, `Decode` if the cluster Purge partially fails. Directory
     /// entries cannot be deleted via this method — use [`Self::rmdir`].
     pub async fn remove_object(&self, name: &str) -> Result<RemoveResult, GatewayError> {
-        catalog_path::validate(name)
-            .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
+        catalog_path::validate(name).map_err(|e| GatewayError::BadRequest(e.to_string()))?;
         let mut cat = self.catalog.write().await;
         if matches!(cat.get(name), Some(m) if m.kind == ObjectKind::Directory) {
             return Err(GatewayError::IsDirectory);
@@ -313,8 +312,7 @@ impl Gateway {
     /// Returns `AlreadyExists` (target taken), `NotADirectory` (parent is
     /// not a directory), `BadRequest` (parent missing or path malformed).
     pub async fn mkdir(&self, path: &str) -> Result<MkdirResult, GatewayError> {
-        catalog_path::validate(path)
-            .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
+        catalog_path::validate(path).map_err(|e| GatewayError::BadRequest(e.to_string()))?;
         let mut cat = self.catalog.write().await;
         if cat.get(path).is_some() {
             return Err(GatewayError::AlreadyExists);
@@ -347,8 +345,7 @@ impl Gateway {
     /// - `NotADirectory`: entry exists but is a data object.
     /// - `DirectoryNotEmpty`: at least one entry has `path` as a prefix.
     pub async fn rmdir(&self, path: &str) -> Result<RmdirResult, GatewayError> {
-        catalog_path::validate(path)
-            .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
+        catalog_path::validate(path).map_err(|e| GatewayError::BadRequest(e.to_string()))?;
         let mut cat = self.catalog.write().await;
         match cat.get(path) {
             Some(m) if m.kind == ObjectKind::Directory => {}
@@ -389,10 +386,8 @@ impl Gateway {
     /// - `BadRequest`: parent of `new` missing, or `new` would be a
     ///   descendant of `old` (cycle).
     pub async fn rename(&self, old: &str, new: &str) -> Result<RenameResult, GatewayError> {
-        catalog_path::validate(old)
-            .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
-        catalog_path::validate(new)
-            .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
+        catalog_path::validate(old).map_err(|e| GatewayError::BadRequest(e.to_string()))?;
+        catalog_path::validate(new).map_err(|e| GatewayError::BadRequest(e.to_string()))?;
         if old == new {
             return Ok(RenameResult {
                 old: old.to_string(),
@@ -473,13 +468,9 @@ impl Gateway {
     ///
     /// Errors `NotADirectory` if `prefix` is a real entry but not a
     /// directory; `NotFound` if `prefix` is non-empty and unknown.
-    pub async fn list_dir(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<(String, Manifest)>, GatewayError> {
+    pub async fn list_dir(&self, prefix: &str) -> Result<Vec<(String, Manifest)>, GatewayError> {
         if !prefix.is_empty() {
-            catalog_path::validate(prefix)
-                .map_err(|e| GatewayError::BadRequest(e.to_string()))?;
+            catalog_path::validate(prefix).map_err(|e| GatewayError::BadRequest(e.to_string()))?;
         }
         let cat = self.catalog.read().await;
         if !prefix.is_empty() {
@@ -548,6 +539,91 @@ impl Gateway {
         }
         out
     }
+
+    /// P2.1 — paginated variant of [`Self::list_all_objects`]. Returns
+    /// at most `limit` non-directory entries whose name is strictly
+    /// greater than `after` (or from the beginning when `after` is
+    /// `None`), plus a `next_cursor` = the last returned name if the
+    /// scan hit the limit (i.e. there might be more).
+    ///
+    /// Backed by `BTreeMap::range` so the seek to `after` is O(log N)
+    /// — a caller iterating in `limit`-sized pages walks the whole
+    /// catalog in O(N log N) instead of the O(N²) that a filter over
+    /// `list_all_objects` would incur.
+    ///
+    /// **Filtering:** directory manifests are still skipped exactly
+    /// as in `list_all_objects`; the returned batch may therefore be
+    /// *shorter than* `limit` even when there are more non-directory
+    /// entries after `next_cursor`. Callers must trust `next_cursor`
+    /// rather than the batch size to decide when to stop.
+    pub async fn list_all_objects_paginated(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> PaginatedListing {
+        use std::ops::Bound;
+        let cat = self.catalog.read().await;
+        let mut out: Vec<CatalogEntry> = Vec::with_capacity(limit.min(1024));
+        let range = match after {
+            Some(a) => cat
+                .entries
+                .range::<str, _>((Bound::Excluded(a), Bound::Unbounded)),
+            None => cat
+                .entries
+                .range::<str, _>((Bound::Unbounded, Bound::Unbounded)),
+        };
+        let mut last_name: Option<String> = None;
+        for (name, manifest) in range {
+            // The pagination contract counts entries emitted (post-
+            // directory filter) — an all-directories catalog would
+            // otherwise short-circuit the scan on the first non-
+            // directory entry and lose the tail.
+            if out.len() >= limit {
+                break;
+            }
+            last_name = Some(name.clone());
+            if manifest.kind == ObjectKind::Directory {
+                continue;
+            }
+            let size: u64 = manifest
+                .sym_len
+                .iter()
+                .map(|s| *s as u64)
+                .sum::<u64>()
+                .saturating_mul(manifest.channels as u64);
+            out.push(CatalogEntry {
+                name: name.clone(),
+                kind: manifest.kind,
+                size,
+            });
+        }
+
+        // `next_cursor` is set only when the walk stopped because it
+        // hit `limit`. If the range iterator was exhausted the entire
+        // catalog has been covered and pagination is done — signal
+        // that with `None`.
+        let next_cursor = if out.len() >= limit { last_name } else { None };
+        PaginatedListing {
+            items: out,
+            next_cursor,
+        }
+    }
+}
+
+/// P2.1 — one page of [`Gateway::list_all_objects_paginated`].
+#[derive(Debug, Clone)]
+pub struct PaginatedListing {
+    /// The batch of catalog entries for this page. May be empty (last
+    /// page fell entirely on directory entries) or shorter than the
+    /// requested limit (see the note on the directory filter). Callers
+    /// keep iterating until `next_cursor` is `None`, not until `items`
+    /// is empty.
+    pub items: Vec<CatalogEntry>,
+    /// The cursor to feed into the next call's `after` parameter, or
+    /// `None` when the walk hit the end of the catalog. Opaque to the
+    /// caller in the HTTP surface (base64-encoded there), a plain
+    /// name at the Rust API layer.
+    pub next_cursor: Option<String>,
 }
 
 /// One row of [`Gateway::list_all_objects`]. Meant to be
