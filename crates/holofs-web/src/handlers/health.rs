@@ -35,6 +35,106 @@ pub async fn api_stats(Extension(gw): Extension<Arc<Gateway>>) -> Response {
     json_response(StatusCode::OK, stats_to_json(&gw.api_stats().await))
 }
 
+/// `GET /api/capacity` — P1.4b JSON snapshot of the per-node disk
+/// footprint cached by the capacity poller. One entry per known node
+/// (a node the poller has heard back from at least once). Nodes with
+/// `total_bytes = 0` are reported as `capacity_known=false` so the
+/// operator UI can grey them out instead of showing 0% used.
+///
+/// Response shape:
+///
+/// ```json
+/// {
+///   "nodes": [
+///     {"idx":0,"addr":"127.0.0.1:9101","free_bytes":123,"total_bytes":456,
+///      "live_bytes":78,"used_pct":17.11,"capacity_known":true,
+///      "age_secs":42},
+///     …
+///   ],
+///   "cluster": {
+///     "known_nodes": 3,
+///     "min_used_pct": 12.5,
+///     "max_used_pct": 71.2,
+///     "skew_ratio": 5.7
+///   }
+/// }
+/// ```
+///
+/// `skew_ratio = max_used / max(min_used, 1)` — matches the WARN
+/// threshold in the capacity poller. Absent (null) when fewer than
+/// two nodes report known capacity.
+pub async fn api_capacity(Extension(gw): Extension<Arc<Gateway>>) -> Response {
+    let snap = holofs_gateway::capacity::snapshot(&gw.capacity_map).await;
+    let cluster = gw.cluster();
+    let now = std::time::Instant::now();
+    let mut body = String::with_capacity(256 + cluster.node_addrs.len() * 160);
+    body.push_str("{\"nodes\":[");
+    let mut first = true;
+    for (idx, addr) in cluster.node_addrs.iter().enumerate() {
+        if !first {
+            body.push(',');
+        }
+        first = false;
+        match snap.get(addr) {
+            Some(entry) => {
+                let age = now.saturating_duration_since(entry.updated_at).as_secs();
+                let known = entry.capacity.is_known();
+                let used_pct = entry.capacity.used_pct();
+                body.push_str(&format!(
+                    "{{\"idx\":{idx},\"addr\":\"{}\",\"free_bytes\":{},\
+                     \"total_bytes\":{},\"live_bytes\":{},\"used_pct\":{:.2},\
+                     \"capacity_known\":{},\"age_secs\":{}}}",
+                    addr.replace('"', "\\\""),
+                    entry.capacity.free_bytes,
+                    entry.capacity.total_bytes,
+                    entry.capacity.live_bytes,
+                    used_pct,
+                    known,
+                    age,
+                ));
+            }
+            None => {
+                // Never heard back — surface with null-ish sentinel
+                // so the client can distinguish "poll hasn't run yet"
+                // from "node reported (0, 0)".
+                body.push_str(&format!(
+                    "{{\"idx\":{idx},\"addr\":\"{}\",\"free_bytes\":0,\
+                     \"total_bytes\":0,\"live_bytes\":0,\"used_pct\":0.00,\
+                     \"capacity_known\":false,\"age_secs\":null}}",
+                    addr.replace('"', "\\\"")
+                ));
+            }
+        }
+    }
+    body.push(']');
+    // Aggregate skew stats. Snapshot the values once and reuse; the
+    // helper takes a slice, so a small clone-out is cheaper than
+    // locking the map again.
+    let entries: Vec<_> = snap.values().copied().collect();
+    let (known_nodes, cluster_frag) = {
+        let n_known = entries.iter().filter(|e| e.capacity.is_known()).count();
+        let cluster_line = match holofs_gateway::capacity::min_max_used_pct(&entries) {
+            Some((mn, mx)) => format!(
+                "\"min_used_pct\":{:.2},\"max_used_pct\":{:.2},\"skew_ratio\":{:.2}",
+                mn,
+                mx,
+                mx / mn.max(1.0),
+            ),
+            None => "\"min_used_pct\":null,\"max_used_pct\":null,\"skew_ratio\":null".into(),
+        };
+        (n_known, cluster_line)
+    };
+    body.push_str(&format!(
+        ",\"cluster\":{{\"known_nodes\":{known_nodes},{cluster_frag}}}}}"
+    ));
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
 /// `GET /metrics` — Prometheus exposition format (text-version 0.0.4).
 /// Pull-based gauges sourced from [`Gateway::api_stats`] + the
 /// per-node admin-kill snapshot + the N-series counters exposed via

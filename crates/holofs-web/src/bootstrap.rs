@@ -697,6 +697,58 @@ pub async fn bootstrap_cluster(
 
     info!(width = w, height = h, k = K, layers = NLAYERS, "frame parameters");
 
+    // P1.4b — spawn the capacity poller (refreshes gateway.capacity_map
+    // every ~60 s) and, when enabled, the auto-rebalancer daemon
+    // (drains the fullest node when used_pct crosses a threshold).
+    // Both live for the process lifetime; drop-on-shutdown via the
+    // JoinHandle they return is enough (no cancellation token needed —
+    // they only stall on interval ticks).
+    let poll_interval_secs: u64 = std::env::var("HOLOFS_CAPACITY_POLL_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(holofs_gateway::capacity::DEFAULT_POLL_INTERVAL_SECS);
+    let _poller = holofs_gateway::capacity::spawn_capacity_poller(
+        Arc::clone(gateway.cluster()),
+        Arc::clone(&gateway.capacity_map),
+        poll_interval_secs,
+    );
+    info!(poll_interval_secs, "capacity poller started");
+
+    let rebalance_interval_secs: u64 = std::env::var("HOLOFS_REBALANCE_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(holofs_gateway::capacity::DEFAULT_REBALANCE_INTERVAL_SECS);
+    let rebalance_trigger_pct: f64 = std::env::var("HOLOFS_REBALANCE_TRIGGER_PCT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(holofs_gateway::capacity::DEFAULT_REBALANCE_TRIGGER_PCT);
+    let rebalance_cold_ceiling_pct: f64 = std::env::var("HOLOFS_REBALANCE_COLD_CEILING_PCT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(holofs_gateway::capacity::DEFAULT_REBALANCE_COLD_CEILING_PCT);
+    let repair_d_for_rebalance = K; // same donor count the manual drain uses
+    if let Some(_h) = holofs_gateway::capacity::spawn_auto_rebalancer(
+        Arc::clone(&gateway),
+        Arc::clone(&gateway.capacity_map),
+        Arc::clone(&catalog),
+        rebalance_interval_secs,
+        rebalance_trigger_pct,
+        rebalance_cold_ceiling_pct,
+        repair_d_for_rebalance,
+    ) {
+        info!(
+            rebalance_interval_secs,
+            rebalance_trigger_pct,
+            rebalance_cold_ceiling_pct,
+            "auto-rebalance daemon started"
+        );
+    } else {
+        info!(
+            "auto-rebalance daemon disabled \
+             (HOLOFS_REBALANCE_INTERVAL_SECS=0 or HOLOFS_REBALANCE_TRIGGER_PCT<=0)"
+        );
+    }
+
     // Install the global client TLS config so every gateway RPC honours it.
     // After this point, holofs_client::rpc connects with TLS when the
     // config is Some, plain TCP otherwise.

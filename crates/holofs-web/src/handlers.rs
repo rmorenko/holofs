@@ -54,8 +54,8 @@ pub use analytics::{api_fingerprint, mix_preview, mix_save, spotlight_png};
 pub use dirops::{batch_delete, mkdir, mkdir_form, mv, rm_form, rmdir, rmdir_form};
 pub use escrow::{escrow_download, escrow_recover, escrow_split};
 pub use health::{
-    admin_add_node, admin_catalog_names, admin_drain_node, api_stats, gc_orphans, health_events,
-    metrics, toggle_node,
+    admin_add_node, admin_catalog_names, admin_drain_node, api_capacity, api_stats, gc_orphans,
+    health_events, metrics, toggle_node,
 };
 pub use objects::{
     delete_object, get_object, get_preview, get_shard_png, preview_stream, put_object,

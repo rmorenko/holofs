@@ -21,6 +21,10 @@ sha2.workspace = true
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rcgen = { workspace = true }
+# P1.4b — statvfs / GetDiskFreeSpaceExW wrapper for the Capacity reply.
+# Safe cross-platform shim (workspace lint forbids `unsafe_code`, so
+# calling libc::statvfs directly isn't an option).
+fs2.workspace = true
 
 [dev-dependencies]
 # tls.rs round-trip tests write certs to a TempDir and read them back.

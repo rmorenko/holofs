@@ -2074,6 +2074,68 @@ pub async fn node_current_epoch(addr: &str) -> Result<u64, ClientError> {
     }
 }
 
+/// P1.4b — snapshot of a node's current disk footprint. Fields are
+/// bytes; `total_bytes == 0` means the node couldn't answer (in-memory
+/// store or `statvfs` failure), which the caller should treat as
+/// "capacity unknown, skip skew check for this node".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeCapacity {
+    /// Bytes still writable on the mount hosting the storage dir.
+    pub free_bytes: u64,
+    /// Total capacity of that mount in bytes.
+    pub total_bytes: u64,
+    /// Sum of currently-live shard payload sizes on this node —
+    /// what a compaction pass would preserve.
+    pub live_bytes: u64,
+}
+
+impl NodeCapacity {
+    /// `true` when the node reported a real filesystem answer. All-
+    /// zeros means unknown; `total_bytes == 0` is the signal. Live
+    /// bytes alone are not enough — an empty node on a real disk
+    /// still reports `total > 0`.
+    #[must_use]
+    pub const fn is_known(&self) -> bool {
+        self.total_bytes > 0
+    }
+
+    /// Used percentage 0.0–100.0, with `0.0` for unknown. Uses
+    /// `live_bytes` (steady-state footprint) over `total_bytes` —
+    /// see [`Response::Capacity`] docstrings for why WAL churn is
+    /// deliberately excluded here.
+    #[must_use]
+    pub fn used_pct(&self) -> f64 {
+        if !self.is_known() {
+            return 0.0;
+        }
+        (self.live_bytes as f64 / self.total_bytes as f64) * 100.0
+    }
+}
+
+/// P1.4b — poll one node for its current disk footprint. Composes
+/// one RPC round-trip and decodes the `Response::Capacity` reply
+/// into a [`NodeCapacity`]. Feeds the gateway's periodic capacity
+/// poller (see `holofs_gateway`), which drives both the operator-
+/// facing `/api/capacity` surface and the auto-rebalance daemon.
+pub async fn node_capacity(addr: &str) -> Result<NodeCapacity, ClientError> {
+    match rpc(addr, Request::Capacity).await? {
+        Response::Capacity {
+            free_bytes,
+            total_bytes,
+            live_bytes,
+        } => Ok(NodeCapacity {
+            free_bytes,
+            total_bytes,
+            live_bytes,
+        }),
+        Response::Error(msg) => Err(ClientError::RemoteError(msg)),
+        other => Err(ClientError::UnexpectedResponse {
+            expected: "Capacity from Capacity",
+            got: format!("{other:?}"),
+        }),
+    }
+}
+
 /// epoch-GC: same as [`purge_node_by_hash`] but the node only
 /// removes shards whose stored write-epoch is `<= max_epoch`. Purges
 /// that would otherwise race a concurrent PUT are safely no-op'd on

@@ -195,6 +195,11 @@ reqwest = { version = "0.12", default-features = false, features = [
 # whole shard-dir out of memory.
 tar = "0.4"
 anyhow = "1"
+# P1.4b — safe cross-platform statvfs / GetDiskFreeSpaceExW wrapper for
+# the node-side capacity reporter. The workspace forbids `unsafe_code`
+# so we can't call libc directly; fs2 is a thin, dep-light shim that
+# exposes exactly `available_space(path)` + `total_space(path)`.
+fs2 = "0.4"
 rand = "0.8"
 chrono = { version = "0.4", default-features = false, features = [
   "clock",

@@ -2,6 +2,7 @@
 
 pub mod chaos;
 pub mod crypto;
+pub mod disk_space;
 pub mod identity;
 pub mod node_service;
 pub mod tls;

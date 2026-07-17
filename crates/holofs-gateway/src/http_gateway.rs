@@ -377,6 +377,12 @@ pub struct Gateway {
     /// only the leader mutex stays on Gateway because it is not a
     /// counter and doesn't fit either grouped struct cleanly.
     pub(crate) persist_flush_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// P1.4b — capacity poller cache keyed by node address. Populated
+    /// by [`crate::capacity::spawn_capacity_poller`] every ~60 s; read
+    /// by the `/api/capacity` HTTP handler and the auto-rebalance
+    /// daemon. Starts empty; a lookup that misses is treated as
+    /// "capacity unknown" (see the `NodeCapacity::is_known` gate).
+    pub capacity_map: crate::capacity::CapacityMap,
 }
 
 /// PNG cache entry: fully-encoded body + the layer it was decoded at
@@ -484,6 +490,7 @@ impl Gateway {
             backpressure: Backpressure::new(),
             persist_flush_mutex: Arc::new(tokio::sync::Mutex::new(())),
             stats_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            capacity_map: crate::capacity::empty_map(),
         })
     }
 

@@ -168,6 +168,7 @@ async fn main() {
     let to_short_public = to_short.clone();
     let short_routes: Router<LeptosOptions> = Router::new()
         .route("/api/stats", get(handlers::api_stats))
+        .route("/api/capacity", get(handlers::api_capacity))
         .route("/metrics", get(handlers::metrics))
         .route_layer(from_fn(move |req, next| {
             run_with_deadline(SHORT, to_short_public.clone(), req, next)

@@ -52,6 +52,7 @@ fn main() {
         "snapshot" => cmd_snapshot(&args[1..]),
         "snapshot-restore" => cmd_snapshot_restore(&args[1..]),
         "drain-node" => cmd_drain_node(&args[1..]),
+        "capacity" => cmd_capacity(&args[1..]),
         "rotate-kek" => cmd_rotate_kek(&args[1..]),
         "--help" | "-h" | "help" => {
             print_usage();
@@ -104,6 +105,18 @@ cluster elasticity (P1.4 — drain + decommission):\n\
                                         Follow-up: re-sign whitelist WITHOUT the drained\n\
                                         node + hot-reload; then physically stop the node.\n\
                                         See docs/operations.md §10.2.\n\
+\n\
+cluster capacity (P1.4b — observability + auto-rebalance signal):\n\
+  capacity --gateway URL\n\
+                                        print the per-node capacity table cached by the\n\
+                                        gateway's capacity poller: idx, addr, used%,\n\
+                                        free/total (GiB), live-bytes, freshness (secs since\n\
+                                        last successful poll). Also shows cluster-wide skew\n\
+                                        (min/max used-%, ratio). Auto-rebalance daemon\n\
+                                        fires when skew crosses HOLOFS_REBALANCE_TRIGGER_PCT\n\
+                                        (default 85) AND the coldest node is below\n\
+                                        HOLOFS_REBALANCE_COLD_CEILING_PCT (default 60).\n\
+                                        No admin-token needed — /api/capacity is read-only.\n\
 \n\
 at-rest key rotation (P1.7 — envelope encryption, offline per node):\n\
   rotate-kek --storage DIR\n\
@@ -758,6 +771,123 @@ fn cmd_drain_node(args: &[String]) {
         die(format!("POST {url}: HTTP {} — {text}", status.as_u16()));
     }
     println!("{text}");
+}
+
+// === cluster capacity (P1.4b) =====================================
+
+fn cmd_capacity(args: &[String]) {
+    let mut gateway: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--gateway" => {
+                gateway = Some(args[i + 1].clone());
+                i += 2;
+            }
+            other => die(format!("unexpected flag: {other}")),
+        }
+    }
+    let gateway = gateway.unwrap_or_else(|| flag_required("--gateway"));
+
+    let url = format!("{}/api/capacity", gateway.trim_end_matches('/'));
+    let client = http_client();
+    let resp = client
+        .get(&url)
+        .send()
+        .unwrap_or_else(|e| die(format!("GET {url}: {e}")));
+    let status = resp.status();
+    let text = resp
+        .text()
+        .unwrap_or_else(|e| die(format!("GET {url}: read body: {e}")));
+    if !status.is_success() {
+        die(format!("GET {url}: HTTP {} — {text}", status.as_u16()));
+    }
+    let payload: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| die(format!("GET {url}: parse body: {e}")));
+
+    // Table: idx | addr | used% | free/total GiB | live GiB | age
+    // Widths chosen to keep the row under 100 cols on a typical
+    // (address <= 50 chars) cluster; long addresses just wrap.
+    println!(
+        "{:>3}  {:<40}  {:>7}  {:>10}  {:>10}  {:>10}  {:>6}",
+        "idx", "addr", "used%", "free/GiB", "total/GiB", "live/GiB", "age(s)"
+    );
+    println!("{:-<3}  {:-<40}  {:->7}  {:->10}  {:->10}  {:->10}  {:->6}", "", "", "", "", "", "", "");
+    let nodes = payload
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for node in &nodes {
+        let idx = node.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
+        let addr = node
+            .get("addr")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let known = node
+            .get("capacity_known")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let used_pct = node
+            .get("used_pct")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let free = node
+            .get("free_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let total = node
+            .get("total_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let live = node
+            .get("live_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let age = node.get("age_secs").and_then(|v| v.as_u64());
+
+        let used_str = if known {
+            format!("{:>6.2}%", used_pct)
+        } else {
+            "  n/a".into()
+        };
+        let free_gib = if known {
+            format!("{:.2}", free as f64 / (1024.0 * 1024.0 * 1024.0))
+        } else {
+            "-".into()
+        };
+        let total_gib = if known {
+            format!("{:.2}", total as f64 / (1024.0 * 1024.0 * 1024.0))
+        } else {
+            "-".into()
+        };
+        let live_gib = format!("{:.2}", live as f64 / (1024.0 * 1024.0 * 1024.0));
+        let age_str = age.map(|a| a.to_string()).unwrap_or_else(|| "-".into());
+        println!(
+            "{:>3}  {:<40}  {:>7}  {:>10}  {:>10}  {:>10}  {:>6}",
+            idx, addr, used_str, free_gib, total_gib, live_gib, age_str
+        );
+    }
+
+    // Skew footer.
+    if let Some(cluster) = payload.get("cluster") {
+        let known = cluster
+            .get("known_nodes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let min = cluster.get("min_used_pct").and_then(|v| v.as_f64());
+        let max = cluster.get("max_used_pct").and_then(|v| v.as_f64());
+        let ratio = cluster.get("skew_ratio").and_then(|v| v.as_f64());
+        println!();
+        match (min, max, ratio) {
+            (Some(mn), Some(mx), Some(r)) => println!(
+                "cluster skew: known_nodes={known} min={:.2}% max={:.2}% ratio={:.2}x",
+                mn, mx, r
+            ),
+            _ => println!("cluster skew: known_nodes={known} (need >=2 known nodes to compare)"),
+        }
+    }
 }
 
 // === at-rest key rotation (P1.7) ==================================

@@ -1801,6 +1801,26 @@ async fn handle_request(req: Request, store: &SharedStore, identity: &NodeIdenti
                     .into(),
             )
         }
+        Request::Capacity => {
+            // P1.4b — take a short snapshot under the store lock (dir
+            // path + live-bytes estimate) so we don't block the
+            // filesystem call behind concurrent PUTs. `statvfs` is
+            // ~microseconds on Linux, but we still don't want to hold
+            // the store mutex across it.
+            let (dir, live_bytes) = {
+                let s = store.lock().await;
+                (s.dir().map(std::path::PathBuf::from), s.live_bytes_estimate())
+            };
+            let (free_bytes, total_bytes) = match dir.as_deref() {
+                Some(d) => crate::disk_space::free_and_total_bytes(d),
+                None => (0, 0),
+            };
+            Response::Capacity {
+                free_bytes,
+                total_bytes,
+                live_bytes,
+            }
+        }
     }
 }
 
@@ -2689,6 +2709,86 @@ mod tests {
             Response::Error(msg) => assert!(msg.contains("unexpected"), "got: {msg}"),
             other => panic!("expected Error, got {other:?}"),
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- P1.4b Capacity handler ---
+
+    #[tokio::test]
+    async fn capacity_on_in_memory_node_returns_unknown_sentinel() {
+        // In-memory `Store::new()` has no `dir()`; the handler must
+        // fold that into the `(0, 0)` unknown-capacity contract while
+        // still reporting `live_bytes = 0` (nothing stored yet).
+        let (addr, _store, _h) = spawn_node((Ipv4Addr::LOCALHOST, 0).into()).await.unwrap();
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let resp = rpc(&mut s, Request::Capacity).await;
+        assert_eq!(
+            resp,
+            Response::Capacity {
+                free_bytes: 0,
+                total_bytes: 0,
+                live_bytes: 0,
+            },
+            "in-memory node must report the (0, 0, 0) unknown-capacity sentinel"
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_on_persistent_node_reports_real_disk_and_live_bytes() {
+        let dir = tmpdir("capacity-persistent");
+        let (addr, _store, _h) =
+            spawn_node_persistent((Ipv4Addr::LOCALHOST, 0).into(), &dir)
+                .await
+                .unwrap();
+
+        // Baseline: fresh node, no shards → live_bytes=0 but the mount
+        // should report a real total capacity via statvfs.
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let baseline = rpc(&mut s, Request::Capacity).await;
+        let (baseline_free, baseline_total, baseline_live) = match baseline {
+            Response::Capacity {
+                free_bytes,
+                total_bytes,
+                live_bytes,
+            } => (free_bytes, total_bytes, live_bytes),
+            other => panic!("expected Capacity, got {other:?}"),
+        };
+        assert!(
+            baseline_total > 0,
+            "persistent node on a real fs should report nonzero total_bytes"
+        );
+        assert!(
+            baseline_free <= baseline_total,
+            "free_bytes ({baseline_free}) must not exceed total_bytes ({baseline_total})"
+        );
+        assert_eq!(baseline_live, 0, "no shards yet → live_bytes should be 0");
+
+        // After a Put: live_bytes must grow by at least the shard's
+        // in-RAM footprint. This is the observable signal the gateway
+        // uses to detect where data actually lives.
+        let sh = make_shard(11);
+        let expected_growth = (sh.coeffs.len() + sh.payload.len()) as u64;
+        rpc(
+            &mut s,
+            Request::Put {
+                object_id: 42,
+                channel: 0,
+                layer: 0,
+                shard: sh,
+            },
+        )
+        .await;
+
+        let after = rpc(&mut s, Request::Capacity).await;
+        let after_live = match after {
+            Response::Capacity { live_bytes, .. } => live_bytes,
+            other => panic!("expected Capacity, got {other:?}"),
+        };
+        assert!(
+            after_live >= expected_growth,
+            "live_bytes ({after_live}) should have grown by at least {expected_growth} after the Put"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

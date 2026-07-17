@@ -135,6 +135,20 @@ pub enum Request {
     HandshakeComplete {
         client_signature: [u8; 64],
     },
+    /// P1.4b — ask the node for its current disk footprint: how
+    /// many bytes are still free on the mount hosting the storage
+    /// dir, how many bytes that mount has in total, and how many
+    /// bytes of live shard payload the node is currently holding.
+    /// Used by the gateway's capacity poller (updates every ~60 s)
+    /// to drive the operator-facing `/api/capacity` surface and the
+    /// auto-rebalance daemon that triggers a proactive drain when
+    /// any node crosses `used_pct >= threshold`.
+    ///
+    /// Returned as [`Response::Capacity`]. An in-memory-only node
+    /// (no storage dir configured) reports `free_bytes = 0,
+    /// total_bytes = 0, live_bytes = live shard payload sum`, which
+    /// the gateway interprets as "capacity unknown, skip skew check".
+    Capacity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +191,25 @@ pub enum Response {
         node_signature: [u8; 64],
         server_nonce: [u8; 32],
     },
+    /// P1.4b — reply to [`Request::Capacity`]. All three fields are
+    /// in bytes; a zero `total_bytes` means the node can't answer
+    /// (in-memory store or statvfs failure) and the gateway skips
+    /// this node in its skew calculation.
+    Capacity {
+        /// Bytes still writable on the mount that hosts the storage
+        /// directory. From `statvfs` on unix / `GetDiskFreeSpaceExW`
+        /// on windows. `0` if unknown.
+        free_bytes: u64,
+        /// Total mount capacity in bytes. `0` if unknown.
+        total_bytes: u64,
+        /// Sum of currently-live shard payload sizes as reported by
+        /// [`Store::live_bytes_estimate`]. Cheap: aggregate of
+        /// coeffs+payload lengths, no directory walk. This is what
+        /// a compaction would preserve (i.e. steady-state footprint
+        /// once the WAL settles), so it's the right number to feed
+        /// into a "which node holds more logical data" comparison.
+        live_bytes: u64,
+    },
     Error(String),
 }
 
@@ -197,6 +230,8 @@ const OP_PUT_TIMINGS: u8 = 0x0c;
 // bilateral handshake (P0.3b).
 const OP_HANDSHAKE: u8 = 0x0d;
 const OP_HANDSHAKE_COMPLETE: u8 = 0x0e;
+// P1.4b capacity report.
+const OP_CAPACITY: u8 = 0x0f;
 
 const RSP_PONG: u8 = 0x00;
 const RSP_ACK: u8 = 0x01;
@@ -210,6 +245,9 @@ const RSP_EPOCH: u8 = 0x07;
 const RSP_PUT_TIMINGS: u8 = 0x08;
 // bilateral handshake (P0.3b).
 const RSP_HANDSHAKE_CHALLENGE: u8 = 0x09;
+// P1.4b capacity report reply — three big-endian u64s
+// (free_bytes, total_bytes, live_bytes).
+const RSP_CAPACITY: u8 = 0x0a;
 const RSP_ERR: u8 = 0xff;
 
 impl Request {
@@ -305,6 +343,7 @@ impl Request {
                 b.push(OP_HANDSHAKE_COMPLETE);
                 b.extend_from_slice(client_signature);
             }
+            Request::Capacity => b.push(OP_CAPACITY),
         }
         b
     }
@@ -406,6 +445,7 @@ impl Request {
                 client_signature.copy_from_slice(c.take(64)?);
                 Ok(Request::HandshakeComplete { client_signature })
             }
+            OP_CAPACITY => Ok(Request::Capacity),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unknown op: {other:#x}"),
@@ -475,6 +515,16 @@ impl Response {
                 b.push(RSP_HANDSHAKE_CHALLENGE);
                 b.extend_from_slice(node_signature);
                 b.extend_from_slice(server_nonce);
+            }
+            Response::Capacity {
+                free_bytes,
+                total_bytes,
+                live_bytes,
+            } => {
+                b.push(RSP_CAPACITY);
+                b.extend_from_slice(&free_bytes.to_be_bytes());
+                b.extend_from_slice(&total_bytes.to_be_bytes());
+                b.extend_from_slice(&live_bytes.to_be_bytes());
             }
             Response::Error(msg) => {
                 b.push(RSP_ERR);
@@ -546,6 +596,11 @@ impl Response {
                     server_nonce,
                 })
             }
+            RSP_CAPACITY => Ok(Response::Capacity {
+                free_bytes: c.u64()?,
+                total_bytes: c.u64()?,
+                live_bytes: c.u64()?,
+            }),
             RSP_ERR => {
                 let n = c.u32()? as usize;
                 let bytes = c.take(n)?;
@@ -937,5 +992,57 @@ mod tests {
         b.extend_from_slice(&u32::MAX.to_be_bytes());
         let e = Response::decode(&b).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    // --- P1.4b capacity ops ---
+
+    #[test]
+    fn request_capacity_roundtrip() {
+        let r = Request::Capacity;
+        assert_eq!(Request::decode(&r.encode()).unwrap(), r);
+    }
+
+    #[test]
+    fn response_capacity_roundtrip() {
+        // Non-trivial values across each u64 to catch a byte-order
+        // regression in any of the three fields independently.
+        let r = Response::Capacity {
+            free_bytes: 0x0011_2233_4455_6677,
+            total_bytes: 0x8899_AABB_CCDD_EEFF,
+            live_bytes: 42,
+        };
+        assert_eq!(Response::decode(&r.encode()).unwrap(), r);
+    }
+
+    #[test]
+    fn response_capacity_zero_case_roundtrip() {
+        // Unknown-capacity sentinel: the node couldn't read statvfs
+        // and hands back all zeros. The gateway interprets this as
+        // "skip skew check for this node", so the codec has to carry
+        // it through cleanly.
+        let r = Response::Capacity {
+            free_bytes: 0,
+            total_bytes: 0,
+            live_bytes: 0,
+        };
+        assert_eq!(Response::decode(&r.encode()).unwrap(), r);
+    }
+
+    #[test]
+    fn response_capacity_truncated_returns_error() {
+        let full = Response::Capacity {
+            free_bytes: 1,
+            total_bytes: 2,
+            live_bytes: 3,
+        }
+        .encode();
+        // Every prefix strictly shorter than the full 25 bytes
+        // (1 tag + 3×u64) must fail the decode — no silent defaults.
+        for cut in 1..full.len() {
+            assert!(
+                Response::decode(&full[..cut]).is_err(),
+                "truncated Capacity of len {cut} decoded successfully"
+            );
+        }
     }
 }

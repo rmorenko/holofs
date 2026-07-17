@@ -15,6 +15,7 @@
 //! using `holofs_gateway::GatewayError` etc. without following the
 //! module path.
 
+pub mod capacity;
 pub mod catalog_store;
 mod decode;
 mod diff;
