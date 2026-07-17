@@ -112,6 +112,12 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --release
+      # === P1.6 chaos scenarios ============================================
+      # The `chaos` feature on `holofs-storage` unlocks fault-injection
+      # hooks in the WAL write path (disk-full at append, disk-full at
+      # fsync). The feature is off by default so the release build pays
+      # zero cost; this step exercises the paths in a dedicated pass.
+      - run: cargo test -p holofs-storage --features chaos --release
 
   # === Production WASM bundle ==============================================
   leptos:

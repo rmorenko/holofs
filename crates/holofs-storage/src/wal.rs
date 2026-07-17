@@ -267,6 +267,13 @@ impl WalWriter {
     /// single fsync.
     pub fn sync(&mut self, fsync: bool) -> io::Result<()> {
         self.active.flush()?;
+        // Chaos hook: `chaos::arm_wal_next_sync_fails` returns
+        // Some(err) here to simulate a kernel-side fsync failure
+        // (disk full flushed at commit, EIO on write-back, etc). No-op
+        // when the `chaos` crate feature is off.
+        if let Some(err) = crate::chaos::maybe_fail_wal_sync() {
+            return Err(err);
+        }
         if fsync {
             self.active.get_ref().sync_all()?;
         }
@@ -339,6 +346,16 @@ impl WalWriter {
     }
 
     fn write_record(&mut self, kind: u8, body: &[u8]) -> io::Result<()> {
+        // Chaos hook: fail before any bytes hit the buffered writer
+        // so the record_count / body_hasher / bytes_written state
+        // stays consistent with what's actually on the wire. `chaos::
+        // arm_wal_next_append_fails` (test-only) fires exactly once,
+        // then clears itself so a retry succeeds. No-op when the
+        // `chaos` crate feature is off — the helper is a `#[cfg]`
+        // inline `None`.
+        if let Some(err) = crate::chaos::maybe_fail_wal_append() {
+            return Err(err);
+        }
         // Framing: [4 B body_len][1 B kind][body][8 B digest]
         // body_len covers the kind byte + body itself, so the
         // reader knows exactly how many bytes to consume before

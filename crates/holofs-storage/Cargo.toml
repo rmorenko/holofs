@@ -26,5 +26,13 @@ rcgen = { workspace = true }
 # tls.rs round-trip tests write certs to a TempDir and read them back.
 tempfile = "3"
 
+[features]
+# Test-only fault injection for chaos scenarios (P1.6). Disabled by
+# default so the release build never compiles the atomic fault
+# registers or their check hooks — the two `maybe_fail_wal_*` helpers
+# in `src/chaos.rs` collapse to inline `None` under `#[cfg]` when this
+# feature is off, so WAL hot paths pay zero cost.
+chaos = []
+
 [lints]
 workspace = true
