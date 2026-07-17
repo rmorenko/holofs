@@ -19,8 +19,10 @@
 //! ## Segment layout
 //!
 //! ```text
-//! [8 bytes]  magic = b"HOLOFSW1"
+//! [8 bytes]  magic = b"HOLOFSW2"       (V1 = b"HOLOFSW1" accepted read-only)
 //! [record]*
+//! [20 bytes] footer (V2 only, present on cleanly-rotated segments)
+//!            = b"HOLOFSF1" | record_count: u32 BE | sha256(record bytes)[..8]
 //! ```
 //!
 //! ## Record framing
@@ -32,9 +34,18 @@
 //! [8 bytes body integrity digest = sha256(kind || body)[..8]]
 //! ```
 //!
-//! A trailing partial record (crash mid-write) is detected via
-//! short read or digest mismatch and truncates the recovered
-//! stream — the missing records are treated as never-committed.
+//! ## Corruption vs truncation
+//!
+//! - A trailing partial record (crash mid-write) is detected via short read
+//!   or digest mismatch and truncates the recovered stream — the missing
+//!   records are treated as never-committed.
+//! - **Mid-segment** corruption (bit-flip inside a cleanly-rotated segment)
+//!   used to be indistinguishable from truncation. V2 adds a per-segment
+//!   footer written at `rotate()`; on read, presence of the footer means the
+//!   segment was closed, and any per-record digest mismatch or footer
+//!   count/digest mismatch surfaces as `Err(InvalidData)` instead of silently
+//!   dropping records. Active segments (crash before rotate) never have a
+//!   footer, so their tail still silent-truncates as before.
 //!
 //! ## Kinds
 //!
@@ -59,16 +70,31 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use holofs_core::hash::sha256;
+use holofs_core::hash::{sha256, Sha256};
 use holofs_core::merkle::Hash;
 use holofs_core::rlnc::Shard;
 
 use crate::crypto::{decrypt, encrypt, KEY_LEN, NONCE_LEN, TAG_LEN};
 
-/// 8-byte segment file magic. Bumps versioned so a future format
-/// (compaction epoch, checksummed segment header, etc.) can be
-/// distinguished without a rewrite pass.
-pub const SEG_MAGIC: &[u8; 8] = b"HOLOFSW1";
+/// 8-byte segment file magic. V2 introduces the per-segment footer
+/// (`FOOTER_MAGIC` + record count + body digest) that turns
+/// mid-segment corruption from silent truncation into `Err(InvalidData)`.
+pub const SEG_MAGIC: &[u8; 8] = b"HOLOFSW2";
+/// Legacy V1 magic. Accepted on read (silent-truncate semantics as
+/// before) so a node upgraded across versions can still replay its
+/// own pre-V2 log.
+const SEG_MAGIC_V1: &[u8; 8] = b"HOLOFSW1";
+
+/// Footer magic. Present at `file_len - FOOTER_LEN` on every segment
+/// that was closed by [`WalWriter::rotate`]. Active (currently-written)
+/// segments never have a footer.
+const FOOTER_MAGIC: &[u8; 8] = b"HOLOFSF1";
+/// Segment footer total length: magic (8) + record_count (u32 BE, 4) +
+/// truncated sha256 of the record region (8).
+const FOOTER_LEN: usize = 8 + 4 + 8;
+/// Truncation length applied to the segment-body sha256 digest inside
+/// the footer. Matches the per-record `DIGEST_LEN` for consistency.
+const FOOTER_DIGEST_LEN: usize = 8;
 
 const KIND_PUT_PLAIN: u8 = 0;
 const KIND_PUT_SEALED: u8 = 1;
@@ -141,6 +167,15 @@ pub struct WalWriter {
     seq: u64,
     active: BufWriter<File>,
     bytes_written: u64,
+    /// Number of records appended to the currently-active segment.
+    /// Written into the footer at `rotate()` so the reader can
+    /// cross-check against what it actually replays.
+    record_count: u32,
+    /// Running SHA-256 of every byte written to the active segment
+    /// *after* the segment magic and *before* the footer — i.e. the
+    /// concatenation of all record frames. Finalised at `rotate()`
+    /// and truncated to `FOOTER_DIGEST_LEN` bytes for the footer.
+    body_hasher: Sha256,
     /// Rotation threshold. When `bytes_written` exceeds this after
     /// an append, the writer closes the active segment and opens a
     /// fresh one with `seq + 1`.
@@ -174,6 +209,8 @@ impl WalWriter {
             seq: next_seq,
             active: BufWriter::new(file),
             bytes_written,
+            record_count: 0,
+            body_hasher: Sha256::new(),
             rotate_at: 64 * 1024 * 1024,
             enc_key,
         })
@@ -294,11 +331,22 @@ impl WalWriter {
 
     /// Close the current segment and open the next one. Called
     /// after an append when [`Self::bytes_written`] exceeds
-    /// [`Self::rotate_at`]. Idempotent-safe — closing a
-    /// zero-length new segment is fine.
+    /// [`Self::rotate_at`]. Writes the V2 footer (magic + count +
+    /// body digest) before fsync so the closed segment is
+    /// self-verifying on read. Idempotent-safe — closing a
+    /// zero-length new segment (writes footer with count=0) is fine.
     pub fn rotate(&mut self) -> io::Result<()> {
-        // Best-effort flush + fsync before rotate so the "closed"
-        // segment reaches disk before the fd is dropped.
+        // Finalise the body digest and write the footer BEFORE the
+        // fsync so the segment reaches disk as a self-consistent
+        // unit. Take() out the hasher (leaves a fresh one behind we
+        // never use again on this file); the new segment gets its
+        // own hasher below.
+        let body_digest = std::mem::replace(&mut self.body_hasher, Sha256::new()).finalize();
+        self.active.write_all(FOOTER_MAGIC)?;
+        self.active.write_all(&self.record_count.to_be_bytes())?;
+        self.active.write_all(&body_digest[..FOOTER_DIGEST_LEN])?;
+        self.bytes_written += FOOTER_LEN as u64;
+
         self.active.flush()?;
         self.active.get_ref().sync_all()?;
         let next_seq = self.seq + 1;
@@ -311,6 +359,8 @@ impl WalWriter {
         file.write_all(SEG_MAGIC)?;
         self.seq = next_seq;
         self.bytes_written = SEG_MAGIC.len() as u64;
+        self.record_count = 0;
+        self.body_hasher = Sha256::new();
         self.active = BufWriter::new(file);
         Ok(())
     }
@@ -326,38 +376,98 @@ impl WalWriter {
         digest_input.extend_from_slice(body);
         let digest = sha256(&digest_input);
 
-        self.active.write_all(&framed_body_len.to_be_bytes())?;
-        self.active.write_all(&[kind])?;
+        let len_bytes = framed_body_len.to_be_bytes();
+        let kind_byte = [kind];
+        let digest_prefix = &digest[..DIGEST_LEN];
+
+        self.active.write_all(&len_bytes)?;
+        self.active.write_all(&kind_byte)?;
         self.active.write_all(body)?;
-        self.active.write_all(&digest[..DIGEST_LEN])?;
+        self.active.write_all(digest_prefix)?;
+
+        // Feed exactly the bytes we wrote into the segment-body
+        // hasher, in the same order. The reader recomputes this
+        // over the same window between segment magic and footer.
+        self.body_hasher.update(&len_bytes);
+        self.body_hasher.update(&kind_byte);
+        self.body_hasher.update(body);
+        self.body_hasher.update(digest_prefix);
+
+        self.record_count = self.record_count.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "wal segment record_count would overflow u32; rotate before this happens",
+            )
+        })?;
         self.bytes_written += (LEN_PREFIX + 1 + body.len() + DIGEST_LEN) as u64;
         Ok(())
     }
 }
 
 /// Read a segment file end-to-end, yielding decoded records in
-/// disk order. A truncated tail (short read or digest mismatch)
-/// stops iteration cleanly — no `Err` returned — so a crash
-/// mid-write leaves the segment recoverable. Corrupted mid-stream
-/// records (bad magic, bad kind byte) surface as `Err` so the
-/// caller can surface the problem instead of silently truncating.
+/// disk order.
+///
+/// Segments come in two flavours on disk:
+///
+/// - **V1** (magic `HOLOFSW1`) — no footer. Silent-truncate on any
+///   trailing partial-record / digest mismatch (legacy behaviour).
+/// - **V2** (magic `HOLOFSW2`) — footer present iff the segment was
+///   closed by [`WalWriter::rotate`]. If the footer is present, its
+///   `record_count` and body digest are cross-checked against what
+///   we replayed; any mismatch — mid-segment bit-flip, wrong count,
+///   short truncation of a rotated segment — surfaces as
+///   [`io::ErrorKind::InvalidData`]. If the footer is absent (active
+///   segment at the moment of crash), silent-truncate on the tail
+///   record as V1 does.
 pub fn read_segment(
     path: &Path,
     enc_key: Option<&[u8; KEY_LEN]>,
 ) -> io::Result<Vec<RecordKind>> {
-    let mut file = BufReader::new(File::open(path)?);
-    let mut magic = [0u8; 8];
-    if file.read_exact(&mut magic).is_err() {
+    // Slurp the whole segment. WAL segments are capped at
+    // `WalWriter::rotate_at` (default 64 MiB) so this is bounded;
+    // sequential reads outperform BufReader for anything under
+    // ~1 GiB and let us peek the trailing footer trivially.
+    let bytes = fs::read(path)?;
+    if bytes.len() < 8 {
         // Empty / truncated header — treat as empty segment.
         return Ok(Vec::new());
     }
-    if magic != *SEG_MAGIC {
+    let magic = &bytes[..8];
+    let is_v2 = magic == SEG_MAGIC;
+    let is_v1 = magic == SEG_MAGIC_V1;
+    if !is_v2 && !is_v1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("wal segment {path:?} has wrong magic {magic:?}"),
         ));
     }
+
+    // Locate optional footer. Only V2 can carry one, and only when
+    // the segment was cleanly rotated. Footer absent → active
+    // segment / crash before rotate → silent-truncate semantics.
+    let (body_end, expected_footer) = if is_v2
+        && bytes.len() >= 8 + FOOTER_LEN
+        && &bytes[bytes.len() - FOOTER_LEN..bytes.len() - FOOTER_LEN + 8] == FOOTER_MAGIC
+    {
+        let footer_start = bytes.len() - FOOTER_LEN;
+        let count = u32::from_be_bytes(
+            bytes[footer_start + 8..footer_start + 12]
+                .try_into()
+                .unwrap(),
+        );
+        let mut digest = [0u8; FOOTER_DIGEST_LEN];
+        digest.copy_from_slice(&bytes[footer_start + 12..footer_start + FOOTER_LEN]);
+        (footer_start, Some((count, digest)))
+    } else {
+        (bytes.len(), None)
+    };
+
+    let mut file = BufReader::new(io::Cursor::new(&bytes[8..body_end]));
     let mut out = Vec::new();
+    // Streaming SHA-256 of the record region; must match the footer
+    // digest exactly at end-of-segment when a footer is present.
+    let mut body_hasher = Sha256::new();
+    let mut records_seen: u32 = 0;
     loop {
         let mut len_buf = [0u8; LEN_PREFIX];
         // A partial length prefix means we're in the truncated
@@ -385,10 +495,17 @@ pub fn read_segment(
             // Digest mismatch on the trailing record is
             // indistinguishable from truncated mid-write, so we
             // treat it as end-of-segment rather than corruption.
-            // Mid-segment corruption would need explicit segment
-            // checksumming — deferred.
+            // For V2 segments with a footer we then also cross-check
+            // records_seen against footer.count below, so a
+            // mid-segment bit-flip (which would leave more bytes
+            // AND records after this one) still surfaces as an
+            // error instead of being silently accepted.
             break;
         }
+        body_hasher.update(&len_buf);
+        body_hasher.update(&kind_and_body);
+        body_hasher.update(&digest_buf);
+        records_seen = records_seen.saturating_add(1);
         let kind = kind_and_body[0];
         let body = &kind_and_body[1..];
         match kind {
@@ -554,6 +671,34 @@ pub fn read_segment(
             }
         }
     }
+
+    // V2 footer cross-check. Any of these mismatches means the
+    // closed segment is inconsistent with what the writer sealed —
+    // mid-segment bit-flip, wrong count, or a truncation between
+    // records that landed exactly on a record boundary (so per-record
+    // digest happens to pass but count is short).
+    if let Some((expected_count, expected_digest)) = expected_footer {
+        if records_seen != expected_count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "wal segment {path:?} footer says {expected_count} records \
+                     but replay recovered {records_seen}"
+                ),
+            ));
+        }
+        let actual_digest = &body_hasher.finalize()[..FOOTER_DIGEST_LEN];
+        if actual_digest != expected_digest {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "wal segment {path:?} footer body-digest mismatch \
+                     (mid-segment corruption)"
+                ),
+            ));
+        }
+    }
+
     Ok(out)
 }
 
@@ -693,6 +838,127 @@ mod tests {
         // Reader must return the ONE complete record and stop.
         let records = read_segment(&seg_path, None).unwrap();
         assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn rotate_writes_footer_and_reads_back_ok() {
+        // After rotate, seg 1 has a HOLOFSF1 footer; read_segment
+        // should verify count + digest and return all records.
+        let dir = TempDir::new().unwrap();
+        let mut w = WalWriter::open(dir.path().to_path_buf(), 0, None).unwrap();
+        w.append_put(1, 0, 0, &[9u8; 32], &tiny_shard(1)).unwrap();
+        w.append_put(2, 0, 0, &[8u8; 32], &tiny_shard(2)).unwrap();
+        w.append_purge(1).unwrap();
+        w.rotate().unwrap();
+
+        let seg1 = super::segment_path(dir.path(), 1);
+        let bytes = fs::read(&seg1).unwrap();
+        assert_eq!(&bytes[..8], SEG_MAGIC, "seg 1 should be V2");
+        assert_eq!(
+            &bytes[bytes.len() - FOOTER_LEN..bytes.len() - FOOTER_LEN + 8],
+            FOOTER_MAGIC,
+            "seg 1 should have a footer after rotate"
+        );
+        let footer_count = u32::from_be_bytes(
+            bytes[bytes.len() - FOOTER_LEN + 8..bytes.len() - FOOTER_LEN + 12]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(footer_count, 3, "footer should say 3 records");
+
+        let records = read_segment(&seg1, None).unwrap();
+        assert_eq!(records.len(), 3);
+    }
+
+    #[test]
+    fn mid_segment_bitflip_after_rotate_is_detected() {
+        // Flip a single payload byte in a rotated segment. The
+        // per-record digest catches the corrupted record and cuts
+        // the replay short (records_seen = 0 or 1 depending on
+        // which record was flipped), then the footer cross-check
+        // notices records_seen != footer.count and returns Err
+        // instead of silently accepting a truncated view.
+        let dir = TempDir::new().unwrap();
+        let mut w = WalWriter::open(dir.path().to_path_buf(), 0, None).unwrap();
+        w.append_put(1, 0, 0, &[9u8; 32], &tiny_shard(1)).unwrap();
+        w.append_put(2, 0, 0, &[8u8; 32], &tiny_shard(2)).unwrap();
+        w.rotate().unwrap();
+
+        let seg1 = super::segment_path(dir.path(), 1);
+        let mut bytes = fs::read(&seg1).unwrap();
+        // Flip a byte deep inside the record region — pick an offset
+        // past the segment magic (8) but well before the footer
+        // (bytes.len() - FOOTER_LEN).
+        let flip_at = 40;
+        assert!(flip_at + 8 < bytes.len() - FOOTER_LEN);
+        bytes[flip_at] ^= 0x01;
+        fs::write(&seg1, &bytes).unwrap();
+
+        let err = read_segment(&seg1, None).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "got: {err}");
+        assert!(
+            err.to_string().contains("records")
+                || err.to_string().contains("body-digest mismatch"),
+            "expected count or digest mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn footer_body_digest_mismatch_is_detected() {
+        // Tamper the last byte of the footer digest directly. Every
+        // record still passes its per-record digest AND the count
+        // matches, so ONLY the segment-body digest guards us — this
+        // exercises the digest-mismatch branch specifically.
+        let dir = TempDir::new().unwrap();
+        let mut w = WalWriter::open(dir.path().to_path_buf(), 0, None).unwrap();
+        w.append_put(1, 0, 0, &[9u8; 32], &tiny_shard(1)).unwrap();
+        w.append_put(2, 0, 0, &[8u8; 32], &tiny_shard(2)).unwrap();
+        w.rotate().unwrap();
+
+        let seg1 = super::segment_path(dir.path(), 1);
+        let mut bytes = fs::read(&seg1).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        fs::write(&seg1, &bytes).unwrap();
+
+        let err = read_segment(&seg1, None).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("body-digest mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn legacy_v1_segment_reads_with_silent_truncate() {
+        // Construct a HOLOFSW1 segment by hand (magic only, no
+        // footer), then verify the reader still accepts it and
+        // uses silent-truncate semantics on a partial tail — so a
+        // node upgraded from V1 → V2 can still replay its own
+        // pre-upgrade log without failing boot.
+        let dir = TempDir::new().unwrap();
+        let seg = super::segment_path(dir.path(), 1);
+        fs::write(&seg, SEG_MAGIC_V1).unwrap();
+
+        let records = read_segment(&seg, None).unwrap();
+        assert!(records.is_empty(), "empty V1 segment should read as no records");
+
+        // Now append a well-formed V1 record. Since V1 has no footer,
+        // the reader should return it without any cross-check errors.
+        let mut f = OpenOptions::new().append(true).open(&seg).unwrap();
+        // Same framing as V2 (`write_record` doesn't change per version).
+        // Reuse the writer to synthesise the bytes: open a V2 writer,
+        // append, then splice its record bytes into the V1 file.
+        let dir2 = TempDir::new().unwrap();
+        let mut w = WalWriter::open(dir2.path().to_path_buf(), 0, None).unwrap();
+        w.append_purge(99).unwrap();
+        w.sync(true).unwrap();
+        drop(w);
+        let v2_bytes = fs::read(super::segment_path(dir2.path(), 1)).unwrap();
+        // Skip the V2 segment magic, keep the record bytes.
+        f.write_all(&v2_bytes[8..]).unwrap();
+        drop(f);
+
+        let records = read_segment(&seg, None).unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(matches!(records[0], RecordKind::Purge { object_id: 99 }));
     }
 
     #[test]
