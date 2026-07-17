@@ -218,7 +218,9 @@ impl WalWriter {
 
     /// Append a Put record. Returns after the buffered write but
     /// does not fsync — the caller is responsible for `sync()` at
-    /// batch boundaries.
+    /// batch boundaries. Sealed vs plaintext is decided by the
+    /// writer's `enc_key`. Reads (via `read_segment`) accept either
+    /// format regardless of whether the current writer is sealing.
     pub fn append_put(
         &mut self,
         object_id: u64,
@@ -227,48 +229,8 @@ impl WalWriter {
         hash: &Hash,
         shard: &Shard,
     ) -> io::Result<()> {
-        // Sealed vs plaintext is decided by the writer's enc_key.
-        // Reads (via `read_segment`) accept either format.
-        let mut body: Vec<u8>;
-        let kind: u8;
-        if let Some(key) = &self.enc_key {
-            kind = KIND_PUT_SEALED;
-            // Fixed header (42 bytes: object_id + channel + layer +
-            // hash) → sealed_len (u32) → sealed blob. The header
-            // doubles as AAD so tampering trips the AEAD tag.
-            let mut header = Vec::with_capacity(PUT_SEALED_AAD_LEN);
-            header.extend_from_slice(&object_id.to_be_bytes());
-            header.push(channel);
-            header.push(layer);
-            header.extend_from_slice(hash);
-            // Sealed plaintext = [coeffs_len u32][coeffs][payload].
-            // The coeffs_len prefix lets the reader recover the
-            // split (encryption is opaque bytes).
-            let coeffs_len = shard.coeffs.len() as u32;
-            let mut plaintext =
-                Vec::with_capacity(4 + shard.coeffs.len() + shard.payload.len());
-            plaintext.extend_from_slice(&coeffs_len.to_be_bytes());
-            plaintext.extend_from_slice(&shard.coeffs);
-            plaintext.extend_from_slice(&shard.payload);
-            let sealed = encrypt(key, &header, &plaintext);
-            let sealed_len = sealed.len() as u32;
-            header.extend_from_slice(&sealed_len.to_be_bytes());
-            body = header;
-            body.extend_from_slice(&sealed);
-        } else {
-            kind = KIND_PUT_PLAIN;
-            let coeffs_len = shard.coeffs.len() as u32;
-            let payload_len = shard.payload.len() as u32;
-            body = Vec::with_capacity(PUT_PLAIN_HEADER_LEN + shard.coeffs.len() + shard.payload.len());
-            body.extend_from_slice(&object_id.to_be_bytes());
-            body.push(channel);
-            body.push(layer);
-            body.extend_from_slice(hash);
-            body.extend_from_slice(&coeffs_len.to_be_bytes());
-            body.extend_from_slice(&payload_len.to_be_bytes());
-            body.extend_from_slice(&shard.coeffs);
-            body.extend_from_slice(&shard.payload);
-        }
+        let (kind, body) =
+            build_put_record_body(object_id, channel, layer, hash, shard, self.enc_key.as_ref());
         self.write_record(kind, &body)
     }
 
@@ -327,6 +289,14 @@ impl WalWriter {
     /// [`Store`](crate::node_service::Store).
     pub fn bytes_written(&self) -> u64 {
         self.bytes_written
+    }
+
+    /// Seq number of the currently-active (being-appended-to)
+    /// segment. Exposed for the compaction path — after
+    /// [`Self::rotate`], the segment that just closed carries seq
+    /// `active_seq_before_rotate` and becomes the compaction epoch.
+    pub fn active_seq(&self) -> u64 {
+        self.seq
     }
 
     /// Close the current segment and open the next one. Called
@@ -736,11 +706,230 @@ pub fn walk_wal_segments(dir: &Path) -> io::Result<Vec<(u64, PathBuf)>> {
 fn parse_segment_name(name: &str) -> Option<u64> {
     let stem = name.strip_suffix(".seg")?;
     let digits = stem.strip_prefix("wal-")?;
+    // Compact segments live under `wal-c<N>.seg` — reject that
+    // prefix here so a mixed dir listing doesn't confuse regular
+    // and compact enumeration.
+    if digits.starts_with('c') {
+        return None;
+    }
     digits.parse::<u64>().ok()
 }
 
 fn segment_path(dir: &Path, seq: u64) -> PathBuf {
     dir.join(format!("wal-{seq:08}.seg"))
+}
+
+/// Parse `wal-cNNNNNNNN.seg` → `NNNNNNNN` as the compaction epoch
+/// (== the highest regular segment seq subsumed by this compacted
+/// file). `wal-N.seg` and everything else return `None`.
+fn parse_compact_segment_name(name: &str) -> Option<u64> {
+    let stem = name.strip_suffix(".seg")?;
+    let digits = stem.strip_prefix("wal-c")?;
+    digits.parse::<u64>().ok()
+}
+
+fn compact_segment_path(dir: &Path, epoch: u64) -> PathBuf {
+    dir.join(format!("wal-c{epoch:08}.seg"))
+}
+
+/// Scan `dir` for `wal-cNNNNNNNN.seg` files (compaction outputs),
+/// returning them sorted by epoch. Each compacted segment carries a
+/// self-contained snapshot of the RAM store at the moment segment
+/// `epoch` (a regular `wal-<epoch>.seg`) was closed.
+pub fn walk_compact_segments(dir: &Path) -> io::Result<Vec<(u64, PathBuf)>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(epoch) = parse_compact_segment_name(name) else {
+            continue;
+        };
+        out.push((epoch, path));
+    }
+    out.sort_by_key(|(e, _)| *e);
+    Ok(out)
+}
+
+/// Highest compaction epoch present on disk, or `None` if no
+/// compacted segments exist. On boot, records from `wal-c<H>.seg` are
+/// replayed first (they represent live state at time H) and only
+/// regular segments with `seq > H` are replayed on top.
+pub fn highest_compact_epoch(dir: &Path) -> io::Result<Option<u64>> {
+    Ok(walk_compact_segments(dir)?.last().map(|(e, _)| *e))
+}
+
+/// Write a compacted segment carrying `records` as the full live
+/// state at epoch `epoch`. Records are serialised through the normal
+/// `WalWriter` framing + V2 footer path, then atomically renamed
+/// into place so a crash at any point either leaves an orphan `.tmp`
+/// (ignored on boot) or a fully-formed compacted segment.
+///
+/// `records` is anything iterable that yields `(object_id, channel,
+/// layer, hash, shard)` — the same shape [`RecordKind::Put`] carries.
+/// The caller must snapshot the RAM store under the store lock,
+/// release the lock, and then hand the snapshot in here; writing the
+/// tmp file happens without holding the store lock so long compaction
+/// runs don't block writers.
+pub fn write_compacted_segment(
+    dir: &Path,
+    epoch: u64,
+    records: impl IntoIterator<Item = (u64, u8, u8, Hash, Shard)>,
+    enc_key: Option<[u8; KEY_LEN]>,
+) -> io::Result<PathBuf> {
+    let final_path = compact_segment_path(dir, epoch);
+    let tmp_path = dir.join(format!("wal-c{epoch:08}.seg.tmp"));
+
+    // Fresh writer over the .tmp file. We manually open the file
+    // rather than going through `WalWriter::open` because that helper
+    // insists on the `wal-<seq>.seg` naming; the framing + footer
+    // logic below is a direct mirror of `WalWriter::rotate`.
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp_path)?;
+    file.write_all(SEG_MAGIC)?;
+    let mut writer = BufWriter::new(file);
+    let mut record_count: u32 = 0;
+    let mut body_hasher = Sha256::new();
+
+    for (object_id, channel, layer, hash, shard) in records {
+        // Reconstruct the on-wire body exactly as `WalWriter::
+        // append_put` would, then frame + hash + append it.
+        let (kind, body) = build_put_record_body(object_id, channel, layer, &hash, &shard, enc_key.as_ref());
+        let framed_body_len = (1 + body.len()) as u32;
+        let mut digest_input = Vec::with_capacity(1 + body.len());
+        digest_input.push(kind);
+        digest_input.extend_from_slice(&body);
+        let digest = sha256(&digest_input);
+
+        let len_bytes = framed_body_len.to_be_bytes();
+        let kind_byte = [kind];
+        let digest_prefix = &digest[..DIGEST_LEN];
+
+        writer.write_all(&len_bytes)?;
+        writer.write_all(&kind_byte)?;
+        writer.write_all(&body)?;
+        writer.write_all(digest_prefix)?;
+
+        body_hasher.update(&len_bytes);
+        body_hasher.update(&kind_byte);
+        body_hasher.update(&body);
+        body_hasher.update(digest_prefix);
+
+        record_count = record_count.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compacted segment record_count would overflow u32",
+            )
+        })?;
+    }
+
+    // Footer: magic + count + truncated body digest.
+    let digest = body_hasher.finalize();
+    writer.write_all(FOOTER_MAGIC)?;
+    writer.write_all(&record_count.to_be_bytes())?;
+    writer.write_all(&digest[..FOOTER_DIGEST_LEN])?;
+
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
+    drop(writer);
+
+    // Atomic rename. On POSIX this is atomic; on Windows the target
+    // must not exist, but `wal-c<epoch>.seg` is derived from a fresh
+    // epoch each compaction so collisions don't happen in practice.
+    fs::rename(&tmp_path, &final_path)?;
+    // fsync the directory so the rename is durable across a crash.
+    if let Ok(dir_file) = File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
+    Ok(final_path)
+}
+
+/// After a fresh `wal-c<kept_epoch>.seg` has been durably written,
+/// delete every file it supersedes:
+///
+/// - `wal-1.seg .. wal-<kept_epoch>.seg` (regular segments now
+///   captured in the compacted file);
+/// - `wal-c<M>.seg` where `M < kept_epoch` (older compacted files).
+///
+/// Also sweeps stray `wal-c*.seg.tmp` orphans left by a crashed
+/// compaction. Failures on individual `remove_file` calls are logged
+/// but not propagated — the next boot / next compaction round will
+/// try again.
+pub fn gc_compacted(dir: &Path, kept_epoch: u64) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let should_delete = if let Some(seq) = parse_segment_name(name) {
+            seq <= kept_epoch
+        } else if let Some(epoch) = parse_compact_segment_name(name) {
+            epoch < kept_epoch
+        } else if name.starts_with("wal-c") && name.ends_with(".seg.tmp") {
+            // Stray tmp from a crashed compaction.
+            true
+        } else {
+            false
+        };
+        if should_delete {
+            if let Err(e) = fs::remove_file(&path) {
+                eprintln!("wal::gc_compacted: remove {path:?} failed: {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reconstruct the on-wire body for a Put record. Shared between
+/// `WalWriter::append_put` and `write_compacted_segment` so both
+/// paths produce byte-identical records.
+fn build_put_record_body(
+    object_id: u64,
+    channel: u8,
+    layer: u8,
+    hash: &Hash,
+    shard: &Shard,
+    enc_key: Option<&[u8; KEY_LEN]>,
+) -> (u8, Vec<u8>) {
+    if let Some(key) = enc_key {
+        let mut header = Vec::with_capacity(PUT_SEALED_AAD_LEN);
+        header.extend_from_slice(&object_id.to_be_bytes());
+        header.push(channel);
+        header.push(layer);
+        header.extend_from_slice(hash);
+        let coeffs_len = shard.coeffs.len() as u32;
+        let mut plaintext =
+            Vec::with_capacity(4 + shard.coeffs.len() + shard.payload.len());
+        plaintext.extend_from_slice(&coeffs_len.to_be_bytes());
+        plaintext.extend_from_slice(&shard.coeffs);
+        plaintext.extend_from_slice(&shard.payload);
+        let sealed = encrypt(key, &header, &plaintext);
+        let sealed_len = sealed.len() as u32;
+        header.extend_from_slice(&sealed_len.to_be_bytes());
+        let mut body = header;
+        body.extend_from_slice(&sealed);
+        (KIND_PUT_SEALED, body)
+    } else {
+        let coeffs_len = shard.coeffs.len() as u32;
+        let payload_len = shard.payload.len() as u32;
+        let mut body =
+            Vec::with_capacity(PUT_PLAIN_HEADER_LEN + shard.coeffs.len() + shard.payload.len());
+        body.extend_from_slice(&object_id.to_be_bytes());
+        body.push(channel);
+        body.push(layer);
+        body.extend_from_slice(hash);
+        body.extend_from_slice(&coeffs_len.to_be_bytes());
+        body.extend_from_slice(&payload_len.to_be_bytes());
+        body.extend_from_slice(&shard.coeffs);
+        body.extend_from_slice(&shard.payload);
+        (KIND_PUT_PLAIN, body)
+    }
 }
 
 #[cfg(test)]
@@ -973,5 +1162,119 @@ mod tests {
         let list = walk_wal_segments(dir.path()).unwrap();
         let seqs: Vec<u64> = list.iter().map(|(s, _)| *s).collect();
         assert_eq!(seqs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn compact_segment_naming_and_walkers_dont_cross_streams() {
+        // `walk_wal_segments` returns only wal-N.seg;
+        // `walk_compact_segments` returns only wal-cN.seg.
+        // Neither picks up the other's files or stray .tmp orphans.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("wal-00000001.seg"), b"HOLOFSW2").unwrap();
+        fs::write(dir.path().join("wal-00000002.seg"), b"HOLOFSW2").unwrap();
+        fs::write(dir.path().join("wal-c00000005.seg"), b"HOLOFSW2").unwrap();
+        fs::write(dir.path().join("wal-c00000010.seg"), b"HOLOFSW2").unwrap();
+        fs::write(dir.path().join("wal-c00000099.seg.tmp"), b"orphan").unwrap();
+        fs::write(dir.path().join("unrelated.txt"), b"noise").unwrap();
+
+        let regular = walk_wal_segments(dir.path()).unwrap();
+        assert_eq!(regular.iter().map(|(s, _)| *s).collect::<Vec<_>>(), vec![1, 2]);
+
+        let compact = walk_compact_segments(dir.path()).unwrap();
+        assert_eq!(compact.iter().map(|(e, _)| *e).collect::<Vec<_>>(), vec![5, 10]);
+
+        assert_eq!(highest_compact_epoch(dir.path()).unwrap(), Some(10));
+    }
+
+    #[test]
+    fn write_compacted_segment_roundtrip() {
+        // Write a compacted segment carrying 3 synthetic Puts, then
+        // read it back. Every record survives and the trailing
+        // footer verifies (any drift would be caught by
+        // `read_segment` and surface as Err).
+        let dir = TempDir::new().unwrap();
+        let records = vec![
+            (10u64, 0u8, 0u8, [1u8; 32], tiny_shard(0xAA)),
+            (11, 1, 2, [2u8; 32], tiny_shard(0xBB)),
+            (12, 0, 3, [3u8; 32], tiny_shard(0xCC)),
+        ];
+        let path = write_compacted_segment(dir.path(), 42, records.clone(), None).unwrap();
+        assert!(path.ends_with("wal-c00000042.seg"));
+
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(&bytes[..8], SEG_MAGIC);
+        assert_eq!(
+            &bytes[bytes.len() - FOOTER_LEN..bytes.len() - FOOTER_LEN + 8],
+            FOOTER_MAGIC,
+        );
+
+        let replayed = read_segment(&path, None).unwrap();
+        assert_eq!(replayed.len(), 3);
+        for (i, rec) in replayed.iter().enumerate() {
+            let (o, c, l, h, s) = &records[i];
+            match rec {
+                RecordKind::Put {
+                    object_id,
+                    channel,
+                    layer,
+                    hash,
+                    shard,
+                } => {
+                    assert_eq!(*object_id, *o);
+                    assert_eq!(*channel, *c);
+                    assert_eq!(*layer, *l);
+                    assert_eq!(hash, h);
+                    assert_eq!(shard.coeffs, s.coeffs);
+                    assert_eq!(shard.payload, s.payload);
+                }
+                _ => panic!("compacted segment should carry only Put records"),
+            }
+        }
+    }
+
+    #[test]
+    fn write_compacted_segment_empty_live_state_is_fine() {
+        // Compacting a store with zero live shards writes a footer
+        // with count=0 and a valid digest. On read: zero records,
+        // no error.
+        let dir = TempDir::new().unwrap();
+        let path = write_compacted_segment(dir.path(), 7, std::iter::empty(), None).unwrap();
+        let replayed = read_segment(&path, None).unwrap();
+        assert!(replayed.is_empty());
+    }
+
+    #[test]
+    fn gc_compacted_deletes_subsumed_files_only() {
+        // Build a dir with wal-1..3, wal-c00000005, plus an older
+        // wal-c00000002 and an orphan .tmp. gc_compacted(5) should
+        // delete wal-1..5 (subsumed), wal-c00000002 (older compact),
+        // and the tmp orphan — but keep wal-c00000005 (the new
+        // compacted seg) and wal-6+ (newer regular segs written
+        // after compaction).
+        let dir = TempDir::new().unwrap();
+        for seq in 1..=6u64 {
+            fs::write(dir.path().join(format!("wal-{seq:08}.seg")), b"HOLOFSW2").unwrap();
+        }
+        fs::write(dir.path().join("wal-c00000002.seg"), b"HOLOFSW2").unwrap();
+        fs::write(dir.path().join("wal-c00000005.seg"), b"HOLOFSW2").unwrap();
+        fs::write(dir.path().join("wal-c00000099.seg.tmp"), b"orphan").unwrap();
+        fs::write(dir.path().join("keep-me.txt"), b"unrelated").unwrap();
+
+        gc_compacted(dir.path(), 5).unwrap();
+
+        let remaining: std::collections::BTreeSet<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let expected: std::collections::BTreeSet<String> = [
+            "wal-00000006.seg", // seq > kept_epoch, keep
+            "wal-c00000005.seg", // the compact seg we just wrote, keep
+            "keep-me.txt",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(remaining, expected);
     }
 }

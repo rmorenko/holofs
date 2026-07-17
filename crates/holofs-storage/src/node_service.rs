@@ -60,6 +60,25 @@ pub struct NodeConfig {
     /// (see B3 in `holofs-review.md`). Configurable via
     /// `HOLOFS_NODE_FLUSH_INTERVAL_MS`; default 5 ms.
     pub flush_interval_ms: u64,
+    /// Background WAL compactor tick period, in seconds. On each
+    /// tick the compactor decides whether to run based on
+    /// `wal_compact_ratio` + `wal_compact_min_bytes`. Set to `0` to
+    /// disable the compactor entirely (segments accumulate as in the
+    /// pre-2.x era). Env: `HOLOFS_WAL_COMPACT_INTERVAL_SECS`
+    /// (default 300 = 5 min).
+    pub wal_compact_interval_secs: u64,
+    /// Compaction ratio threshold. On each compactor tick, if
+    /// `wal_disk_bytes / max(live_bytes_estimate, 1) > ratio` AND
+    /// disk usage is above `wal_compact_min_bytes`, run a compaction
+    /// early (before the interval elapses again). Ratio > 2 means
+    /// the log has doubled the live payload — reclaiming makes sense.
+    /// Env: `HOLOFS_WAL_COMPACT_RATIO` (default 2.0).
+    pub wal_compact_ratio: f64,
+    /// Floor on disk usage before either the interval or the ratio
+    /// trigger fires. Prevents busy-looping compaction on tiny logs
+    /// where compacted output can be as large as the input. Env:
+    /// `HOLOFS_WAL_COMPACT_MIN_BYTES` (default 4 MiB).
+    pub wal_compact_min_bytes: u64,
 }
 
 impl NodeConfig {
@@ -82,6 +101,18 @@ impl NodeConfig {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(5)
                 .max(1),
+            wal_compact_interval_secs: std::env::var("HOLOFS_WAL_COMPACT_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(300),
+            wal_compact_ratio: std::env::var("HOLOFS_WAL_COMPACT_RATIO")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2.0),
+            wal_compact_min_bytes: std::env::var("HOLOFS_WAL_COMPACT_MIN_BYTES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(4 * 1024 * 1024),
         }
     }
 }
@@ -133,6 +164,27 @@ const SHARD_MAGIC: &[u8; 8] = SHARD_MAGIC_V1;
 /// snapshot taken before the re-PUT can't purge it either.
 ///
 /// If `dir` is set, every mutation (`put`/`purge`/`wipe`) is mirrored to disk.
+/// Return value from [`Store::compact`] describing the freshly-written
+/// compacted segment and the shape of the live state it captured.
+/// Handy for tracing / metrics / soak reports.
+#[derive(Debug, Clone)]
+pub struct CompactionReport {
+    /// Compaction epoch — equals the seq of the segment that was
+    /// closed by the rotate that started this compaction. Every
+    /// regular `wal-N.seg` with `N ≤ epoch` is now subsumed by
+    /// `wal-c<epoch>.seg` and has been garbage-collected.
+    pub epoch: u64,
+    /// Number of Put records written into the compacted segment
+    /// (= live shard count at snapshot time).
+    pub records: usize,
+    /// Sum of `shard.coeffs.len() + shard.payload.len()` across the
+    /// captured live records.
+    pub live_bytes: u64,
+    /// Final on-disk path of the compacted segment (post atomic
+    /// rename). Absolute path under the store's `dir`.
+    pub compact_path: PathBuf,
+}
+
 pub struct Store {
     shards: HashMap<Key, HashMap<Hash, (Shard, WriteEpoch)>>,
     dir: Option<PathBuf>,
@@ -246,12 +298,45 @@ impl Store {
                 }
             }
         }
-        // 2. WAL segments, in seq order. Records apply on top of
-        //    whatever the legacy scan already produced — Put
-        //    overwrites, Purge/PurgeHashes/Wipe drop.
+        // 2a. Compacted segment (if any). Contains the full live
+        //     state at the moment its epoch was compacted; regular
+        //     segments with seq <= epoch are subsumed and MUST be
+        //     skipped so we don't double-apply their Puts. If more
+        //     than one wal-c<N>.seg is present (crash mid-gc) the
+        //     highest wins — older ones are garbage from a previous
+        //     round that never got cleaned up.
+        let compact_epoch = crate::wal::highest_compact_epoch(&dir)?.unwrap_or(0);
+        let mut highest_seq: u64 = compact_epoch;
+        if compact_epoch > 0 {
+            let compact_path = crate::wal::walk_compact_segments(&dir)?
+                .into_iter()
+                .find(|(e, _)| *e == compact_epoch)
+                .map(|(_, p)| p)
+                .expect("highest_compact_epoch matched exactly one entry");
+            let epoch_from_mtime = fs::metadata(&compact_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let records = crate::wal::read_segment(&compact_path, enc_key.as_ref())?;
+            for rec in records {
+                apply_wal_record_to_shards(&mut shards, rec, epoch_from_mtime);
+            }
+        }
+        // 2b. Regular WAL segments, in seq order — but only those
+        //     that came after the last compaction. Records apply on
+        //     top of whatever the legacy scan and compacted segment
+        //     already produced — Put overwrites, Purge/PurgeHashes/
+        //     Wipe drop.
         let segments = crate::wal::walk_wal_segments(&dir)?;
-        let mut highest_seq: u64 = 0;
         for (seq, path) in &segments {
+            if *seq <= compact_epoch {
+                // Subsumed by the compacted segment. Left on disk by
+                // a crashed gc pass; the next `Store::compact` will
+                // sweep them via `wal::gc_compacted`.
+                continue;
+            }
             highest_seq = (*seq).max(highest_seq);
             let epoch_from_mtime = fs::metadata(path)
                 .and_then(|m| m.modified())
@@ -261,34 +346,7 @@ impl Store {
                 .unwrap_or(0);
             let records = crate::wal::read_segment(path, enc_key.as_ref())?;
             for rec in records {
-                match rec {
-                    crate::wal::RecordKind::Put {
-                        object_id,
-                        channel,
-                        layer,
-                        hash,
-                        shard,
-                    } => {
-                        shards
-                            .entry((object_id, channel, layer))
-                            .or_default()
-                            .insert(hash, (shard, epoch_from_mtime));
-                    }
-                    crate::wal::RecordKind::Purge { object_id } => {
-                        shards.retain(|(o, _, _), _| *o != object_id);
-                    }
-                    crate::wal::RecordKind::PurgeHashes { hashes } => {
-                        use std::collections::HashSet;
-                        let set: HashSet<Hash> = hashes.into_iter().collect();
-                        shards.retain(|_, bucket| {
-                            bucket.retain(|h, _| !set.contains(h));
-                            !bucket.is_empty()
-                        });
-                    }
-                    crate::wal::RecordKind::Wipe => {
-                        shards.clear();
-                    }
-                }
+                apply_wal_record_to_shards(&mut shards, rec, epoch_from_mtime);
             }
         }
         // 3. Open the next segment for writes. Even a brand-new
@@ -414,6 +472,129 @@ impl Store {
                 eprintln!("Store: WAL rotate failed, staying on current segment: {e}");
             }
         }
+    }
+
+    /// Total bytes across every WAL file on disk — regular segments
+    /// plus compacted segments plus any stray `.tmp` orphans. Used by
+    /// the background compactor to decide when to run based on the
+    /// `total_wal_bytes / live_bytes` ratio. Cheap: one `stat` per
+    /// file, no reads.
+    pub fn wal_disk_bytes(&self) -> io::Result<u64> {
+        let Some(dir) = &self.dir else { return Ok(0) };
+        let mut total: u64 = 0;
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let is_wal_file = name.starts_with("wal-")
+                && (name.ends_with(".seg") || name.ends_with(".seg.tmp"));
+            if !is_wal_file {
+                continue;
+            }
+            total = total.saturating_add(entry.metadata()?.len());
+        }
+        Ok(total)
+    }
+
+    /// Rough live-state size in bytes — sum of every RAM shard's
+    /// `coeffs + payload`. The compactor divides `wal_disk_bytes` by
+    /// this to derive the write-amplification ratio; a ratio > 2×
+    /// means the WAL carries at least as much stale-record overhead
+    /// as live data and compaction pays off.
+    pub fn live_bytes_estimate(&self) -> u64 {
+        self.shards
+            .values()
+            .flat_map(|bucket| bucket.values())
+            .map(|(shard, _)| (shard.coeffs.len() + shard.payload.len()) as u64)
+            .sum()
+    }
+
+    /// Snapshot the RAM store into a fresh compacted segment, then
+    /// garbage-collect every regular / older-compact segment it
+    /// subsumes. Called by the background compactor on interval /
+    /// threshold trigger.
+    ///
+    /// Sequence of operations:
+    /// 1. `wal.sync(true)` — make sure the active segment is durable
+    ///    before we rotate it away.
+    /// 2. `wal.rotate()` — close the currently-active segment with
+    ///    its V2 footer. Its seq becomes the compaction `epoch`;
+    ///    every regular `wal-N.seg` with `N ≤ epoch` will be
+    ///    subsumed.
+    /// 3. `wal::write_compacted_segment` — write a `wal-c<epoch>.seg`
+    ///    carrying the full live state (one Put per (key, hash)
+    ///    entry in the shard map). Atomic rename from `.tmp`
+    ///    guarantees a crash mid-write leaves an orphan `.tmp` (swept
+    ///    on next boot / next compaction) rather than a half-written
+    ///    compacted file.
+    /// 4. `wal::gc_compacted` — delete every `wal-N.seg` with
+    ///    `N ≤ epoch` plus any `wal-c<M>.seg` with `M < epoch`.
+    ///
+    /// Crash safety: after step 3 succeeds, boot replay picks up the
+    /// new compacted segment as the highest one and skips every
+    /// subsumed regular segment (whether or not step 4 finished).
+    ///
+    /// Returns `Ok(None)` if the store isn't backed by disk (nothing
+    /// to compact) or if there's nothing worth compacting (only the
+    /// bootstrap segment exists and it's empty).
+    pub fn compact(&mut self) -> io::Result<Option<CompactionReport>> {
+        let Some(wal) = self.wal.as_mut() else {
+            return Ok(None);
+        };
+        let dir = self.dir.clone().expect("wal is Some implies dir is Some");
+
+        // Nothing worth compacting yet: only the bootstrap segment
+        // exists and it's essentially empty (magic header only).
+        // Rotating just to write an empty compact segment is churn.
+        let existing_segs = crate::wal::walk_wal_segments(&dir)?;
+        let existing_compacts = crate::wal::walk_compact_segments(&dir)?;
+        let has_prior_closed = existing_segs.len() > 1
+            || existing_segs.iter().any(|(seq, _)| *seq < wal.active_seq());
+        let active_has_data = wal.bytes_written() > 8; // > magic
+        if !has_prior_closed && !active_has_data && existing_compacts.is_empty() {
+            return Ok(None);
+        }
+
+        // 1 + 2. Flush + rotate so the compaction epoch is the seq
+        // of a fully-closed, footer-carrying segment.
+        wal.sync(true)?;
+        let epoch = wal.active_seq();
+        wal.rotate()?;
+
+        // 3. Snapshot live state into a shape `write_compacted_segment`
+        // consumes. We clone shards here because the writer path
+        // needs owned `Shard`s (they get re-encoded); this is O(live
+        // bytes) and runs under the store lock — acceptable because
+        // compaction is background-tick frequency, not per-request.
+        let live_records: Vec<(u64, u8, u8, Hash, Shard)> = self
+            .shards
+            .iter()
+            .flat_map(|((o, c, l), bucket)| {
+                let o = *o;
+                let c = *c;
+                let l = *l;
+                bucket.iter().map(move |(h, (s, _))| (o, c, l, *h, s.clone()))
+            })
+            .collect();
+        let record_count = live_records.len();
+        let live_bytes: u64 = live_records
+            .iter()
+            .map(|(_, _, _, _, s)| (s.coeffs.len() + s.payload.len()) as u64)
+            .sum();
+        let compact_path =
+            crate::wal::write_compacted_segment(&dir, epoch, live_records, self.enc_key)?;
+
+        // 4. Sweep subsumed regular + older compacted segments +
+        // any stray .tmp orphans. Best-effort — failures here just
+        // leave garbage that the next compaction round retries.
+        crate::wal::gc_compacted(&dir, epoch)?;
+
+        Ok(Some(CompactionReport {
+            epoch,
+            records: record_count,
+            live_bytes,
+            compact_path,
+        }))
     }
 
 
@@ -744,6 +925,45 @@ fn read_shard_file(
     Ok(((object_id, channel, layer), h, shard))
 }
 
+/// Apply one replayed WAL record to the in-memory shard map. Shared
+/// between the compacted-segment replay pass and the regular-segment
+/// pass so both paths use identical apply semantics — Put overwrites,
+/// Purge / PurgeHashes / Wipe drop.
+fn apply_wal_record_to_shards(
+    shards: &mut HashMap<Key, HashMap<Hash, (Shard, WriteEpoch)>>,
+    rec: crate::wal::RecordKind,
+    epoch: WriteEpoch,
+) {
+    match rec {
+        crate::wal::RecordKind::Put {
+            object_id,
+            channel,
+            layer,
+            hash,
+            shard,
+        } => {
+            shards
+                .entry((object_id, channel, layer))
+                .or_default()
+                .insert(hash, (shard, epoch));
+        }
+        crate::wal::RecordKind::Purge { object_id } => {
+            shards.retain(|(o, _, _), _| *o != object_id);
+        }
+        crate::wal::RecordKind::PurgeHashes { hashes } => {
+            use std::collections::HashSet;
+            let set: HashSet<Hash> = hashes.into_iter().collect();
+            shards.retain(|_, bucket| {
+                bucket.retain(|h, _| !set.contains(h));
+                !bucket.is_empty()
+            });
+        }
+        crate::wal::RecordKind::Wipe => {
+            shards.clear();
+        }
+    }
+}
+
 fn walk_shard_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for top in fs::read_dir(dir)? {
@@ -924,6 +1144,87 @@ async fn spawn_node_with_identity(
                 s.wal_synced_seq.store(target, Ordering::Release);
                 s.wal_notify.notify_waiters();
                 s.maybe_rotate_wal();
+            }
+        });
+    }
+
+    // Background WAL compactor. Ticks at a fixed cadence and, on
+    // each tick, decides whether to run based on
+    //   - interval: `now - last_compact_at >= wal_compact_interval_secs`
+    //     (the safety-net guarantee: on a quiet node, compaction runs
+    //     at least once per interval even if the ratio never fires);
+    //   - ratio: `wal_disk_bytes / max(live_bytes, 1) > wal_compact_ratio`
+    //     (for write-heavy nodes accumulating stale-record overhead
+    //     between intervals).
+    // Both gated by `wal_compact_min_bytes` so tiny logs don't churn.
+    //
+    // `wal_compact_interval_secs = 0` disables the loop entirely
+    // (segments accumulate as before). In-memory stores (no `wal`)
+    // are also a no-op — `Store::compact` returns `Ok(None)`.
+    //
+    // Tick cadence is `min(30s, interval/10)` so a short custom
+    // interval still enforces itself on time.
+    let cfg = NodeConfig::from_env();
+    if cfg.wal_compact_interval_secs > 0 {
+        let store_for_compactor = store.clone();
+        let interval_secs = cfg.wal_compact_interval_secs;
+        let ratio = cfg.wal_compact_ratio;
+        let min_bytes = cfg.wal_compact_min_bytes;
+        let tick_secs = interval_secs.min(30).max(1);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(tick_secs));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the first (immediate) tick — no writes have
+            // landed yet on a freshly-booted node, and any compacted
+            // segment from the previous boot is already replayed.
+            ticker.tick().await;
+            let mut last_compact_at = std::time::Instant::now();
+            loop {
+                ticker.tick().await;
+                let (wal_bytes, live_bytes) = {
+                    let s = store_for_compactor.lock().await;
+                    if s.wal.is_none() {
+                        return; // in-memory store: nothing to compact, ever
+                    }
+                    let wb = s.wal_disk_bytes().unwrap_or(0);
+                    let lb = s.live_bytes_estimate();
+                    (wb, lb)
+                };
+                if wal_bytes < min_bytes {
+                    continue;
+                }
+                let elapsed = last_compact_at.elapsed().as_secs();
+                let interval_hit = elapsed >= interval_secs;
+                let ratio_hit = (wal_bytes as f64) / (live_bytes.max(1) as f64) > ratio;
+                if !interval_hit && !ratio_hit {
+                    continue;
+                }
+                let report = {
+                    let mut s = store_for_compactor.lock().await;
+                    s.compact()
+                };
+                match report {
+                    Ok(Some(r)) => {
+                        last_compact_at = std::time::Instant::now();
+                        eprintln!(
+                            "wal compaction complete: epoch={} records={} live_bytes={} \
+                             wal_bytes_before={} trigger={}",
+                            r.epoch,
+                            r.records,
+                            r.live_bytes,
+                            wal_bytes,
+                            if interval_hit { "interval" } else { "ratio" },
+                        );
+                    }
+                    Ok(None) => {
+                        // Nothing to compact yet (bootstrap segment
+                        // is empty). Don't reset last_compact_at
+                        // so the next tick tries again immediately.
+                    }
+                    Err(e) => {
+                        eprintln!("wal compaction failed: {e}");
+                    }
+                }
             }
         });
     }
@@ -1595,5 +1896,148 @@ mod tests {
             rpc(&mut s, Request::Stat).await,
             Response::StatResp { total_shards: 7 }
         );
+    }
+
+    #[test]
+    fn compact_produces_compacted_segment_and_gcs_regulars() {
+        // Direct call to `Store::compact` (no background loop). Put
+        // a mix of live + tombstoned shards, then compact. Assert
+        // that: (a) wal-c<epoch>.seg exists, (b) all wal-N.seg with
+        // N ≤ epoch are gone, (c) reopening the Store recovers the
+        // same live state.
+        let dir = tmpdir("compact-basic");
+        let mut store = Store::open(&dir).unwrap();
+        // 3 live puts + 1 purge of one of them.
+        store
+            .put_appended((1, 0, 0), make_shard(1));
+        store
+            .put_appended((2, 0, 0), make_shard(2));
+        store
+            .put_appended((3, 0, 0), make_shard(3));
+        store.purge(2).unwrap();
+        // At this point: shards for object 2 tombstoned; 1 and 3 live.
+        assert_eq!(store.total(), 2);
+
+        let report = store.compact().unwrap().expect("should have compacted");
+        assert!(report.records >= 2, "at least the 2 live shards; got {}", report.records);
+        assert!(report.compact_path.file_name().unwrap()
+            .to_string_lossy()
+            .starts_with("wal-c"));
+
+        // After compaction: wal-c<epoch>.seg is present, older
+        // wal-N.seg files ≤ epoch are gone.
+        let compacts = crate::wal::walk_compact_segments(&dir).unwrap();
+        assert_eq!(compacts.len(), 1);
+        assert_eq!(compacts[0].0, report.epoch);
+        let regulars = crate::wal::walk_wal_segments(&dir).unwrap();
+        for (seq, _) in &regulars {
+            assert!(*seq > report.epoch, "regular seg {seq} should have been gc'd");
+        }
+
+        // Reopen: same live state.
+        drop(store);
+        let store2 = Store::open(&dir).unwrap();
+        assert_eq!(store2.total(), 2);
+        assert!(!store2.get((1, 0, 0)).is_empty());
+        assert!(store2.get((2, 0, 0)).is_empty(), "purged obj must stay purged");
+        assert!(!store2.get((3, 0, 0)).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compact_then_more_writes_replay_correctly() {
+        // Compact, then write additional records into the fresh
+        // active segment, then reopen. The compacted segment
+        // provides the base state and the newer regular segment
+        // applies deltas on top.
+        let dir = tmpdir("compact-plus-delta");
+        let mut store = Store::open(&dir).unwrap();
+        store.put_appended((10, 0, 0), make_shard(10));
+        store.put_appended((20, 0, 0), make_shard(20));
+        let report = store.compact().unwrap().expect("should compact");
+        let epoch = report.epoch;
+
+        // Post-compact writes land in wal-<epoch+1>.seg (or later).
+        store.put_appended((30, 0, 0), make_shard(30));
+        store.purge(10).unwrap();
+
+        drop(store);
+        let store2 = Store::open(&dir).unwrap();
+        // Expected live: obj 20 (from compacted), obj 30 (from
+        // post-compact wal). obj 10 was purged after compaction.
+        assert!(store2.get((10, 0, 0)).is_empty());
+        assert!(!store2.get((20, 0, 0)).is_empty());
+        assert!(!store2.get((30, 0, 0)).is_empty());
+
+        // Sanity: any surviving regular segs have seq > epoch.
+        for (seq, _) in crate::wal::walk_wal_segments(&dir).unwrap() {
+            assert!(seq > epoch, "expected seq > {epoch}, saw {seq}");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn crash_after_compact_before_gc_still_replays_once() {
+        // Simulate a crash between step 3 (compact seg durably
+        // written) and step 4 (gc of old wal-N.seg). Old regulars
+        // are still on disk alongside wal-c<epoch>.seg; boot must
+        // skip them so records aren't double-applied.
+        let dir = tmpdir("compact-crash-pre-gc");
+        let mut store = Store::open(&dir).unwrap();
+        store.put_appended((1, 0, 0), make_shard(1));
+        store.put_appended((2, 0, 0), make_shard(2));
+
+        // Manually invoke the primitives so we can stop between
+        // steps 3 and 4 (skip gc_compacted).
+        let dir_clone = dir.clone();
+        {
+            let wal = store.wal.as_mut().unwrap();
+            wal.sync(true).unwrap();
+            let epoch = wal.active_seq();
+            wal.rotate().unwrap();
+            let records: Vec<_> = store.shards.iter().flat_map(|((o, c, l), bucket)| {
+                let o = *o; let c = *c; let l = *l;
+                bucket.iter().map(move |(h, (s, _))| (o, c, l, *h, s.clone()))
+            }).collect();
+            crate::wal::write_compacted_segment(&dir_clone, epoch, records, None).unwrap();
+            // Deliberately skip `wal::gc_compacted(&dir, epoch)`.
+        }
+
+        // Sanity: both the compact seg AND the old wal-N.seg files
+        // are on disk simultaneously.
+        assert_eq!(crate::wal::walk_compact_segments(&dir).unwrap().len(), 1);
+        assert!(crate::wal::walk_wal_segments(&dir).unwrap().len() >= 1);
+
+        drop(store);
+        let store2 = Store::open(&dir).unwrap();
+        // Live state must equal what it was before the "crash",
+        // not doubled.
+        assert_eq!(store2.total(), 2);
+        assert_eq!(store2.get((1, 0, 0)).len(), 1);
+        assert_eq!(store2.get((2, 0, 0)).len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compact_no_op_on_fresh_store() {
+        // Freshly-opened store has one empty segment (magic only);
+        // compaction should be a no-op (returns Ok(None)) rather
+        // than churning out empty compact segs on every tick.
+        let dir = tmpdir("compact-noop");
+        let mut store = Store::open(&dir).unwrap();
+        let report = store.compact().unwrap();
+        assert!(report.is_none(), "should skip: got {report:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compact_no_op_on_in_memory_store() {
+        // Store::new() has no dir + no wal — compaction is
+        // impossible, must return Ok(None), not error.
+        let mut store = Store::new();
+        assert!(store.compact().unwrap().is_none());
     }
 }
