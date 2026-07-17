@@ -65,6 +65,8 @@ jobs:
           node scripts/check-doc-anchors.mjs
       - name: locale heading parity (EN ↔ ru/de/fr/es)
         run: python3 scripts/check-locale-parity.py
+      - name: security-critical content parity (EN body hash gate)
+        run: python3 scripts/check-security-parity.py
 
   # === Clippy lints =========================================================
   # `holofs-web` has mutually-exclusive `ssr` and `hydrate` features, so we

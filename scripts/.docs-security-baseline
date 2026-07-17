@@ -1,0 +1,16 @@
+# scripts/.docs-security-baseline
+#
+# SHA-256 hashes of security-critical EN doc sections. If any of
+# these changes, the same commit MUST update the corresponding
+# locale twin files (ru/de/fr/es) to reflect the same content.
+#
+# To regenerate after intentional edits:
+#   python3 scripts/check-security-parity.py --update
+#
+# Format: <sha256>\t<file>\t<heading-or-row-marker>
+
+cc67e4079b5512664592e5c12ee97f60d1ad772ac807a51750267f05ac197a26	docs/theory.md	## 8.
+867c6b214cced7b6cc4bdb8578b6968fe72a4ee63cdf8acb350640f8f72d0ee2	docs/threat-model.md	| I6 
+2ee8942bfa73593f33e73abd2b4ff341b9540de23331bbe07768a3bcd65427c3	docs/threat-model.md	| I2 
+2bb98f11eb890ac2b0479a64bdb0f2e10059d75f34cc38320f87f7e4349fd811	docs/threat-model.md	| S1 
+590f6004c18a37af863828715e53abc96a13fe9f09ad8ca832deea0adf98f933	docs/threat-model.md	| S2 
