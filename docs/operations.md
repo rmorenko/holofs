@@ -453,15 +453,74 @@ written to disk is sealed with AES-256-GCM. The header stays in
 plaintext (so `Store::open` can still index without the key), but
 the coefficients + encoded chunk payload are ciphertext.
 
-**Key management.** The 32-byte AES key is derived at boot from the
-node's identity seed via HKDF-SHA256
-(`salt = "holofs-shard-salt-v1"`, `info = "holofs-shard-key-v1"`).
-No new secret to rotate — losing `identity.key` already loses the
-node's identity. The key stays in RAM for the process's lifetime;
-root on a running node can read plaintext through a legitimate
-audit path.
+**Envelope encryption (post-P1.7).** The 32-byte AES key that
+seals each shard is a **DEK** stored inside `<storage>/keyring.json`
+(one entry per rotation), wrapped under a separate **KEK** loaded
+from an operator-chosen [`KekSource`][kek-src]. On boot the node
+unwraps every DEK once and holds them in RAM; on read it tries each
+DEK newest-first — a wrong DEK fails the AES-GCM tag at ~2⁻¹²⁸,
+so the tag is a cryptographic key-selector without any key-id
+byte on the wire.
 
-**Wire format.** Two shard magics coexist:
+[kek-src]: ../crates/holofs-storage/src/crypto.rs
+
+**KEK sources:**
+
+| `HOLOFS_AT_REST_KEK_SOURCE` | Additional env / defaults                                            | Threat trade-off                                                                                                      |
+|-----------------------------|----------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `identity` (default)        | none — HKDF of the node's `identity.key`                             | Convenient, pre-P1.7 backwards-compat. Compromise of `identity.key` = compromise of KEK = every historical DEK unwraps. |
+| `file`                      | `HOLOFS_AT_REST_KEK_PATH` → 32 raw bytes                             | Recommended prod. Bind-mount a k8s Secret / Vault agent output at a separate path from `identity.key` (ideally tmpfs).  |
+| `env`                       | `HOLOFS_AT_REST_KEK_HEX` → 64 hex chars                              | CI / one-shot benchmarks. NOT recommended for prod — env vars leak into process listings, crash dumps, journald.        |
+
+**Kubernetes example (recommended prod):**
+
+```yaml
+env:
+  - name: HOLOFS_AT_REST_ENC
+    value: "1"
+  - name: HOLOFS_AT_REST_KEK_SOURCE
+    value: "file"
+  - name: HOLOFS_AT_REST_KEK_PATH
+    value: "/etc/holofs/kek"
+volumeMounts:
+  - name: holofs-kek
+    mountPath: /etc/holofs
+    readOnly: true
+volumes:
+  - name: holofs-kek
+    secret:
+      secretName: holofs-kek           # binary secret, 32 bytes
+```
+
+**Backward compat.** On the first boot after upgrade, a node with
+`HOLOFS_AT_REST_ENC=1` and no `keyring.json` bootstraps one with a
+single DEK seeded from `HKDF(identity.key)` — byte-identical to the
+pre-P1.7 shard key. Existing sealed shards decrypt untouched.
+Subsequent `holofs-admin rotate-kek` calls append fresh DEKs;
+existing shards stay readable because the ring never drops old
+DEKs (retire is a separate operator step once every shard has been
+re-encrypted under a newer DEK).
+
+**Rotation:**
+
+```sh
+# On the node host, same env as the daemon (so KEK resolves the
+# same way). Idempotent — a repeat call just appends another DEK.
+HOLOFS_AT_REST_ENC=1 \
+HOLOFS_AT_REST_KEK_SOURCE=file \
+HOLOFS_AT_REST_KEK_PATH=/etc/holofs/kek \
+  holofs-admin rotate-kek --storage /var/lib/holofs/node-01
+
+# Restart the daemon so it picks up the new keyring.
+systemctl restart holofs-node@01
+```
+
+New shard writes use the new DEK. Old shards remain readable via
+the retained DEKs. Cluster-wide rotation is per-node — the KEK
+itself can be common, only the keyring differs per node.
+
+**Wire format** (unchanged from pre-P1.7 — envelope is transparent
+to the on-disk shape):
 
 | Magic       | Meaning                                                     |
 |-------------|-------------------------------------------------------------|
@@ -479,8 +538,15 @@ identity and let the auto-repair pass rebalance shards onto it.
 **Threat model.** In scope: an adversary snapshots the shard files
 off a powered-off node (backup leak, decommissioned disk, RAID
 rebuild left the old drive readable). Out of scope: root on a
-running node — once the derived key is in RAM,
-`read_shard_file` produces plaintext for legitimate audits.
+running node — once the DEKs are in RAM, `read_shard_file`
+produces plaintext for legitimate audits.
+
+**What P1.7 changes vs pre-P1.7:** the KEK source is now
+operator-configurable. Under `source=file` (recommended prod), a
+compromise of `identity.key` alone is no longer sufficient to
+decrypt shards — the attacker also needs the separately-mounted
+KEK. Rotation without re-encrypting existing data is now cheap
+(append DEK, restart daemon) instead of impossible.
 
 ---
 

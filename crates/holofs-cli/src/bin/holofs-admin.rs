@@ -52,6 +52,7 @@ fn main() {
         "snapshot" => cmd_snapshot(&args[1..]),
         "snapshot-restore" => cmd_snapshot_restore(&args[1..]),
         "drain-node" => cmd_drain_node(&args[1..]),
+        "rotate-kek" => cmd_rotate_kek(&args[1..]),
         "--help" | "-h" | "help" => {
             print_usage();
         }
@@ -102,7 +103,19 @@ cluster elasticity (P1.4 — drain + decommission):\n\
                                         the drained node after a successful sweep.\n\
                                         Follow-up: re-sign whitelist WITHOUT the drained\n\
                                         node + hot-reload; then physically stop the node.\n\
-                                        See docs/operations.md §10.2."
+                                        See docs/operations.md §10.2.\n\
+\n\
+at-rest key rotation (P1.7 — envelope encryption, offline per node):\n\
+  rotate-kek --storage DIR\n\
+                                        append a fresh DEK to the node's keyring, wrap\n\
+                                        under the same KEK as existing entries, bump\n\
+                                        current_id. All new shard writes use the new DEK;\n\
+                                        existing sealed shards remain readable via the\n\
+                                        retained DEKs (try-each-key on decrypt, AES-GCM\n\
+                                        tag selects). Reads HOLOFS_AT_REST_KEK_* env vars\n\
+                                        exactly as `holofs-node` does — run this on the\n\
+                                        node host with the same env, then restart the daemon\n\
+                                        so it picks up the new keyring. See operations.md §5.9."
     );
 }
 
@@ -745,6 +758,73 @@ fn cmd_drain_node(args: &[String]) {
         die(format!("POST {url}: HTTP {} — {text}", status.as_u16()));
     }
     println!("{text}");
+}
+
+// === at-rest key rotation (P1.7) ==================================
+
+fn cmd_rotate_kek(args: &[String]) {
+    let mut storage: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--storage" => {
+                storage = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            other => die(format!("unexpected flag: {other}")),
+        }
+    }
+    let storage = storage.unwrap_or_else(|| flag_required("--storage").into());
+
+    // Same KEK-source resolution as `holofs-node` — pulls from
+    // HOLOFS_AT_REST_KEK_* env; identity-seed path reads
+    // `<storage>/identity.key`.
+    let identity_path = storage.join("identity.key");
+    let identity = holofs_storage::identity::NodeIdentity::load_or_create(&identity_path)
+        .unwrap_or_else(|e| die(format!("load {}: {e}", identity_path.display())));
+    let kek_source = match std::env::var("HOLOFS_AT_REST_KEK_SOURCE")
+        .unwrap_or_else(|_| "identity".to_string())
+        .as_str()
+    {
+        "file" => holofs_storage::crypto::KekSource::File(
+            std::env::var("HOLOFS_AT_REST_KEK_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| die("HOLOFS_AT_REST_KEK_SOURCE=file requires HOLOFS_AT_REST_KEK_PATH".into())),
+        ),
+        "env" => holofs_storage::crypto::KekSource::EnvHex(
+            std::env::var("HOLOFS_AT_REST_KEK_HEX")
+                .unwrap_or_else(|_| die("HOLOFS_AT_REST_KEK_SOURCE=env requires HOLOFS_AT_REST_KEK_HEX".into())),
+        ),
+        _ => holofs_storage::crypto::KekSource::IdentitySeed,
+    };
+    let kek = kek_source
+        .load(&identity.to_bytes())
+        .unwrap_or_else(|e| die(format!("load KEK ({}): {e}", kek_source.label())));
+
+    let keyring_path = std::env::var("HOLOFS_KEYRING_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| storage.join("keyring.json"));
+    let bootstrap_dek = holofs_storage::crypto::derive_shard_key(&identity.to_bytes());
+    let mut ring = holofs_storage::crypto::Keyring::load_or_bootstrap(
+        &keyring_path,
+        &kek,
+        bootstrap_dek,
+    )
+    .unwrap_or_else(|e| die(format!("open keyring {}: {e}", keyring_path.display())));
+
+    let before = ring.current_id();
+    let new_id = ring.rotate(&kek);
+    ring.save(&keyring_path)
+        .unwrap_or_else(|e| die(format!("save keyring {}: {e}", keyring_path.display())));
+
+    println!(
+        "rotated {} → new DEK id={} (previous current_id={}; {} DEK(s) retained for reads); \
+         restart the holofs-node daemon so it picks up the new keyring",
+        keyring_path.display(),
+        new_id,
+        before,
+        ring.len(),
+    );
 }
 
 // === helpers =======================================================

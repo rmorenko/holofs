@@ -79,6 +79,15 @@ pub struct NodeConfig {
     /// where compacted output can be as large as the input. Env:
     /// `HOLOFS_WAL_COMPACT_MIN_BYTES` (default 4 MiB).
     pub wal_compact_min_bytes: u64,
+    /// P1.7 — where the KEK (Key Encryption Key that wraps every
+    /// DEK in the on-disk keyring) comes from. Only consulted when
+    /// `at_rest_encryption` is `true`. Env:
+    /// `HOLOFS_AT_REST_KEK_SOURCE` (default `identity` = pre-P1.7
+    /// backwards-compat, HKDF from the node's identity seed).
+    pub kek_source: crate::crypto::KekSource,
+    /// P1.7 — override path for `keyring.json`. Env:
+    /// `HOLOFS_KEYRING_PATH`. `None` ⇒ `<storage>/keyring.json`.
+    pub keyring_path: Option<std::path::PathBuf>,
 }
 
 impl NodeConfig {
@@ -113,6 +122,35 @@ impl NodeConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(4 * 1024 * 1024),
+            kek_source: match std::env::var("HOLOFS_AT_REST_KEK_SOURCE")
+                .unwrap_or_else(|_| "identity".to_string())
+                .as_str()
+            {
+                "file" => crate::crypto::KekSource::File(
+                    std::env::var("HOLOFS_AT_REST_KEK_PATH")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|_| {
+                            eprintln!(
+                                "HOLOFS_AT_REST_KEK_SOURCE=file but HOLOFS_AT_REST_KEK_PATH \
+                                 unset — falling back to `identity`"
+                            );
+                            std::path::PathBuf::new()
+                        }),
+                ),
+                "env" => crate::crypto::KekSource::EnvHex(
+                    std::env::var("HOLOFS_AT_REST_KEK_HEX").unwrap_or_else(|_| {
+                        eprintln!(
+                            "HOLOFS_AT_REST_KEK_SOURCE=env but HOLOFS_AT_REST_KEK_HEX \
+                             unset — falling back to `identity`"
+                        );
+                        String::new()
+                    }),
+                ),
+                _ => crate::crypto::KekSource::IdentitySeed,
+            },
+            keyring_path: std::env::var("HOLOFS_KEYRING_PATH")
+                .ok()
+                .map(std::path::PathBuf::from),
         }
     }
 }
@@ -205,12 +243,15 @@ pub struct Store {
     wal_next_seq: Arc<std::sync::atomic::AtomicU64>,
     wal_synced_seq: Arc<std::sync::atomic::AtomicU64>,
     wal_notify: Arc<tokio::sync::Notify>,
-    /// per-node AES-256-GCM key derived from
-    /// `NodeIdentity::to_bytes()` via HKDF-SHA256. `None` = plaintext
-    /// shard files on disk. Reads accept both formats regardless of
-    /// this field so upgrades roll gracefully. Writes pick the
-    /// format based on this being `Some(_)`.
-    enc_key: Option<[u8; crate::crypto::KEY_LEN]>,
+    /// P1.7 envelope-encryption keyring. `None` = plaintext shard
+    /// files on disk (default; no `HOLOFS_AT_REST_ENC=1`). `Some(_)`
+    /// = writes seal under the ring's current DEK; reads try every
+    /// DEK in the ring so a post-rotation node still decrypts
+    /// pre-rotation shards. The ring's raw DEKs are loaded once at
+    /// boot from `<storage>/keyring.json` (unwrapped under the
+    /// operator's KEK — see [`crate::crypto::KekSource`]) and held
+    /// in RAM for the process lifetime.
+    keyring: Option<Arc<crate::crypto::Keyring>>,
     /// Whether `write_shard_file` calls `sync_all()` before rename.
     /// Default `true` (safe): each Put waits for the kernel to flush
     /// the shard payload to persistent storage before Ack. Setting
@@ -234,7 +275,7 @@ impl Default for Store {
             wal_next_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             wal_synced_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             wal_notify: Arc::new(tokio::sync::Notify::new()),
-            enc_key: None,
+            keyring: None,
             sync_on_write: true,
         }
     }
@@ -260,22 +301,38 @@ impl Store {
         Self::open_inner(dir, None)
     }
 
-    /// Persistent store with an AES-256-GCM key for at-rest encryption.
-    /// The key is what [`crate::crypto::derive_shard_key`] returns when
-    /// fed the node's [`crate::identity::NodeIdentity::to_bytes`] seed.
-    /// New writes land as `HOLOFSS2` sealed files; reads accept both
-    /// `HOLOFSS1` (legacy plaintext) and `HOLOFSS2` (sealed) transparently
-    /// so upgrades roll without a rewrite pass.
+    /// Persistent store with a single-DEK in-memory keyring — the
+    /// pre-P1.7 API preserved for tests + code paths that already
+    /// have a raw key. New writes land as `HOLOFSS2` sealed files;
+    /// reads accept both `HOLOFSS1` (legacy plaintext) and
+    /// `HOLOFSS2` (sealed) transparently.
+    ///
+    /// Production callers should use [`Self::open_with_keyring`] so
+    /// rotation, KEK sources, and on-disk key persistence work.
     pub fn open_with_key(
         dir: impl AsRef<Path>,
         key: [u8; crate::crypto::KEY_LEN],
     ) -> io::Result<Self> {
-        Self::open_inner(dir, Some(key))
+        let ring = Arc::new(crate::crypto::Keyring::in_memory_single(key));
+        Self::open_inner(dir, Some(ring))
+    }
+
+    /// Full-fat persistent store: hands over a fully-materialised
+    /// [`Keyring`](crate::crypto::Keyring) (already unwrapped under
+    /// the operator's KEK). Bootstrap constructs the ring via
+    /// [`crate::crypto::Keyring::load_or_bootstrap`] and passes the
+    /// Arc'd handle here — the same handle stays in the Store for
+    /// every subsequent encrypt/decrypt.
+    pub fn open_with_keyring(
+        dir: impl AsRef<Path>,
+        keyring: Arc<crate::crypto::Keyring>,
+    ) -> io::Result<Self> {
+        Self::open_inner(dir, Some(keyring))
     }
 
     fn open_inner(
         dir: impl AsRef<Path>,
-        enc_key: Option<[u8; crate::crypto::KEY_LEN]>,
+        keyring: Option<Arc<crate::crypto::Keyring>>,
     ) -> io::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
@@ -289,7 +346,7 @@ impl Store {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            match read_shard_file(&entry, enc_key.as_ref()) {
+            match read_shard_file(&entry, keyring.as_deref()) {
                 Ok((k, h, shard)) => {
                     shards.entry(k).or_default().insert(h, (shard, epoch));
                 }
@@ -319,7 +376,7 @@ impl Store {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let records = crate::wal::read_segment(&compact_path, enc_key.as_ref())?;
+            let records = crate::wal::read_segment(&compact_path, keyring.as_deref())?;
             for rec in records {
                 apply_wal_record_to_shards(&mut shards, rec, epoch_from_mtime);
             }
@@ -344,7 +401,7 @@ impl Store {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let records = crate::wal::read_segment(path, enc_key.as_ref())?;
+            let records = crate::wal::read_segment(path, keyring.as_deref())?;
             for rec in records {
                 apply_wal_record_to_shards(&mut shards, rec, epoch_from_mtime);
             }
@@ -352,7 +409,7 @@ impl Store {
         // 3. Open the next segment for writes. Even a brand-new
         //    directory gets seq=1 so writes never share a file with
         //    a replayed segment.
-        let wal = crate::wal::WalWriter::open(dir.clone(), highest_seq, enc_key)?;
+        let wal = crate::wal::WalWriter::open(dir.clone(), highest_seq, keyring.clone())?;
         Ok(Store {
             shards,
             dir: Some(dir),
@@ -360,7 +417,7 @@ impl Store {
             wal_next_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             wal_synced_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             wal_notify: Arc::new(tokio::sync::Notify::new()),
-            enc_key,
+            keyring,
             sync_on_write: true,
         })
     }
@@ -581,8 +638,12 @@ impl Store {
             .iter()
             .map(|(_, _, _, _, s)| (s.coeffs.len() + s.payload.len()) as u64)
             .sum();
-        let compact_path =
-            crate::wal::write_compacted_segment(&dir, epoch, live_records, self.enc_key)?;
+        let compact_path = crate::wal::write_compacted_segment(
+            &dir,
+            epoch,
+            live_records,
+            self.keyring.clone(),
+        )?;
 
         // 4. Sweep subsumed regular + older compacted segments +
         // any stray .tmp orphans. Best-effort — failures here just
@@ -774,7 +835,7 @@ impl Store {
         // somewhere. We rebuild it rather than trying to append a
         // Wipe to the old file — the old file was just deleted.
         if let (Some(dir), true) = (self.dir.clone(), self.wal.is_some()) {
-            match crate::wal::WalWriter::open(dir, 0, self.enc_key) {
+            match crate::wal::WalWriter::open(dir, 0, self.keyring.clone()) {
                 Ok(mut wal) => {
                     // Record the Wipe as the first entry so a
                     // fsync-lagging crash doesn't leave the segment
@@ -816,7 +877,7 @@ fn write_shard_file(
     k: Key,
     h: &Hash,
     shard: &Shard,
-    enc_key: Option<&[u8; crate::crypto::KEY_LEN]>,
+    keyring: Option<&crate::crypto::Keyring>,
     fsync: bool,
 ) -> io::Result<()> {
     let path = shard_path(dir, h);
@@ -827,10 +888,11 @@ fn write_shard_file(
     {
         let mut f = fs::File::create(&tmp)?;
         // Build the 26-byte header once. It's plaintext in either
-        // format and — when enc_key is set — feeds the AES-GCM AAD
-        // so any tamper with these bytes trips the tag on decrypt.
+        // format and — when a keyring is set — feeds the AES-GCM
+        // AAD so any tamper with these bytes trips the tag on
+        // decrypt.
         let mut header = [0u8; 26];
-        let magic = if enc_key.is_some() {
+        let magic = if keyring.is_some() {
             SHARD_MAGIC_V2
         } else {
             SHARD_MAGIC_V1
@@ -844,17 +906,17 @@ fn write_shard_file(
         f.write_all(&header)?;
 
         // v1 = plaintext body; v2 = [nonce | ct+tag] under GCM with
-        // the header as AAD.
-        match enc_key {
+        // the header as AAD, using the keyring's current DEK.
+        match keyring {
             None => {
                 f.write_all(&shard.coeffs)?;
                 f.write_all(&shard.payload)?;
             }
-            Some(key) => {
+            Some(ring) => {
                 let mut plaintext = Vec::with_capacity(shard.coeffs.len() + shard.payload.len());
                 plaintext.extend_from_slice(&shard.coeffs);
                 plaintext.extend_from_slice(&shard.payload);
-                let sealed = crate::crypto::encrypt(key, &header, &plaintext);
+                let sealed = ring.encrypt_current(&header, &plaintext);
                 f.write_all(&sealed)?;
             }
         }
@@ -868,7 +930,7 @@ fn write_shard_file(
 
 fn read_shard_file(
     path: &Path,
-    enc_key: Option<&[u8; crate::crypto::KEY_LEN]>,
+    keyring: Option<&crate::crypto::Keyring>,
 ) -> io::Result<(Key, Hash, Shard)> {
     let mut f = fs::File::open(path)?;
     let mut header = [0u8; 26];
@@ -888,16 +950,16 @@ fn read_shard_file(
         f.read_exact(&mut payload)?;
         (coeffs, payload)
     } else if magic == SHARD_MAGIC_V2 {
-        // Sealed file — need the key or we can't recover the body.
-        let key = enc_key.ok_or_else(|| {
+        // Sealed file — need a keyring or we can't recover the body.
+        let ring = keyring.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "shard file is sealed (HOLOFSS2) but no encryption key configured",
+                "shard file is sealed (HOLOFSS2) but no keyring configured",
             )
         })?;
         let mut sealed = Vec::new();
         f.read_to_end(&mut sealed)?;
-        let plaintext = crate::crypto::decrypt(key, &header, &sealed).map_err(|e| {
+        let plaintext = ring.decrypt_any(&header, &sealed).map_err(|e| {
             io::Error::new(io::ErrorKind::InvalidData, format!("shard decrypt: {e}"))
         })?;
         if plaintext.len() != coeffs_len + payload_len {
@@ -1040,15 +1102,41 @@ pub async fn spawn_node_persistent_with_tls_and_whitelist(
 ) -> io::Result<(SocketAddr, SharedStore, tokio::task::JoinHandle<()>)> {
     let dir = storage_dir.as_ref().to_path_buf();
     // opt in to at-rest shard encryption via
-    // `HOLOFS_AT_REST_ENC=1`. Key material comes from the node's
-    // own identity seed — no new secret to manage. Reads accept
-    // both plaintext (v1) and sealed (v2) files, so nothing needs
-    // to move on a rolling upgrade.
+    // `HOLOFS_AT_REST_ENC=1`. Post-P1.7 the DEK lives in the
+    // envelope-encrypted keyring at `<storage>/keyring.json`,
+    // unwrapped under the KEK returned by
+    // `NodeConfig::kek_source`. When the keyring is missing we
+    // bootstrap a single-DEK ring seeded from HKDF(identity) — that
+    // gives byte-for-byte backward compat with pre-P1.7 sealed
+    // shards. Rotation appends new DEKs; old shards keep decrypting
+    // under the retained old DEK.
     let identity = NodeIdentity::load_or_create(dir.join("identity.key"))?;
     let cfg = NodeConfig::from_env();
     let mut store = if cfg.at_rest_encryption {
-        let key = crate::crypto::derive_shard_key(&identity.to_bytes());
-        Store::open_with_key(&dir, key)?
+        let kek = cfg
+            .kek_source
+            .load(&identity.to_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("KEK: {e}")))?;
+        let bootstrap_dek = crate::crypto::derive_shard_key(&identity.to_bytes());
+        let keyring_path = cfg
+            .keyring_path
+            .clone()
+            .unwrap_or_else(|| dir.join("keyring.json"));
+        let keyring = std::sync::Arc::new(crate::crypto::Keyring::load_or_bootstrap(
+            &keyring_path,
+            &kek,
+            bootstrap_dek,
+        )?);
+        let (cur, n, age_ms) = keyring.summary();
+        eprintln!(
+            "holofs-node at-rest: keyring {} ({} DEK(s), current id={}, oldest age {}ms) kek_source={}",
+            keyring_path.display(),
+            n,
+            cur,
+            age_ms,
+            cfg.kek_source.label(),
+        );
+        Store::open_with_keyring(&dir, keyring)?
     } else {
         Store::open(&dir)?
     };

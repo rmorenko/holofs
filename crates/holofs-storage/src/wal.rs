@@ -74,7 +74,8 @@ use holofs_core::hash::{sha256, Sha256};
 use holofs_core::merkle::Hash;
 use holofs_core::rlnc::Shard;
 
-use crate::crypto::{decrypt, encrypt, KEY_LEN, NONCE_LEN, TAG_LEN};
+use crate::crypto::{decrypt, encrypt, Keyring, KEY_LEN, NONCE_LEN, TAG_LEN};
+use std::sync::Arc;
 
 /// 8-byte segment file magic. V2 introduces the per-segment footer
 /// (`FOOTER_MAGIC` + record count + body digest) that turns
@@ -180,9 +181,11 @@ pub struct WalWriter {
     /// an append, the writer closes the active segment and opens a
     /// fresh one with `seq + 1`.
     pub rotate_at: u64,
-    /// AES-256-GCM key for at-rest encryption. When `Some`, Put
-    /// records are written as `KIND_PUT_SEALED`.
-    enc_key: Option<[u8; KEY_LEN]>,
+    /// P1.7 envelope-encryption keyring. When `Some`, Put records
+    /// are written as `KIND_PUT_SEALED` under the ring's current
+    /// DEK; reads decrypt via [`Keyring::decrypt_any`] so post-
+    /// rotation nodes still read pre-rotation records.
+    keyring: Option<Arc<Keyring>>,
 }
 
 impl WalWriter {
@@ -193,7 +196,7 @@ impl WalWriter {
     pub fn open(
         dir: PathBuf,
         highest_replayed_seq: u64,
-        enc_key: Option<[u8; KEY_LEN]>,
+        keyring: Option<Arc<Keyring>>,
     ) -> io::Result<Self> {
         let next_seq = highest_replayed_seq + 1;
         let path = segment_path(&dir, next_seq);
@@ -212,7 +215,7 @@ impl WalWriter {
             record_count: 0,
             body_hasher: Sha256::new(),
             rotate_at: 64 * 1024 * 1024,
-            enc_key,
+            keyring,
         })
     }
 
@@ -230,7 +233,7 @@ impl WalWriter {
         shard: &Shard,
     ) -> io::Result<()> {
         let (kind, body) =
-            build_put_record_body(object_id, channel, layer, hash, shard, self.enc_key.as_ref());
+            build_put_record_body(object_id, channel, layer, hash, shard, self.keyring.as_deref());
         self.write_record(kind, &body)
     }
 
@@ -391,7 +394,7 @@ impl WalWriter {
 ///   record as V1 does.
 pub fn read_segment(
     path: &Path,
-    enc_key: Option<&[u8; KEY_LEN]>,
+    keyring: Option<&Keyring>,
 ) -> io::Result<Vec<RecordKind>> {
     // Slurp the whole segment. WAL segments are capped at
     // `WalWriter::rotate_at` (default 64 MiB) so this is bounded;
@@ -511,10 +514,10 @@ pub fn read_segment(
                 });
             }
             KIND_PUT_SEALED => {
-                let Some(key) = enc_key else {
+                let Some(ring) = keyring else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        "wal sealed record but Store has no enc_key configured",
+                        "wal sealed record but Store has no keyring configured",
                     ));
                 };
                 if body.len() < PUT_SEALED_AAD_LEN + 4 {
@@ -549,7 +552,7 @@ pub fn read_segment(
                 let aad = &body[..PUT_SEALED_AAD_LEN];
                 let sealed =
                     &body[PUT_SEALED_AAD_LEN + 4..PUT_SEALED_AAD_LEN + 4 + sealed_len];
-                let plaintext = decrypt(key, aad, sealed).map_err(|e| {
+                let plaintext = ring.decrypt_any(aad, sealed).map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("wal put_sealed decrypt failed: {e}"),
@@ -777,7 +780,7 @@ pub fn write_compacted_segment(
     dir: &Path,
     epoch: u64,
     records: impl IntoIterator<Item = (u64, u8, u8, Hash, Shard)>,
-    enc_key: Option<[u8; KEY_LEN]>,
+    keyring: Option<Arc<Keyring>>,
 ) -> io::Result<PathBuf> {
     let final_path = compact_segment_path(dir, epoch);
     let tmp_path = dir.join(format!("wal-c{epoch:08}.seg.tmp"));
@@ -799,7 +802,14 @@ pub fn write_compacted_segment(
     for (object_id, channel, layer, hash, shard) in records {
         // Reconstruct the on-wire body exactly as `WalWriter::
         // append_put` would, then frame + hash + append it.
-        let (kind, body) = build_put_record_body(object_id, channel, layer, &hash, &shard, enc_key.as_ref());
+        let (kind, body) = build_put_record_body(
+            object_id,
+            channel,
+            layer,
+            &hash,
+            &shard,
+            keyring.as_deref(),
+        );
         let framed_body_len = (1 + body.len()) as u32;
         let mut digest_input = Vec::with_capacity(1 + body.len());
         digest_input.push(kind);
@@ -895,9 +905,9 @@ fn build_put_record_body(
     layer: u8,
     hash: &Hash,
     shard: &Shard,
-    enc_key: Option<&[u8; KEY_LEN]>,
+    keyring: Option<&Keyring>,
 ) -> (u8, Vec<u8>) {
-    if let Some(key) = enc_key {
+    if let Some(ring) = keyring {
         let mut header = Vec::with_capacity(PUT_SEALED_AAD_LEN);
         header.extend_from_slice(&object_id.to_be_bytes());
         header.push(channel);
@@ -909,7 +919,7 @@ fn build_put_record_body(
         plaintext.extend_from_slice(&coeffs_len.to_be_bytes());
         plaintext.extend_from_slice(&shard.coeffs);
         plaintext.extend_from_slice(&shard.payload);
-        let sealed = encrypt(key, &header, &plaintext);
+        let sealed = ring.encrypt_current(&header, &plaintext);
         let sealed_len = sealed.len() as u32;
         header.extend_from_slice(&sealed_len.to_be_bytes());
         let mut body = header;
@@ -984,14 +994,16 @@ mod tests {
     fn roundtrip_put_sealed() {
         let dir = TempDir::new().unwrap();
         let key = crate::crypto::derive_shard_key(&[0xEE; 32]);
-        let mut w = WalWriter::open(dir.path().to_path_buf(), 0, Some(key)).unwrap();
+        let ring = Arc::new(crate::crypto::Keyring::in_memory_single(key));
+        let mut w =
+            WalWriter::open(dir.path().to_path_buf(), 0, Some(Arc::clone(&ring))).unwrap();
         let hash = [7u8; 32];
         w.append_put(42, 1, 2, &hash, &tiny_shard(0x77)).unwrap();
         w.sync(true).unwrap();
         drop(w);
 
         let seg_path = super::segment_path(dir.path(), 1);
-        let records = read_segment(&seg_path, Some(&key)).unwrap();
+        let records = read_segment(&seg_path, Some(ring.as_ref())).unwrap();
         assert_eq!(records.len(), 1);
         match &records[0] {
             RecordKind::Put {
