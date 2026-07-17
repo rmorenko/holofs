@@ -103,6 +103,7 @@ impl Gateway {
         let manifest = cat.remove(name).ok_or(GatewayError::NotFound)?;
         drop(cat);
         self.invalidate_cache(name).await;
+        self.mark_catalog_dirty(name).await;
         self.persist_catalog().await?;
         let live = self.effective_live().await;
         // fix: purge ONLY the shards unique to `manifest`.
@@ -197,6 +198,17 @@ impl Gateway {
                 self.invalidate_cache(&outcome.name).await;
             }
         }
+        // Mark every removed name dirty before the batch persist so
+        // the redb apply_batch drops the same set of keys in a single
+        // write-txn.
+        self.mark_catalog_dirty_many(
+            result
+                .outcomes
+                .iter()
+                .filter(|o| o.error.is_empty())
+                .map(|o| o.name.clone()),
+        )
+        .await;
         // ONE catalog fsync for the entire batch. The persist ticket
         // coalesces callers so overlapping single-DELETEs would already
         // share an fsync, but the batch skips even the ticket dance.
@@ -322,6 +334,7 @@ impl Gateway {
         let object_id = manifest.object_id;
         cat.insert(path.to_string(), manifest);
         drop(cat);
+        self.mark_catalog_dirty(path).await;
         self.persist_catalog().await?;
         Ok(MkdirResult {
             path: path.to_string(),
@@ -356,6 +369,7 @@ impl Gateway {
         }
         let removed = cat.remove(path).expect("checked above");
         drop(cat);
+        self.mark_catalog_dirty(path).await;
         self.persist_catalog().await?;
         Ok(RmdirResult {
             path: path.to_string(),
@@ -435,12 +449,16 @@ impl Gateway {
             }
         }
         let count = moved.len();
+        let mut dirty_names: Vec<String> = Vec::with_capacity(moved.len() * 2);
         for (from, to, manifest) in moved {
             cat.remove(&from);
-            cat.insert_arc(to, manifest);
+            cat.insert_arc(to.clone(), manifest);
+            dirty_names.push(from);
+            dirty_names.push(to);
         }
         drop(cat);
         self.invalidate_cache(old).await;
+        self.mark_catalog_dirty_many(dirty_names).await;
         self.persist_catalog().await?;
         Ok(RenameResult {
             old: old.to_string(),

@@ -392,6 +392,7 @@ impl Gateway {
             cat.insert(name.to_string(), manifest);
         }
         self.invalidate_cache(name).await;
+        self.mark_catalog_dirty(name).await;
         self.persist_catalog().await?;
         Ok(IngestResult {
             name: name.to_string(),
@@ -505,6 +506,7 @@ impl Gateway {
             .await
             .insert(name.to_string(), manifest);
         self.invalidate_cache(name).await;
+        self.mark_catalog_dirty(name).await;
         self.persist_catalog().await?;
         Ok(IngestResult {
             name: name.to_string(),
@@ -755,6 +757,7 @@ impl Gateway {
                 cat.insert(name.clone(), real);
                 drop(cat);
                 self.invalidate_cache(&name).await;
+                self.mark_catalog_dirty(name.clone()).await;
                 if let Err(e) = self.persist_catalog().await {
                     eprintln!(
                         "PUT-async {name}: encode ok but catalog persist failed: {e:?}"
@@ -774,6 +777,7 @@ impl Gateway {
                 }
                 drop(cat);
                 self.invalidate_cache(&name).await;
+                self.mark_catalog_dirty(name.clone()).await;
                 let _ = self.persist_catalog().await;
                 self.metrics.encode_failed_total.fetch_add(1, Ordering::Relaxed);
 

@@ -241,9 +241,28 @@ pub struct Gateway {
     // itself stays `pub`; the fields don't leak outside the crate
     // boundary.
     pub(crate) catalog: Arc<RwLock<Directory>>,
-    /// Optional path to the catalog file. If set, the catalog is saved
-    /// atomically on each change (PUT/DELETE).
+    /// Optional path to the catalog file. Kept only so callers that
+    /// still ask "where does the catalog live?" can answer; actual
+    /// persistence goes through [`Self::catalog_store`] when set.
+    /// `None` on the in-memory `Gateway::new` path (tests / ephemeral
+    /// dev).
     pub(crate) catalog_path: Option<std::path::PathBuf>,
+    /// Redb-backed persistence layer. When `Some`, catalog mutations
+    /// mark names dirty via [`Self::mark_catalog_dirty`], and
+    /// [`Self::persist_catalog`] flushes only the touched entries
+    /// (upsert or remove) inside one redb write transaction. When
+    /// `None`, `persist_catalog` is a no-op — matches the pre-redb
+    /// in-memory `Gateway::new` path.
+    pub(crate) catalog_store: Option<Arc<crate::catalog_store::CatalogStore>>,
+    /// Names touched since the last successful [`Self::persist_catalog`]
+    /// flush. Under the group-commit ticket dance the leader drains a
+    /// snapshot of this set, resolves each name against `catalog`
+    /// (present → upsert, absent → remove), and applies the batch to
+    /// `catalog_store`. Mutators call [`Self::mark_catalog_dirty`]
+    /// after every catalog mutation; persist_catalog trims the set
+    /// only on a successful apply_batch so failed writes retry on the
+    /// next round instead of silently losing the mark.
+    pub(crate) dirty_names: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     /// optional semantic-search embeddings index. `None`
     /// when the server was started without `--enable-embed`. When set,
     /// every PUT fires a fire-and-forget background task that embeds
@@ -385,11 +404,16 @@ impl Gateway {
         live: Arc<LiveNodes>,
         cluster: Arc<ClusterInfo>,
     ) -> Arc<Self> {
-        Self::build(gf, catalog, live, cluster, None)
+        Self::build(gf, catalog, live, cluster, None, None)
     }
 
     /// Same as [`Self::new`] but with a catalog file path: every PUT/DELETE
-    /// persists atomically via [`Self::persist_catalog`].
+    /// persists via [`Self::persist_catalog`]. When
+    /// `catalog_store` is provided (the production path constructed
+    /// via [`bootstrap`](../../holofs_web/bootstrap/index.html)),
+    /// mutations flush to redb; otherwise this constructor is
+    /// equivalent to [`Self::new`] with a `catalog_path` label
+    /// attached for diagnostics.
     pub fn new_persistent(
         gf: Arc<Gf>,
         catalog: Arc<RwLock<Directory>>,
@@ -397,7 +421,31 @@ impl Gateway {
         cluster: Arc<ClusterInfo>,
         catalog_path: std::path::PathBuf,
     ) -> Arc<Self> {
-        Self::build(gf, catalog, live, cluster, Some(catalog_path))
+        Self::build(gf, catalog, live, cluster, Some(catalog_path), None)
+    }
+
+    /// Full-fat persistent constructor: pass an already-open
+    /// [`CatalogStore`](crate::catalog_store::CatalogStore) so
+    /// [`Self::persist_catalog`] flushes touched entries into redb.
+    /// Bootstrap calls this after running
+    /// [`crate::catalog_store::migrate_legacy_if_present`] and
+    /// populating the in-memory catalog from the store.
+    pub fn new_with_catalog_store(
+        gf: Arc<Gf>,
+        catalog: Arc<RwLock<Directory>>,
+        live: Arc<LiveNodes>,
+        cluster: Arc<ClusterInfo>,
+        catalog_path: std::path::PathBuf,
+        catalog_store: Arc<crate::catalog_store::CatalogStore>,
+    ) -> Arc<Self> {
+        Self::build(
+            gf,
+            catalog,
+            live,
+            cluster,
+            Some(catalog_path),
+            Some(catalog_store),
+        )
     }
 
     /// Single-source-of-truth constructor. Both `new` and
@@ -412,11 +460,14 @@ impl Gateway {
         live: Arc<LiveNodes>,
         cluster: Arc<ClusterInfo>,
         catalog_path: Option<std::path::PathBuf>,
+        catalog_store: Option<Arc<crate::catalog_store::CatalogStore>>,
     ) -> Arc<Self> {
         let n = cluster.node_addrs.len();
         Arc::new(Self {
             catalog,
             catalog_path,
+            catalog_store,
+            dirty_names: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             embed: Arc::new(Mutex::new(EmbedState::default())),
             versions: Arc::new(Mutex::new(VersionsState::default())),
             gc_barrier: Arc::new(RwLock::new(())),
@@ -682,26 +733,73 @@ impl Gateway {
             .collect()
     }
 
-    /// Atomically persist the catalog to disk. `Ok(())` on success or
-    /// when Gateway was built without a catalog path (`new` instead of
-    /// `new_persistent`) — no-op is treated as success. On IO error
-    /// this now bumps `catalog_persist_failures_total` and surfaces
+    /// Mark a catalog name as dirty — pending flush by the next
+    /// [`Self::persist_catalog`] call. Mutation paths call this
+    /// *after* they touch the catalog (insert or remove); the
+    /// resolver in `persist_catalog` looks the name up against the
+    /// in-memory catalog and either upserts the current manifest or
+    /// removes the key.
+    ///
+    /// Cheap: one `Mutex<HashSet<String>>` insert. In-memory-only
+    /// gateways (no `catalog_store`) skip the mark to avoid an
+    /// unbounded growth on tests that don't persist.
+    pub(crate) async fn mark_catalog_dirty(&self, name: impl Into<String>) {
+        if self.catalog_store.is_none() {
+            return;
+        }
+        self.dirty_names.lock().await.insert(name.into());
+    }
+
+    /// Mark many names at once. Same semantics as
+    /// [`Self::mark_catalog_dirty`] but takes one lock for the whole
+    /// batch — handy for `rmdir` / `rename` / `batch_delete` where
+    /// a single mutation touches N sibling entries.
+    pub(crate) async fn mark_catalog_dirty_many(
+        &self,
+        names: impl IntoIterator<Item = String>,
+    ) {
+        if self.catalog_store.is_none() {
+            return;
+        }
+        self.dirty_names.lock().await.extend(names);
+    }
+
+    /// Flush the catalog to persistent storage. `Ok(())` on success
+    /// or when Gateway was built without a `catalog_store` (in-memory
+    /// tests / dev via `Gateway::new`) — no-op is treated as success.
+    ///
+    /// On IO / redb error this bumps
+    /// `catalog_persist_failures_total` and surfaces
     /// `GatewayError::Persist` to the caller (N4). Every writer path
     /// (ingest / mkdir / rmdir / rename / remove / restore /
     /// delete_version / repair_object_inplace) must propagate the
     /// Err so operators get an immediate 500 rather than a silent
     /// disk-full incident that a restart later exposes as lost data.
+    ///
+    /// **Post-P0.1c**: the pre-redb implementation re-encoded the
+    /// whole `Directory` and wrote it via `write_atomic` on every
+    /// flush — O(M) per flush plus a single-file corruption point.
+    /// This one is O(dirty) per flush: it drains a snapshot of
+    /// [`Self::dirty_names`] under the persist_flush_mutex, resolves
+    /// each entry against the in-memory catalog, and applies the
+    /// upserts+removes atomically inside one redb write transaction.
+    /// The group-commit ticket dance (see
+    /// [`Metrics::persist_dirty_epoch`]) is preserved so N
+    /// concurrent mutators still coalesce onto one flush leader.
     pub async fn persist_catalog(&self) -> Result<(), crate::error::GatewayError> {
         use std::sync::atomic::Ordering;
-        let Some(path) = &self.catalog_path else {
+        let Some(store) = &self.catalog_store else {
+            // In-memory Gateway (`Gateway::new`) — no persistence.
             return Ok(());
         };
+
         // Ticket: bump ONCE per caller — represents "there is a
         // mutation at least as recent as ticket N that needs to
-        // reach disk". Callers get their ticket AFTER their catalog
-        // mutation commits (they call persist_catalog last), so any
-        // ticket ≤ current dirty_epoch is guaranteed observable in
-        // the catalog at the moment we hold `persist_flush_mutex`.
+        // reach disk". Callers get their ticket AFTER
+        // `mark_catalog_dirty` has recorded their touched name, so
+        // any ticket ≤ current dirty_epoch is guaranteed observable
+        // in `dirty_names` at the moment we hold
+        // `persist_flush_mutex`.
         let my_ticket = self.metrics.persist_dirty_epoch.fetch_add(1, Ordering::AcqRel) + 1;
 
         // Fast path: an earlier flush already covers our mutation.
@@ -720,46 +818,69 @@ impl Gateway {
             return Ok(());
         }
 
-        // Leader path: take the catalog snapshot AFTER acquiring the
-        // flush mutex so any mutation whose ticket landed before us
-        // is guaranteed to be in the snapshot. Read dirty_epoch
-        // WHILE holding the catalog lock — any concurrent mutation
-        // is blocked on catalog.lock, so the number we read matches
-        // the snapshot exactly. Publish that value to
-        // flushed_epoch after the write succeeds; followers waiting
-        // on the mutex see their ticket covered.
-        //
-        // Pre-#4 this cloned the whole Directory (O(M) BTreeMap
-        // rebuild + Arc clone per entry), then released the lock,
-        // then called `save_atomic` on the clone. The clone was
-        // technically cheap thanks to `Arc<Manifest>` (P2), but the
-        // BTreeMap itself was still walked and re-allocated. Encoding
-        // in-place under the read-lock skips the intermediate clone
-        // entirely — the read-lock is held for the encode duration
-        // (memory-only, no I/O), then dropped before the fs::write /
-        // fsync / rename in `write_atomic`.
-        let (encoded, flush_epoch) = {
+        // Snapshot dirty set + epoch under the flush mutex. Cloning
+        // (not draining) means a concurrent mutator that inserts
+        // AFTER we snapshot but BEFORE we finish redb write is
+        // preserved — its ticket will bump dirty_epoch past our
+        // flush_epoch and the next leader picks it up.
+        let flush_epoch = self.metrics.persist_dirty_epoch.load(Ordering::Acquire);
+        let dirty_snapshot: Vec<String> = {
+            let d = self.dirty_names.lock().await;
+            d.iter().cloned().collect()
+        };
+        if dirty_snapshot.is_empty() {
+            // Nothing to flush (e.g. two callers both got a ticket
+            // but a third already drained). Still publish our epoch
+            // so followers coalesce.
+            self.metrics
+                .persist_flushed_epoch
+                .store(flush_epoch, Ordering::Release);
+            return Ok(());
+        }
+
+        // Resolve each dirty name against the current in-memory
+        // catalog. Present → upsert with the freshly-encoded manifest;
+        // absent → remove key from redb. Read-lock is held for just
+        // the resolve + encode window; no I/O happens under it.
+        let (upserts, removes): (Vec<(String, Vec<u8>)>, Vec<String>) = {
             let cat = self.catalog.read().await;
-            let ep = self.metrics.persist_dirty_epoch.load(Ordering::Acquire);
-            (cat.encode(), ep)
+            let mut ups = Vec::new();
+            let mut rms = Vec::new();
+            for name in &dirty_snapshot {
+                match cat.get(name) {
+                    Some(m) => ups.push((name.clone(), m.encode())),
+                    None => rms.push(name.clone()),
+                }
+            }
+            (ups, rms)
         };
 
-        if let Err(e) = holofs_model::fs::write_atomic(path, &encoded) {
+        if let Err(e) = store.apply_batch(upserts, removes) {
             self.metrics
                 .catalog_persist_failures_total
                 .fetch_add(1, Ordering::Relaxed);
-            tracing::error!(
-                error = %e,
-                path = %path.display(),
-                "catalog persist failed"
-            );
+            tracing::error!(error = %e, path = %store.path().display(), "catalog persist failed");
+            // Failure: don't drain dirty_names, don't advance
+            // flushed_epoch. Next flush retries the same batch plus
+            // anything added since.
             return Err(crate::error::GatewayError::Persist(format!(
-                "save {}: {e}",
-                path.display()
+                "apply_batch {}: {e}",
+                store.path().display()
             )));
         }
 
-        self.metrics.persist_flushed_epoch
+        // Success: drop only the entries we snapshotted from
+        // dirty_names. Any mutation that landed AFTER the snapshot
+        // (and thus wasn't in `dirty_snapshot`) is intentionally
+        // preserved so the next leader picks it up.
+        {
+            let mut d = self.dirty_names.lock().await;
+            for name in &dirty_snapshot {
+                d.remove(name);
+            }
+        }
+        self.metrics
+            .persist_flushed_epoch
             .store(flush_epoch, Ordering::Release);
         Ok(())
     }
@@ -801,33 +922,175 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_catalog_no_path_is_ok() {
+    async fn persist_catalog_without_store_is_ok() {
+        // Post-redb: `new` / `new_persistent` without an explicit
+        // CatalogStore leave `catalog_store = None` — `persist_catalog`
+        // is a no-op that returns Ok. Nothing to fsync means nothing
+        // to fail.
         let gw = make_gw(None);
-        // No catalog_path → success, no counter bump.
         assert!(gw.persist_catalog().await.is_ok());
         assert_eq!(
             gw.metrics.catalog_persist_failures_total.load(Ordering::Relaxed),
             0
         );
+        // Same for the path-labelled variant that skips the store.
+        let bogus = std::path::PathBuf::from("/nonexistent/holofs-persist-test/catalog.bin");
+        let gw2 = make_gw(Some(bogus));
+        assert!(gw2.persist_catalog().await.is_ok());
+        assert_eq!(
+            gw2.metrics.catalog_persist_failures_total.load(Ordering::Relaxed),
+            0
+        );
     }
 
     #[tokio::test]
-    async fn persist_catalog_reports_io_error() {
-        // Point at a path whose parent doesn't exist so save_atomic
-        // fails deterministically without needing a real disk-full.
-        let bad = std::path::PathBuf::from("/nonexistent/holofs-persist-test-XYZ/catalog.bin");
-        let gw = make_gw(Some(bad));
-        let err = gw.persist_catalog().await.unwrap_err();
-        match err {
-            crate::error::GatewayError::Persist(msg) => {
-                assert!(msg.contains("catalog.bin"), "msg was {msg:?}");
-            }
-            other => panic!("expected Persist, got {other:?}"),
-        }
-        assert_eq!(
-            gw.metrics.catalog_persist_failures_total.load(Ordering::Relaxed),
-            1,
-            "counter should have incremented once"
+    async fn persist_catalog_flushes_dirty_entry_to_redb() {
+        use crate::catalog_store::CatalogStore;
+        use holofs_model::manifest::{ManifestState, ObjectEncoding, ObjectKind};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(CatalogStore::open(dir.path()).unwrap());
+
+        let gf = Arc::new(Gf::new());
+        let cat = Arc::new(RwLock::new(Directory::default()));
+        let cluster = Arc::new(ClusterInfo {
+            node_addrs: vec!["127.0.0.1:9999".into()],
+            zones: vec![0],
+            placement: Placement::Rendezvous,
+            width: 8,
+            height: 8,
+        });
+        let live: Vec<usize> = vec![0];
+        let gw = Gateway::new_with_catalog_store(
+            gf,
+            cat.clone(),
+            Arc::new(live),
+            cluster,
+            dir.path().join("catalog.bin"),
+            Arc::clone(&store),
         );
+
+        // Mutate the in-memory catalog + mark dirty + persist.
+        {
+            let mut c = cat.write().await;
+            c.insert(
+                "hello.txt".to_string(),
+                holofs_model::manifest::Manifest {
+                    object_id: 42,
+                    k: 16,
+                    nlayers: 1,
+                    n_per_layer: vec![16],
+                    sym_len: vec![64],
+                    layer_positions: vec![vec![]],
+                    channels: 1,
+                    width: 0,
+                    height: 0,
+                    levels: 0,
+                    nodes: vec![],
+                    placement: Placement::Rendezvous,
+                    zones: vec![],
+                    data_cid: [7u8; 32],
+                    merkle_root: [8u8; 32],
+                    shard_hashes: vec![vec![Vec::new()]],
+                    kind: ObjectKind::Opaque,
+                    content_type: "text/plain".into(),
+                    chunk_lens: vec![],
+                    audio_sample_rate: 0,
+                    text_minhash: vec![],
+                    created_at_unix: 0,
+                    encoding: ObjectEncoding::Rlnc,
+                    state: ManifestState::Ready,
+                },
+            );
+        }
+        gw.mark_catalog_dirty("hello.txt").await;
+        gw.persist_catalog().await.unwrap();
+
+        // Drop every handle so redb releases its exclusive file
+        // lock, then reopen on the same dir — the entry must be
+        // there without going through the running gateway.
+        drop(gw);
+        drop(store);
+        let store2 = CatalogStore::open(dir.path()).unwrap();
+        let mut recovered = Directory::new();
+        assert_eq!(store2.load_into(&mut recovered).unwrap(), 1);
+        assert!(recovered.get("hello.txt").is_some());
+    }
+
+    #[tokio::test]
+    async fn persist_catalog_removes_key_when_absent_from_memory() {
+        // Dirty tracking + resolver semantics: name marked dirty
+        // AND absent from the in-memory catalog resolves to a redb
+        // remove(). Simulates the DELETE path.
+        use crate::catalog_store::CatalogStore;
+        use holofs_model::manifest::{ManifestState, ObjectEncoding, ObjectKind};
+        use holofs_model::manifest::Manifest;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        // Seed the store with an existing entry via the raw API.
+        {
+            let seed = CatalogStore::open(dir.path()).unwrap();
+            let m = Manifest {
+                object_id: 1,
+                k: 16,
+                nlayers: 1,
+                n_per_layer: vec![16],
+                sym_len: vec![64],
+                layer_positions: vec![vec![]],
+                channels: 1,
+                width: 0,
+                height: 0,
+                levels: 0,
+                nodes: vec![],
+                placement: Placement::Rendezvous,
+                zones: vec![],
+                data_cid: [1u8; 32],
+                merkle_root: [2u8; 32],
+                shard_hashes: vec![vec![Vec::new()]],
+                kind: ObjectKind::Opaque,
+                content_type: "text/plain".into(),
+                chunk_lens: vec![],
+                audio_sample_rate: 0,
+                text_minhash: vec![],
+                created_at_unix: 0,
+                encoding: ObjectEncoding::Rlnc,
+                state: ManifestState::Ready,
+            };
+            seed.apply_batch(
+                vec![("to-delete.txt".to_string(), m.encode())],
+                std::iter::empty(),
+            )
+            .unwrap();
+        }
+        let store = Arc::new(CatalogStore::open(dir.path()).unwrap());
+        let cat = Arc::new(RwLock::new(Directory::default())); // NOTE: empty in-mem
+        let gf = Arc::new(Gf::new());
+        let cluster = Arc::new(ClusterInfo {
+            node_addrs: vec!["127.0.0.1:9999".into()],
+            zones: vec![0],
+            placement: Placement::Rendezvous,
+            width: 8,
+            height: 8,
+        });
+        let live: Vec<usize> = vec![0];
+        let gw = Gateway::new_with_catalog_store(
+            gf,
+            cat,
+            Arc::new(live),
+            cluster,
+            dir.path().join("catalog.bin"),
+            Arc::clone(&store),
+        );
+
+        // The name IS in redb but NOT in the in-memory catalog. Marking
+        // it dirty + persisting must remove it from redb.
+        gw.mark_catalog_dirty("to-delete.txt").await;
+        gw.persist_catalog().await.unwrap();
+
+        drop(gw);
+        drop(store);
+        let store2 = CatalogStore::open(dir.path()).unwrap();
+        let mut recovered = Directory::new();
+        assert_eq!(store2.load_into(&mut recovered).unwrap(), 0);
     }
 }

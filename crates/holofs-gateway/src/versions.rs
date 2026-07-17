@@ -258,6 +258,7 @@ impl Gateway {
             .await
             .insert(name.to_string(), target);
         self.invalidate_cache(name).await;
+        self.mark_catalog_dirty(name).await;
         self.persist_catalog().await?;
         Ok(RestoreResult {
             name: name.to_string(),

@@ -380,6 +380,7 @@ impl Gateway {
         let mut cat = self.catalog.write().await;
         cat.insert(name.to_string(), manifest);
         drop(cat);
+        self.mark_catalog_dirty(name).await;
         // N4: best-effort persist — the shard-side repair is complete
         // and the in-memory manifest reflects it. If disk save fails
         // (`catalog_persist_failures_total` + ERROR log fire inside

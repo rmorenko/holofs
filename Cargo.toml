@@ -124,6 +124,13 @@ async-stream = "0.3"
 futures-util = { version = "0.3", default-features = false }
 serde_json = "1"
 
+# Embedded transactional KV. Backs the incremental catalog store
+# (Phase 1 chunk 3): every catalog mutation lands in a single-entry
+# write-txn with Immediate durability, so the previous whole-file
+# `catalog.holo` rewrite per flush is replaced with a per-entry
+# copy-on-write B-tree update. Pure-Rust, MIT/Apache, zero-config.
+redb = "2"
+
 # Operational concerns — CLI parser, structured logging.
 clap = { version = "4", features = [ "derive", "env" ] }
 # TOML config file support. `toml` needs serde derive.

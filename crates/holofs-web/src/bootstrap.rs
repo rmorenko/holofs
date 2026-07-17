@@ -21,6 +21,7 @@ use holofs_codec::image_io::synth;
 use holofs_core::gf::Gf;
 use holofs_core::hash::hex;
 use holofs_core::{dims_from_env, K, NLAYERS, N_NODES};
+use holofs_gateway::catalog_store::{migrate_legacy_if_present, CatalogStore};
 use holofs_gateway::util::encode_png;
 use holofs_gateway::{ClusterInfo, Gateway};
 use holofs_model::fs::Directory;
@@ -226,7 +227,53 @@ pub async fn bootstrap_cluster(
         .catalog
         .clone()
         .unwrap_or_else(|| config.storage.join("catalog.bin"));
-    let mut directory = Directory::load_or_empty(&catalog_path)?;
+
+    // Post-P0.1c: catalog lives in redb, not in a whole-file
+    // `catalog.bin`. `catalog_path` above stays as a "where does the
+    // catalog live?" label — the actual bytes live in
+    // `<dir>/catalog.redb`.
+    //
+    // Boot sequence:
+    //   1. `migrate_legacy_if_present` — if this install still has
+    //      the old whole-file catalog next to us and no redb yet,
+    //      one-shot replay of the legacy entries into a fresh redb
+    //      and rename the legacy file to `.migrated-<epoch>` as a
+    //      safety backup. Idempotent.
+    //   2. Open the redb, replay every persisted entry into a fresh
+    //      in-memory `Directory`.
+    //   3. Async-ingest recovery + missing-directory synthesis run
+    //      against that Directory; each mutation writes just the
+    //      touched entries back to redb (no whole-catalog rewrites
+    //      anywhere in the boot path).
+    let catalog_dir = catalog_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| config.storage.clone());
+    // Also honour the legacy filename callers may have configured
+    // via `--catalog <path>/catalog.bin`. If a `catalog.bin` sits
+    // next to the redb, treat it the same as `catalog.holo`.
+    let legacy_bin = catalog_dir.join("catalog.bin");
+    if legacy_bin.exists() && !catalog_dir.join("catalog.holo").exists() {
+        let holo = catalog_dir.join("catalog.holo");
+        std::fs::rename(&legacy_bin, &holo).ok();
+    }
+    if let Some(backup) = migrate_legacy_if_present(&catalog_dir)
+        .map_err(|e| anyhow::anyhow!("catalog migration failed: {e}"))?
+    {
+        info!(
+            backup = %backup.display(),
+            "catalog: migrated legacy catalog.holo → catalog.redb (legacy file backed up)"
+        );
+    }
+    let catalog_store = std::sync::Arc::new(
+        CatalogStore::open(&catalog_dir)
+            .map_err(|e| anyhow::anyhow!("catalog store open: {e}"))?,
+    );
+    let mut directory = Directory::new();
+    let loaded = catalog_store
+        .load_into(&mut directory)
+        .map_err(|e| anyhow::anyhow!("catalog store load: {e}"))?;
+
     // Async-ingest recovery: any manifest still marked `Encoding` at
     // boot time is from an in-flight PUT that lost its worker to a
     // process restart. Downgrade to `Failed` so reads treat it as
@@ -234,36 +281,49 @@ pub async fn bootstrap_cluster(
     // next unclean shutdown doesn't chain-corrupt the same entries.
     {
         use holofs_model::manifest::ManifestState;
-        let mut promoted = 0usize;
-        for arc in directory.entries.values_mut() {
+        let mut promoted_names: Vec<(String, Vec<u8>)> = Vec::new();
+        for (name, arc) in directory.entries.iter_mut() {
             if arc.state == ManifestState::Encoding {
                 std::sync::Arc::make_mut(arc).state = ManifestState::Failed;
-                promoted += 1;
+                promoted_names.push((name.clone(), arc.encode()));
             }
         }
-        if promoted > 0 {
+        if !promoted_names.is_empty() {
+            let count = promoted_names.len();
             info!(
-                count = promoted,
+                count,
                 "async-ingest recovery: marked orphaned Encoding manifests as Failed"
             );
-            directory.save_atomic(&catalog_path)?;
+            catalog_store
+                .apply_batch(promoted_names, std::iter::empty())
+                .map_err(|e| anyhow::anyhow!("catalog boot-recovery persist: {e}"))?;
         }
     }
     // migration: legacy catalogs stored objects under nested keys
     // (`docs/note.txt`) but never wrote explicit `Directory` markers. The
     // new tree-shaped UI requires markers for every prefix, so fill in
     // anything missing and persist before the gateway opens for traffic.
+    // synthesize_missing_directories mutates in place; we re-persist
+    // by walking the whole tree once (one-shot cost, only fires on
+    // legacy catalogs).
     let synthesized = directory.synthesize_missing_directories();
     if synthesized > 0 {
         info!(
             count = synthesized,
             "synthesized missing directory markers for legacy catalog"
         );
-        directory.save_atomic(&catalog_path)?;
+        let batch: Vec<(String, Vec<u8>)> = directory
+            .entries
+            .iter()
+            .map(|(n, m)| (n.clone(), m.encode()))
+            .collect();
+        catalog_store
+            .apply_batch(batch, std::iter::empty())
+            .map_err(|e| anyhow::anyhow!("catalog synthesize persist: {e}"))?;
     }
     info!(
-        path = %catalog_path.display(),
-        objects = directory.len(),
+        path = %catalog_store.path().display(),
+        objects = loaded,
         "catalog loaded"
     );
 
@@ -298,12 +358,13 @@ pub async fn bootstrap_cluster(
         width: w,
         height: h,
     });
-    let mut gateway = Gateway::new_persistent(
+    let mut gateway = Gateway::new_with_catalog_store(
         Arc::clone(&gf),
         Arc::clone(&catalog),
         Arc::new(live),
         cluster_info,
         catalog_path.clone(),
+        Arc::clone(&catalog_store),
     );
     // N3: apply env-configured backpressure caps before anything else
     // gets an Arc handle. `Arc::get_mut` succeeds only while the
